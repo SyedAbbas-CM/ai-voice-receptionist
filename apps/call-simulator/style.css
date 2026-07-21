@@ -1,0 +1,73 @@
+:root {
+  --bg: #0e1014;
+  --panel: #161a21;
+  --border: #242a33;
+  --text: #e8ecf1;
+  --muted: #8a93a6;
+  --accent: #6ea8ff;
+  --user: #8be9a8;
+  --assistant: #6ea8ff;
+  --tool: #d2a85e;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+header {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+h1 { font-size: 18px; margin: 0; font-weight: 500; }
+.config { color: var(--muted); font-size: 12px; font-family: monospace; }
+main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+.controls { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 8px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+#record-btn:not(:disabled) { background: #2a3140; }
+#record-btn.recording { background: #c93c4b; border-color: #c93c4b; }
+.status { color: var(--muted); font-size: 13px; margin-left: auto; font-family: monospace; }
+.text-input { display: flex; gap: 8px; margin-bottom: 16px; }
+.text-input.hidden { display: none; }
+#text-input {
+  flex: 1;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  min-height: 200px;
+}
+.panel h2 { font-size: 13px; color: var(--muted); margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+.panel h2 + pre, .panel pre + h2 { margin-top: 16px; }
+.transcript { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
+.turn { padding: 8px 12px; border-radius: 6px; font-size: 14px; line-height: 1.45; max-width: 90%; }
+.turn .role { font-size: 11px; text-transform: uppercase; opacity: 0.6; margin-bottom: 4px; letter-spacing: 0.05em; }
+.turn.user { background: #1c2a22; color: var(--user); align-self: flex-end; }
+.turn.assistant { background: #1a2230; color: var(--assistant); align-self: flex-start; }
+.turn.tool { background: #2a2418; color: var(--tool); font-family: monospace; font-size: 12px; align-self: stretch; }
+pre { background: #0b0e13; border: 1px solid var(--border); padding: 10px; border-radius: 6px; font-size: 12px; overflow: auto; white-space: pre-wrap; max-height: 240px; }

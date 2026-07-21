@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import json
+import uuid
+from pathlib import Path
+from threading import Lock
+
+from app.core.config import settings
+from app.db import SessionRow, TranscriptRow, BookingRow
+from app.db.session import SessionLocal
+from app.providers import get_llm
+from packages.core_agent import ReceptionistBrain
+from packages.integrations import build_sink_from_env, build_tools_for_vertical
+from packages.integrations.calendar_factory import build_calendar
+from packages.schemas import (
+    BusinessProfile,
+    CallState,
+    TranscriptTurn,
+    TurnRole,
+)
+
+
+_brains: dict[str, ReceptionistBrain] = {}
+_states: dict[str, CallState] = {}
+_lock = Lock()
+_business_cache: BusinessProfile | None = None
+_calendar_cache = None
+_sink_cache = None
+
+
+def load_business() -> BusinessProfile:
+    global _business_cache
+    if _business_cache is None:
+        raw = json.loads(Path(settings.business_profile_path).read_text())
+        _business_cache = BusinessProfile(**raw)
+    return _business_cache
+
+
+def get_calendar():
+    global _calendar_cache
+    if _calendar_cache is None:
+        _calendar_cache = build_calendar(settings.calendar_backend, settings)
+    return _calendar_cache
+
+
+def get_sink():
+    global _sink_cache
+    if _sink_cache is None:
+        _sink_cache = build_sink_from_env(settings.crm_sink, settings)
+    return _sink_cache
+
+
+_pii_redactor_cache = None
+
+
+def _get_pii_redactor():
+    """Lazy singleton — swap-able via settings.pii_redactor (noop|regex|presidio)."""
+    global _pii_redactor_cache
+    if _pii_redactor_cache is None:
+        from packages.compliance import build_pii_redactor
+        _pii_redactor_cache = build_pii_redactor(
+            kind=getattr(settings, "pii_redactor", None) or "regex"
+        )
+    return _pii_redactor_cache
+
+
+_retriever_cache = None
+
+
+def _get_retriever():
+    """Lazy singleton RAG retriever. Returns None if RAG is disabled or the
+    backend fails to init — the brain then just doesn't get lookup_answer."""
+    global _retriever_cache
+    if _retriever_cache is not None:
+        return _retriever_cache
+    kind = (getattr(settings, "rag_retriever", None) or "sqlite").lower()
+    if kind == "noop" or kind == "":
+        return None
+    try:
+        from packages.rag import build_retriever, build_embedder
+        embedder = build_embedder(
+            kind=getattr(settings, "rag_embedder", None) or "local"
+        )
+        _retriever_cache = build_retriever(kind, embedder=embedder)
+        return _retriever_cache
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("RAG retriever init failed: %s", e)
+        return None
+
+
+def _new_brain(business: BusinessProfile) -> ReceptionistBrain:
+    llm = get_llm()
+    retriever = _get_retriever()
+    tools, handler = build_tools_for_vertical(
+        business,
+        get_calendar(),
+        retriever=retriever,
+        shaper_llm=llm if retriever is not None else None,
+        confidence_threshold=getattr(settings, "rag_confidence_threshold", 0.7),
+    )
+    return ReceptionistBrain(llm=llm, business=business, tools=tools, tool_handler=handler)
+
+
+def start_session() -> tuple[CallState, ReceptionistBrain]:
+    return start_session_with_id(f"sess_{uuid.uuid4().hex[:12]}")
+
+
+def start_session_with_id(session_id: str) -> tuple[CallState, ReceptionistBrain]:
+    business = load_business()
+    state = CallState(session_id=session_id, business_id=business.id)
+    brain = _new_brain(business)
+    with _lock:
+        _states[session_id] = state
+        _brains[session_id] = brain
+    _persist_session(state)
+    return state, brain
+
+
+def get_session(session_id: str) -> tuple[CallState, ReceptionistBrain] | None:
+    with _lock:
+        state = _states.get(session_id)
+        brain = _brains.get(session_id)
+    if state and brain:
+        return state, brain
+    return None
+
+
+def end_session(session_id: str) -> None:
+    """Sync end. Persists final state but does NOT fire sink.on_call_end —
+    use end_session_async for that."""
+    with _lock:
+        state = _states.pop(session_id, None)
+        _brains.pop(session_id, None)
+    if state:
+        from packages.schemas import CallStatus
+        if state.status == CallStatus.ACTIVE:
+            state.status = CallStatus.COMPLETED
+        _persist_session(state, flush_transcript=True)
+
+
+async def end_session_async(session_id: str) -> None:
+    with _lock:
+        state = _states.pop(session_id, None)
+        _brains.pop(session_id, None)
+    if not state:
+        return
+    from packages.schemas import CallStatus
+    if state.status == CallStatus.ACTIVE:
+        state.status = CallStatus.COMPLETED
+    _persist_session(state, flush_transcript=True)
+    try:
+        await get_sink().on_call_end(state)
+    except Exception:
+        pass
+
+
+def _persist_session(state: CallState, flush_transcript: bool = True) -> None:
+    db = SessionLocal()
+    try:
+        row = db.get(SessionRow, state.session_id)
+        if row is None:
+            row = SessionRow(
+                id=state.session_id,
+                business_id=state.business_id,
+                status=state.status.value if hasattr(state.status, "value") else state.status,
+                started_at=state.started_at,
+            )
+            db.add(row)
+        row.status = state.status.value if hasattr(state.status, "value") else state.status
+        row.ended_at = state.ended_at
+        row.extracted = state.extracted.model_dump() if state.extracted else None
+        row.escalation_reason = state.escalation_reason
+
+        if flush_transcript:
+            redactor = _get_pii_redactor()
+            existing = db.query(TranscriptRow).filter_by(session_id=state.session_id).count()
+            for turn in state.transcript[existing:]:
+                # PII redaction on text + structured tool args/results before
+                # they hit SQLite. Never persist raw phone/card/SSN.
+                redacted_text = redactor.redact_text(turn.text or "").text
+                redacted_args = None
+                redacted_result = None
+                if turn.tool_args:
+                    redacted_args, _ = redactor.redact_dict(turn.tool_args)
+                if turn.tool_result:
+                    redacted_result, _ = redactor.redact_dict(turn.tool_result)
+                db.add(TranscriptRow(
+                    session_id=state.session_id,
+                    role=turn.role.value,
+                    text=redacted_text,
+                    timestamp=turn.timestamp,
+                    tool_name=turn.tool_name,
+                    tool_args=redacted_args,
+                    tool_result=redacted_result,
+                ))
+        db.commit()
+    finally:
+        db.close()
+
+
+BOOKING_TOOL_NAMES = {"book_appointment", "book_reservation", "book_viewing"}
+
+
+def persist_booking_from_tool(state: CallState, tool_payload: dict) -> None:
+    """If any vertical's booking tool call succeeded, write a BookingRow."""
+    if tool_payload.get("name") not in BOOKING_TOOL_NAMES:
+        return
+    result = tool_payload.get("result") or {}
+    if not result.get("booked"):
+        return
+    event = result.get("event") or {}
+    args = tool_payload.get("arguments") or {}
+    from datetime import datetime as _dt
+    db = SessionLocal()
+    try:
+        db.add(BookingRow(
+            id=event.get("id") or f"bkg_{uuid.uuid4().hex[:12]}",
+            session_id=state.session_id,
+            business_id=state.business_id,
+            caller_name=args.get("caller_name", ""),
+            phone=args.get("phone", ""),
+            service=args.get("service") or args.get("property_ref") or f"party_of_{args.get('party_size', '?')}",
+            scheduled_for=_dt.fromisoformat(event["start"]) if event.get("start") else _dt.utcnow(),
+            duration_minutes=30,
+            status="confirmed",
+            notes=args.get("notes"),
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+async def run_greeting(state: CallState, brain: ReceptionistBrain) -> str:
+    result = await brain.greet(state)
+    _persist_session(state)
+    return result.reply
+
+
+async def run_user_turn(state: CallState, brain: ReceptionistBrain, user_text: str) -> dict:
+    result = await brain.handle_user_turn(state, user_text)
+    sink = get_sink()
+    for tool_payload in result.tool_results:
+        persist_booking_from_tool(state, tool_payload)
+        if tool_payload.get("name") in BOOKING_TOOL_NAMES and (tool_payload.get("result") or {}).get("booked"):
+            try:
+                await sink.on_booking(state, tool_payload)
+            except Exception:
+                pass
+    _persist_session(state)
+    return {
+        "reply": result.reply,
+        "extracted": state.extracted.model_dump(),
+        "tool_results": result.tool_results,
+        "escalated": result.escalated,
+        "status": state.status.value if hasattr(state.status, "value") else state.status,
+    }
+
+
+# Convenience alias used in route imports
+_ = TranscriptTurn, TurnRole

@@ -1,0 +1,32 @@
+{
+  "id": "demo-realestate-001",
+  "name": "Harbor Realty Group",
+  "vertical": "real_estate",
+  "timezone": "America/New_York",
+  "hours": {
+    "monday": "09:00-19:00",
+    "tuesday": "09:00-19:00",
+    "wednesday": "09:00-19:00",
+    "thursday": "09:00-19:00",
+    "friday": "09:00-19:00",
+    "saturday": "10:00-17:00",
+    "sunday": "12:00-16:00"
+  },
+  "services": [
+    { "name": "Viewing", "duration_minutes": 45, "description": "In-person property viewing with an agent" },
+    { "name": "Virtual tour", "duration_minutes": 30, "description": "Live video walkthrough with an agent" },
+    { "name": "Buyer consultation", "duration_minutes": 60, "description": "Initial consultation with a buyer's agent — needs, budget, timeline" },
+    { "name": "Seller consultation", "duration_minutes": 60, "description": "Home valuation and listing strategy meeting" }
+  ],
+  "faqs": {
+    "commission": "Standard buyer's-agent commission is 2.5%, paid by the seller in most cases.",
+    "financing": "We work with three preferred lenders and can send a pre-approval intro on request.",
+    "areas served": "We cover Downtown, Riverside, and the East Bay neighborhoods.",
+    "listings": "Current listings are at harborrealty.com/listings — I can also SMS you a filtered list.",
+    "school district": "I can look up school ratings for a specific address, but our agents don't rank them ourselves.",
+    "closing timeline": "Typical closing in this market is 30 to 45 days from offer accepted."
+  },
+  "escalation_phone": "+1-555-030-9922",
+  "address": "220 Harbor Blvd, Downtown",
+  "voice_persona": "professional, curious, gathers qualifying detail without being pushy"
+}

@@ -1,0 +1,41 @@
+{
+  "id": "cedar-ridge-dental-001",
+  "name": "Cedar Ridge Family Dental",
+  "vertical": "clinic",
+  "timezone": "America/Chicago",
+  "hours": {
+    "monday": "07:30-17:00",
+    "tuesday": "07:30-17:00",
+    "wednesday": "07:30-17:00",
+    "thursday": "07:30-19:00",
+    "friday": "07:30-15:00",
+    "saturday": "08:00-13:00",
+    "sunday": null
+  },
+  "services": [
+    { "name": "New patient exam with X-rays", "duration_minutes": 60, "description": "Comprehensive first visit with Dr. Chen or Dr. Whitfield, includes full X-ray series. One eighty nine dollars." },
+    { "name": "Adult cleaning", "duration_minutes": 45, "description": "Routine cleaning with Rosa Delgado, our lead hygienist. One thirty five dollars." },
+    { "name": "Composite filling", "duration_minutes": 45, "description": "Tooth-colored filling, price varies by number of surfaces. Starts at two forty five dollars." },
+    { "name": "Zoom whitening", "duration_minutes": 90, "description": "In-office whitening treatment. Five forty nine dollars." },
+    { "name": "Invisalign consultation", "duration_minutes": 45, "description": "Ortho consultation with Dr. Ramanathan. Free consult; full treatment starts around four thousand eight ninety five." },
+    { "name": "Implant consultation", "duration_minutes": 60, "description": "Single implant plus crown starts at four thousand two fifty." },
+    { "name": "Emergency exam", "duration_minutes": 30, "description": "Limited exam for pain or trauma, same-day or next-day. One fifteen dollars." },
+    { "name": "Pediatric first visit", "duration_minutes": 45, "description": "First dental visit for kids under twelve with Dr. Whitfield." }
+  ],
+  "faqs": {
+    "insurance": "We're in-network with Delta Dental PPO, Cigna DPPO, and Blue Cross Blue Shield of Texas Dental. We also work with United Concordia for military families.",
+    "new patient": "New patients should arrive fifteen minutes early to fill out intake forms. Please bring a photo ID and your insurance card. You can also fill out forms online before your visit.",
+    "hours": "We're open Monday through Wednesday from seven thirty to five, Thursday until seven, Friday from seven thirty to three, and Saturday from eight to one.",
+    "parking": "Free parking is available in the lot next to the building, entrance off Coit Road.",
+    "location": "We're at twenty eight forty seven Coit Road, Suite two ten, in Plano.",
+    "cancellation": "We ask for twenty four hours notice for cancellations. Same-day cancellations may incur a twenty five dollar fee.",
+    "kids": "Yes, we see children of all ages. Dr. Whitfield is our pediatric specialist and works great with kids as young as two or three.",
+    "payment plans": "We offer in-house payment plans for treatment plans over one thousand dollars, and we accept CareCredit financing.",
+    "invisalign": "Dr. Ramanathan does all our Invisalign treatments. The consultation is free, and full treatment is around four thousand eight ninety five, with payment plans available.",
+    "emergency": "For dental emergencies during business hours, call us and we'll get you in same-day if possible. After hours, Dr. Chen is on call — the after-hours line is nine seven two, five five five, zero one nine two.",
+    "spanish": "Yes, Rosa our lead hygienist is fully bilingual, and we can schedule you with her if you'd prefer to be seen by a Spanish-speaking provider."
+  },
+  "escalation_phone": "+1-972-555-0192",
+  "address": "2847 Coit Road, Suite 210, Plano, Texas 75093",
+  "voice_persona": "Warm and professional, like a receptionist who's worked at the practice for five years. Slightly Texas-friendly but not exaggerated. Knows the doctors by first name. Reassuring on emergencies, efficient on routine bookings. Never rushes patients but doesn't waste their time either."
+}

@@ -1,0 +1,32 @@
+{
+  "id": "demo-clinic-001",
+  "name": "Riverside Family Clinic",
+  "vertical": "clinic",
+  "timezone": "America/New_York",
+  "hours": {
+    "monday": "09:00-17:00",
+    "tuesday": "09:00-17:00",
+    "wednesday": "09:00-17:00",
+    "thursday": "09:00-19:00",
+    "friday": "09:00-15:00",
+    "saturday": "10:00-13:00",
+    "sunday": null
+  },
+  "services": [
+    { "name": "General consultation", "duration_minutes": 30, "description": "Standard 30-minute visit with a general practitioner" },
+    { "name": "Follow-up", "duration_minutes": 15, "description": "Quick follow-up for an existing patient" },
+    { "name": "Physical exam", "duration_minutes": 45, "description": "Full annual physical" },
+    { "name": "Back pain consult", "duration_minutes": 30, "description": "Initial back/musculoskeletal evaluation" },
+    { "name": "Vaccination", "duration_minutes": 15, "description": "Routine vaccinations" }
+  ],
+  "faqs": {
+    "insurance": "We accept most major insurance plans including Aetna, Blue Cross Blue Shield, Cigna, and UnitedHealthcare. Please bring your card to your first visit.",
+    "parking": "Free patient parking is available in the lot behind the building, accessible from Maple Street.",
+    "new patient": "New patients should arrive 15 minutes early to complete intake forms. Please bring a photo ID and your insurance card.",
+    "prescription refill": "For prescription refills, please contact your pharmacy directly and they will send us a refill request.",
+    "cancellation": "We ask for 24 hours notice for cancellations. Same-day cancellations may incur a $25 fee."
+  },
+  "escalation_phone": "+1-555-010-2244",
+  "address": "412 Maple Street, Springfield",
+  "voice_persona": "warm, professional, concise, reassuring"
+}

@@ -1,0 +1,1333 @@
+{
+  "name": "SubtoDealz - Official",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -2120,
+        220
+      ],
+      "name": "Loop Over Leads",
+      "id": "c749c1ce-3a4e-4380-87de-80a23076e9a8",
+      "executeOnce": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -1700,
+        20
+      ],
+      "id": "ab95ee76-8c10-49e3-8d88-9927ea1be9b0",
+      "name": "No Operation, do nothing"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convert current UTC time to Florida (Eastern Time)\nconst now = new Date();\nconst floridaTime = new Date(now.toLocaleString(\"en-US\", { timeZone: \"America/New_York\" }));\n\nconst day = floridaTime.getDay(); // 0 = Sunday, 6 = Saturday\nconst hour = floridaTime.getHours();\n\n// Check if current time is within Florida business hours (Mon–Fri, 9 AM–6 PM)\nconst isBusinessHours = (day >= 1 && day <= 5) && (hour >= 9 && hour < 18);\n\n// Helper function to calculate hour difference between two dates\nfunction hoursBetween(date1, date2) {\n  return Math.abs((date1 - date2) / (1000 * 60 * 60));\n}\n\n// Get all leads from previous node (Google Sheet1)\nconst allLeads = $input.all();\n\n// Filter leads according to your conditions\nconst filteredLeads = allLeads.filter(item => {\n  const lead = item.json;\n\n  // 1️⃣ Must be within Florida business hours\n  if (!isBusinessHours) return false;\n\n  // 2️⃣ Skip if lead has already been called\n  const status = (lead.Status || \"\").toLowerCase();\n  if (status.includes(\"ended\") || status.includes(\"completed\") || status.includes(\"answered\"))\n    return false;\n\n  // 3️⃣ Skip if lead was called within last 24 hours\n  if (lead[\"Last Called\"]) {\n    const lastCalled = new Date(lead[\"Last Called\"]);\n    const hoursSinceLastCall = hoursBetween(floridaTime, lastCalled);\n    if (hoursSinceLastCall < 24) return false;\n  }\n\n  // 4️⃣ Skip if total calls (tracked in Notes or separate field) ≥ 3\n  let callCount = 0;\n  const total_calls = (lead['Total Calls'] || \"\").toLowerCase();\n  const match = total_calls.match(/call\\s*count\\s*[:=]?\\s*(\\d+)/);\n\n  if (match) {\n    callCount = parseInt(match[1]);\n  } else if (total_calls.includes(\"called\")) {\n    // crude fallback: count keyword \"called\" occurrences\n    callCount = (total_calls.match(/called/g) || []).length;\n  }\n\n  if (callCount >= 3) return false;\n\n  // ✅ If all checks passed, include the lead\n  return true;\n});\n\n// Return leads that pass all conditions\nreturn filteredLeads.map(lead => ({\n  json: {\n    ...lead.json,\n    businessHours: isBusinessHours,\n    currentTime: floridaTime.toISOString(),\n    message: \"Lead passed all filters — within Florida business hours\"\n  }\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2500,
+        220
+      ],
+      "name": "Complete Filtration",
+      "id": "498d6b57-3471-4a53-92ce-24b4351e5665"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=# LEAD CLASSIFICATION SYSTEM PROMPT (UPDATED & FIXED)\n\n## YOUR ROLE\nYou are a Lead Classification Specialist. You will receive call transcript data in JSON format:\n\"{{ $('VAPI - Get Call Result1').item.json.transcript }}\"\n\nYour task is to analyze the transcript and output ONLY ONE WORD representing the lead classification.\n\n## LEAD CLASSIFICATION CATEGORIES\n1. HOT_LEAD – User clearly expressed interest in seller financing  \n2. COLD_LEAD – User clearly rejected seller financing  \n3. PROPERTY_UNAVAILABLE – Property is rented/sold/off-market  \n4. NO_ANSWER – User gave no meaningful response or remained silent after seller-financing pitch  \n5. CALLBACK_REQUESTED – User asked to be contacted later or via email/text  \n\n## DECISION TREE\n\n### STEP 1 — Did a real conversation occur?\nClassify as **NO_ANSWER** if:\n- Transcript is empty  \n- Only AI spoke / no user responses  \n- Call duration < 15 seconds  \n- endedReason is \"no-answer\" or \"voicemail\"  \n- User never meaningfully engaged  \n\n### STEP 2 — Property availability\nIf the user says:\n- “It’s rented”  \n- “It’s sold”  \n- “It’s taken”  \n- “Not available”  \n- “Off the market”  \n→ **PROPERTY_UNAVAILABLE**\n\n### STEP 3 — Callback requests\nIf user says:\n- “Call me back”  \n- “Later”  \n- “I’m busy”  \n- “Email me”  \n- “Text me instead”  \n→ **CALLBACK_REQUESTED**\n\n### STEP 4 — Seller Financing Response (CRITICAL)\nFind where the AI mentions:\n- “seller financing”  \n- “act as the lender/bank”  \n- “carry the financing”  \n\nThen examine the **VERY NEXT user response**.\n\n#### A. Silence or no response after seller financing → **ALWAYS NO_ANSWER**\nThis includes:\n- No lines from the user after the pitch  \n- Call ends due to silence  \n- User never verbally responds  \n- System idle messages but no user reply  \n\n#### B. HOT_LEAD (spoken interest only)\nExamples:\n- “Yes”, “Sure”, “Okay”, “Alright”, “Yeah”  \n- “Maybe”, “Tell me more”, “I’m interested”  \n- “That sounds good”, “Send me information”  \n- Any verbal neutral/positive/curious spoken response  \n\n**Silence NEVER counts as interest.**\n\n#### C. COLD_LEAD (spoken rejection)\nExamples:\n- “No”  \n- “No thanks”  \n- “Not interested”  \n- “That’s not for me”  \n- “I don’t want that”  \n- User hangs up immediately after pitch  \n\n#### D. Neutral / unrelated response with no interest → COLD_LEAD\nExamples:\n- Off-topic responses  \n- Random chatter  \n- Confusion with no follow-up interest  \n\n#### E. If seller financing was never reached → **NO_ANSWER**\n\n## CRITICAL RULES (UPDATED)\n1. Silence after seller financing = **NO_ANSWER**  \n2. HOT_LEAD requires a verbal response  \n3. PROPERTY_UNAVAILABLE overrides everything  \n4. CALLBACK beats everything except property unavailable  \n5. COLD_LEAD only applies to explicit rejection  \n\n## OUTPUT FORMAT\nOutput ONLY one word exactly:\n\nHOT_LEAD  \nCOLD_LEAD  \nPROPERTY_UNAVAILABLE  \nNO_ANSWER  \nCALLBACK_REQUESTED  \n\nNo quotes, no punctuation, no extra text.\n\n## EXAMPLES\n- User says “Yeah sure” after pitch → HOT_LEAD  \n- User says “No, not interested” → COLD_LEAD  \n- User says “It’s already rented” → PROPERTY_UNAVAILABLE  \n- User is silent after seller financing → NO_ANSWER  \n- User says “Call me back later” → CALLBACK_REQUESTED  \n\n## ANALYSIS CHECKLIST\nBefore choosing classification:\n1. Did the user speak?  \n2. Did user say property unavailable?  \n3. Did user request callback?  \n4. Did the call reach seller financing?  \n5. Did user verbally respond to seller financing?  \n6. Was response interest, rejection, irrelevant, or silence?  \n7. Was there silence after the pitch (→ NO_ANSWER)?  \n\n## PROCESS THE DATA\n1. Read the full transcript  \n2. Locate seller financing pitch  \n3. Check the next user response  \n4. Apply the decision tree strictly  \n5. Output ONLY the classification word  \n",
+              "role": "system"
+            }
+          ]
+        },
+        "simplify": "={{ true }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        20,
+        -80
+      ],
+      "id": "32e9743c-da28-4716-a89a-f3d921d93d71",
+      "name": "OpenAI",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI_2>",
+          "name": "OpenAi account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadData = $('Loop Over Leads').first().json || {};\n\nlet totalCalls = 1;\nif (leadData['Total Calls']) {\n  const prev = parseInt(leadData['Total Calls'], 10);\n  if (!isNaN(prev)) totalCalls = prev + 1;\n}\n\nreturn {\n  json: {\n    'Total calls': totalCalls\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        240
+      ],
+      "name": "Calculate Total Calls",
+      "id": "e3abed00-9232-47c3-bbe9-1ca52c606270"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.vapi.ai/call/phone",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "<VAPI_API_KEY>"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"assistantId\": \"<VAPI_ASSISTANT_ID>\",\n  \"phoneNumberId\": \"<VAPI_PHONE_NUMBER_ID>\",\n  \"customer\": {\n    \"number\": \"+{{ $('Loop Over Leads').first().json.Phone }}\"\n  },\n  \"assistantOverrides\": {\n    \"variableValues\": {\n      \"lead_name\": \"{{ $('Loop Over Leads').item.json.Name }}\",\n      \"property_address\": \"{{ $json['Property address'] }}\",\n      \"rent_amount\": \"{{ $json['Rent Amount'] }}\"\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1760,
+        240
+      ],
+      "name": "VAPI - Make Call3",
+      "id": "2b9b853a-b407-496d-a844-f0a292abac06"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.vapi.ai/call/{{ $json.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "<VAPI_API_KEY>"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1180,
+        200
+      ],
+      "name": "VAPI - Get Call Result1",
+      "id": "3240676f-4137-4757-9b37-f1733a167a44"
+    },
+    {
+      "parameters": {
+        "amount": 8,
+        "unit": "minutes"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -1520,
+        200
+      ],
+      "name": "Wait5",
+      "id": "b147a31e-5cff-4b21-b257-dc8fda15b44d",
+      "webhookId": "55f1073c-d47f-4537-9abe-d570aad89909"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ✅ Get lead data safely from previous node\nconst leadData = $input.item ? $input.item.json : {};\n\n// ✅ Get OpenAI node result (AI output)\nconst aiData = $json;\n\n// Extract fields from AI response\nlet leadStatus = null;\nlet rentUpdated = false;\nlet newRentAmount = null;\n\n// Try parsing AI JSON content\ntry {\n  if (aiData.message && aiData.message.content) {\n    const parsed = JSON.parse(aiData.message.content);\n    leadStatus = parsed.lead_status || null;\n    rentUpdated = parsed.rent_updated || false;\n    newRentAmount = parsed.new_rent_amount || null;\n  }\n} catch (err) {\n  console.error(\"Error parsing AI response:\", err);\n}\n\n// ✅ Extract old rent from lead data\nconst oldRentRaw = leadData['Rent Amount'] || leadData.rent_amount;\nconst oldRent = oldRentRaw ? parseInt(String(oldRentRaw).replace(/[$,]/g, '')) : null;\n\n// ✅ Build final output\nconst output = {\n  ...leadData,\n  lead_status: leadStatus,\n  rent_updated: rentUpdated,\n  new_rent_amount: newRentAmount,\n  old_rent: oldRent,\n  note: rentUpdated\n    ? `Rent changed from $${oldRent} to $${newRentAmount}`\n    : `Rent confirmed at $${oldRent}`,\n};\n\n// ✅ Log for debugging\nconsole.log(\"Merged Lead Data:\", JSON.stringify(output, null, 2));\n\n// ✅ Return clean JSON\nreturn [{ json: output }];\n "
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        -80
+      ],
+      "id": "1b558c45-eb55-4662-b914-ca5a230aac8e",
+      "name": "Code"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "<GOOGLE_SHEET_ID>",
+          "mode": "list",
+          "cachedResultName": "Carson sheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        -2760,
+        200
+      ],
+      "name": "test",
+      "id": "1b5b7bd1-f2a7-490f-a272-aae94f2392c2",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "<CRED_GOOGLE_SHEETS>",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "<GOOGLE_SHEET_ID>",
+          "mode": "list",
+          "cachedResultName": "Carson sheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Property address": "={{ $('VAPI - Make Call3').item.json.assistantOverrides.variableValues.property_address }}",
+            "Name": "={{ $('Loop Over Leads').item.json.Name }}",
+            "Phone": "={{ $('VAPI - Get Call Result1').item.json.customer.number }}",
+            "Rent Amount": "={{ $('Loop Over Leads').item.json['Rent Amount'] }}",
+            "Total calls": "={{ $json['Total calls'] }}",
+            "Status": "={{ $('VAPI - Get Call Result1').first().json.status }}",
+            "Last Called": "={{ new Date($('VAPI - Get Call Result1').item.json.createdAt)\n    .toLocaleString(\"en-US\", { timeZone: \"America/New_York\" }) }}",
+            "Notes": "={{ $('VAPI - Get Call Result1').first().json.summary }}",
+            "lead_status": "={{ $('OpenAI').item.json.message.content }}\n",
+            "Timestamp": "={{ new Date($('VAPI - Get Call Result1').item.json.createdAt)\n    .toLocaleString(\"en-US\", { timeZone: \"America/New_York\" }) }}"
+          },
+          "matchingColumns": [
+            "Property address"
+          ],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Property address",
+              "displayName": "Property address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Rent Amount",
+              "displayName": "Rent Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Total calls",
+              "displayName": "Total calls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Last Called",
+              "displayName": "Last Called",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lead_status",
+              "displayName": "lead_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Timestamp",
+              "displayName": "Timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        1020,
+        240
+      ],
+      "name": "test1",
+      "id": "f5dbb0ac-1e82-4ae5-a357-0a464903dd44",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "<CRED_GOOGLE_SHEETS>",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "<GOOGLE_SHEET_ID>",
+          "mode": "list",
+          "cachedResultName": "Carson sheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "row_number": "={{ $('Loop Over Leads').item.json.row_number }}",
+            "Phone": "={{ $('VAPI - Get Call Result1').item.json.customer.number }}",
+            "Rent Amount": "={{ $('OpenAI1').item.json.message.content.new_rent_amount }}\n ",
+            "Total calls": "={{ $('Complete Filtration').item.json['Total calls']+1 }}\n",
+            "Status": "={{ $('VAPI - Get Call Result1').first().json.status }}\n",
+            "Last Called": "={{ new Date($('VAPI - Get Call Result1').item.json.createdAt)\n    .toLocaleString(\"en-US\", { timeZone: \"America/New_York\" }) }}",
+            "Notes": "={{ $('VAPI - Get Call Result1').first().json.summary }}\n",
+            "lead_status": "={{ $('OpenAI').item.json.message.content }}\n",
+            "Timestamp": "={{ new Date($('VAPI - Get Call Result1').item.json.createdAt)\n    .toLocaleString(\"en-US\", { timeZone: \"America/New_York\" }) }}"
+          },
+          "matchingColumns": [
+            "row_number"
+          ],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Property address",
+              "displayName": "Property address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Rent Amount",
+              "displayName": "Rent Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total calls",
+              "displayName": "Total calls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last Called",
+              "displayName": "Last Called",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "lead_status",
+              "displayName": "lead_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Timestamp",
+              "displayName": "Timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        880,
+        -20
+      ],
+      "name": "test2",
+      "id": "0e49dc9a-d909-4369-9e33-d5eafd71eb5e",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "<CRED_GOOGLE_SHEETS>",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=# 🧠 SYSTEM PROMPT — Real Estate Call Transcript Analyzer (for Rent Updates + Lead Classification)\n\nYou are an intelligent post-call analyzer for **real estate VAPI calls**.  \nYour job is to read the **transcript JSON** (from a property owner conversation) and produce:\n1. Whether the rent amount was changed,\n2. The new rent amount (if any),\n3. The lead classification, and\n4. Additional variables that help n8n decide what to update downstream.\n\n---\n\n## 🎯 PRIMARY OBJECTIVE\nFrom the transcript data (which may exist in `transcript`, `messages`, or `artifact.messages`):\n1. Identify if the **owner said the rent has changed**.\n2. Extract the **new rent amount** (numerical only, no symbols).\n3. Classify the **lead** into one of five categories:\n   - HOT_LEAD  \n   - COLD_LEAD  \n   - CALLBACK_REQUESTED  \n   - PROPERTY_UNAVAILABLE  \n   - NO_ANSWER  \n4. Generate **automation variables** that make updating Google Sheets easier.\n\n---\n\n## 🧩 FINAL OUTPUT FORMAT\n\nYou must return **only this exact JSON**, with all fields filled appropriately return pure json donot add boilerplate code and remove linebreak tags (\\n) give single line json code or any ```json or ```:\n\n\n{\n  \"lead_status\": \"CALLBACK_REQUESTED\",\n  \"rent_updated\": true,\n  \"new_rent_amount\": 1500,\n  \"variables\": {\n    \"update_needed\": true,\n    \"update_reason\": \"Rent changed from $OLD_RENT to $NEW_RENT\",\n    \"sheet_action\": \"UPDATE_RENT\",\n    \"rent_difference\": 300\n  }\n}\n\n\n\nHere's the transcript from which you have to analyze \n\"\n{{ $json.transcript }}\n\"",
+              "role": "system"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -440,
+        -80
+      ],
+      "id": "e53ca6ae-639f-4851-84dd-f3c73850f281",
+      "name": "OpenAI1",
+      "alwaysOutputData": false,
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI_2>",
+          "name": "OpenAi account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1ef453bc-74eb-45cc-b921-8dfce434b82e",
+              "leftValue": "={{ $('OpenAI1').item.json.message.content.rent_updated }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        -80
+      ],
+      "id": "c7391dff-29d0-4ec6-b868-c1f84bd26415",
+      "name": "If2"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2940,
+        200
+      ],
+      "id": "e4e7754b-bdf7-4292-9974-7769d33a6d6d",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "<GOOGLE_SHEET_ID>",
+          "mode": "list",
+          "cachedResultName": "Carson sheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Name": "={{ $('Loop Over Leads').item.json.Name }}",
+            "Phone": "={{ $('VAPI - Get Call Result1').item.json.customer.number }}",
+            "Property address": "={{ $('VAPI - Make Call3').item.json.assistantOverrides.variableValues.property_address }}",
+            "Rent Amount": "={{ $('OpenAI1').item.json.message.content.new_rent_amount }}",
+            "Total calls": "={{ $json['Total calls'] }}",
+            "Status": "={{ $('VAPI - Get Call Result1').first().json.status }}",
+            "Last Called": "={{ $('VAPI - Get Call Result1').item.json.createdAt }}",
+            "Notes": "={{ $('VAPI - Get Call Result1').first().json.summary }}",
+            "lead_status": "={{ $('OpenAI1').first().json.message.content.lead_status }}",
+            "Timestamp": "={{ $('VAPI - Get Call Result1').item.json.createdAt }}"
+          },
+          "matchingColumns": [
+            "Property address"
+          ],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Property address",
+              "displayName": "Property address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Rent Amount",
+              "displayName": "Rent Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total calls",
+              "displayName": "Total calls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last Called",
+              "displayName": "Last Called",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "lead_status",
+              "displayName": "lead_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Timestamp",
+              "displayName": "Timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        400,
+        1040
+      ],
+      "name": "test3",
+      "id": "7697c209-fa37-4136-a06a-7ae9f21e0364",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "<CRED_GOOGLE_SHEETS>",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6c552cb7-325b-41ab-b428-60fb40fa7f24",
+              "leftValue": "={{ $json.transcript }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -820,
+        -60
+      ],
+      "id": "331f9d17-16ec-49cc-a1a1-a79d1745cc74",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  json: {\n    transcript: null,\n    summary: \"Alex from SubtoDealz called the lead but the call was either declined or not received\",\n    lead_status: \"NO_ANSWER\"\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -660,
+        220
+      ],
+      "id": "f5333013-e984-4a3a-800c-97e4f0a73544",
+      "name": "No Transcript Summary"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "CLASSIFY THE LEAD STATUS AS \"NO_ANSWER\"",
+              "role": "system"
+            }
+          ]
+        },
+        "simplify": "={{ true }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        140,
+        200
+      ],
+      "id": "abf30312-cce9-41f2-86de-a6c7314fbd71",
+      "name": "OpenAI2",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI_2>",
+          "name": "OpenAi account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ✅ Get lead data safely from previous node\nconst leadData = $input.item ? $input.item.json : {};\n\n// ✅ Get OpenAI node result (AI output)\nconst aiData = $json;\n\n// Extract fields from AI response\nlet leadStatus = null;\nlet rentUpdated = false;\nlet newRentAmount = null;\n\n// Try parsing AI JSON content\ntry {\n  if (aiData.message && aiData.message.content) {\n    const parsed = JSON.parse(aiData.message.content);\n    leadStatus = parsed.lead_status || null;\n    rentUpdated = parsed.rent_updated || false;\n    newRentAmount = parsed.new_rent_amount || null;\n  }\n} catch (err) {\n  console.error(\"Error parsing AI response:\", err);\n}\n\n// ✅ Extract old rent from lead data\nconst oldRentRaw = leadData['Rent Amount'] || leadData.rent_amount;\nconst oldRent = oldRentRaw ? parseInt(String(oldRentRaw).replace(/[$,]/g, '')) : null;\n\n// ✅ Build final output\nconst output = {\n  ...leadData,\n  lead_status: leadStatus,\n  rent_updated: rentUpdated,\n  new_rent_amount: newRentAmount,\n  old_rent: oldRent,\n  note: rentUpdated\n    ? `Rent changed from $${oldRent} to $${newRentAmount}`\n    : `Rent confirmed at $${oldRent}`,\n};\n\n// ✅ Log for debugging\nconsole.log(\"Merged Lead Data:\", JSON.stringify(output, null, 2));\n\n// ✅ Return clean JSON\nreturn [{ json: output }];\n "
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -60,
+        220
+      ],
+      "id": "94845a17-1712-45af-836b-80e77e819457",
+      "name": "Code1"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=# 🧠 SYSTEM PROMPT — Real Estate Call Transcript Analyzer (for Rent Updates + Lead Classification)\n\nYou are an intelligent post-call analyzer for **real estate VAPI calls**.  \nYour job is to read the **transcript JSON** (from a property owner conversation) and produce:\n1. Whether the rent amount was changed,\n2. The new rent amount (if any),\n3. The lead classification, and\n4. Additional variables that help n8n decide what to update downstream.\n\n---\n\n## 🎯 PRIMARY OBJECTIVE\nFrom the transcript data (which may exist in `transcript`, `messages`, or `artifact.messages`):\n1. Identify if the **owner said the rent has changed**.\n2. Extract the **new rent amount** (numerical only, no symbols).\n3. Classify the **lead** into one of five categories:\n   - HOT_LEAD  \n   - COLD_LEAD  \n   - CALLBACK_REQUESTED  \n   - PROPERTY_UNAVAILABLE  \n   - NO_ANSWER  \n4. Generate **automation variables** that make updating Google Sheets easier.\n\n---\n\n## 🧩 FINAL OUTPUT FORMAT\n\nYou must return **only this exact JSON**, with all fields filled appropriately return pure json donot add boilerplate code and remove linebreak tags (\\n) give single line json code or any ```json or ```:\n\n\n{\n  \"lead_status\": \"CALLBACK_REQUESTED\",\n  \"rent_updated\": true,\n  \"new_rent_amount\": 1500,\n  \"variables\": {\n    \"update_needed\": true,\n    \"update_reason\": \"Rent changed from $OLD_RENT to $NEW_RENT\",\n    \"sheet_action\": \"UPDATE_RENT\",\n    \"rent_difference\": 300\n  }\n}\n\n\n\nHere's the transcript from which you have to analyze \n\"\n{{ $json.transcript }}\n\"",
+              "role": "system"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -440,
+        220
+      ],
+      "id": "48116531-e2b2-4c20-b4a0-48b1efc9f3ef",
+      "name": "OpenAI3",
+      "alwaysOutputData": false,
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI_2>",
+          "name": "OpenAi account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadData = $('Loop Over Leads').first().json || {};\n\nlet totalCalls = 1;\nif (leadData['Total Calls']) {\n  const prev = parseInt(leadData['Total Calls'], 10);\n  if (!isNaN(prev)) totalCalls = prev + 1;\n}\n\nreturn {\n  json: {\n    'Total calls': totalCalls\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        520
+      ],
+      "name": "Calculate Total Calls1",
+      "id": "b15f778c-3143-4dcd-9f42-3fa58f13ff2a"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "<GOOGLE_SHEET_ID>",
+          "mode": "list",
+          "cachedResultName": "Carson sheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Property address": "={{ $('VAPI - Make Call3').item.json.assistantOverrides.variableValues.property_address }}",
+            "Name": "={{ $('Loop Over Leads').item.json.Name }}",
+            "Phone": "={{ $('VAPI - Get Call Result1').item.json.customer.number }}",
+            "Rent Amount": "={{ $('Loop Over Leads').item.json['Rent Amount'] }}",
+            "Total calls": "={{ $json['Total calls'] }}",
+            "Last Called": "={{ new Date($('VAPI - Get Call Result1').item.json.createdAt)\n    .toLocaleString(\"en-US\", { timeZone: \"America/New_York\" }) }}",
+            "Notes": "={{ $('No Transcript Summary').item.json.summary }}",
+            "lead_status": "=NO_ANSWER\n",
+            "Timestamp": "={{ new Date($('VAPI - Get Call Result1').item.json.createdAt)\n    .toLocaleString(\"en-US\", { timeZone: \"America/New_York\" }) }}\n",
+            "Status": "ended"
+          },
+          "matchingColumns": [
+            "Property address"
+          ],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Property address",
+              "displayName": "Property address",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Rent Amount",
+              "displayName": "Rent Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Total calls",
+              "displayName": "Total calls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Last Called",
+              "displayName": "Last Called",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Notes",
+              "displayName": "Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "lead_status",
+              "displayName": "lead_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Timestamp",
+              "displayName": "Timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        700,
+        500
+      ],
+      "name": "test4",
+      "id": "e21d976c-1842-4b99-aa79-a3244471516a",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "<CRED_GOOGLE_SHEETS>",
+          "name": "Google Sheets account 3"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Loop Over Leads": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "VAPI - Make Call3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Complete Filtration": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI": {
+      "main": [
+        [
+          {
+            "node": "If2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Total Calls": {
+      "main": [
+        [
+          {
+            "node": "test1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VAPI - Make Call3": {
+      "main": [
+        [
+          {
+            "node": "Wait5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VAPI - Get Call Result1": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait5": {
+      "main": [
+        [
+          {
+            "node": "VAPI - Get Call Result1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "test": {
+      "main": [
+        [
+          {
+            "node": "Complete Filtration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "test1": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI1": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "test2": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If2": {
+      "main": [
+        [
+          {
+            "node": "test2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Calculate Total Calls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "test",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "OpenAI1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Transcript Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Transcript Summary": {
+      "main": [
+        [
+          {
+            "node": "OpenAI3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code1": {
+      "main": [
+        [
+          {
+            "node": "OpenAI2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI3": {
+      "main": [
+        [
+          {
+            "node": "Code1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Total Calls1": {
+      "main": [
+        [
+          {
+            "node": "test4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI2": {
+      "main": [
+        [
+          {
+            "node": "Calculate Total Calls1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "test4": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "b2ecb2f6-007f-4291-9614-259e169c083f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "2b7e4cc8644cdd1c61b7d8ea0f2a81869798cfd61a40b9594941a689920606eb"
+  },
+  "id": "LbVw4Qfq5StsgFLE",
+  "tags": []
+}

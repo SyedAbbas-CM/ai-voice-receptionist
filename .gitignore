@@ -1,0 +1,82 @@
+# --- Secrets — NEVER commit ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+credentials.json
+
+# --- Python ---
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# --- Node ---
+node_modules/
+npm-debug.log*
+yarn-error.log
+.next/
+dist/
+build/
+
+# --- Data (audio, DBs, generated artifacts) ---
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.wav
+*.mp3
+*.m4a
+*.opus
+*.ogg
+*.pth
+*.safetensors
+*.bin
+*.ckpt
+*.gguf
+!apps/api/tests/**/*.wav
+# ^ keep any WAVs deliberately checked into tests as fixtures
+
+# --- Model weight caches ---
+checkpoints/
+models/
+weights/
+.cache/
+
+# --- Adversarial harness reports (regenerated each run) ---
+apps/api/tests/adversarial/reports/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Tunnel / runtime ---
+cloudflared.log
+ngrok.log
+*.pid
+
+# Personal notes not for public repo
+UpworkJobs.txt
+
+# Private R&D docs — strategy, competitor analysis, personal decision logs
+docs/rnd-2026-07/

@@ -1,0 +1,1996 @@
+{
+  "name": "Data ingestion VR",
+  "nodes": [
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "<NOTION_DB_LIBRARY>",
+          "mode": "list",
+          "cachedResultName": "Library",
+          "cachedResultUrl": "https://www.notion.so/23ec807e891b814b9aa8f320844f5fe1"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        -1472,
+        -592
+      ],
+      "id": "81f74861-3bda-4607-91ee-06a255b4cf0d",
+      "name": "Get Full 35-Day Structure7",
+      "credentials": {
+        "notionApi": {
+          "id": "<CRED_NOTION>",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "<NOTION_DB_BASELINES>",
+          "mode": "list",
+          "cachedResultName": "Baselines",
+          "cachedResultUrl": "https://www.notion.so/261c807e891b8111a9d6e7489d428bb6"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        -1472,
+        -96
+      ],
+      "id": "7877c612-59a1-4ff4-b3d5-b09693918888",
+      "name": "Get Full 35-Day Structure8",
+      "credentials": {
+        "notionApi": {
+          "id": "<CRED_NOTION>",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "<NOTION_DB_BASELINES_DAYWISE>",
+          "mode": "list",
+          "cachedResultName": "Baselines (1)",
+          "cachedResultUrl": "https://www.notion.so/261c807e891b813798b1db0c5c74831f"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        -1472,
+        416
+      ],
+      "id": "12f68f19-faaa-446f-86d1-519366a71ce2",
+      "name": "Get Full 35-Day Structure9",
+      "credentials": {
+        "notionApi": {
+          "id": "<CRED_NOTION>",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "<NOTION_DB_BASELINES_STAGE2>",
+          "mode": "list",
+          "cachedResultName": "Baselines (2)",
+          "cachedResultUrl": "https://www.notion.so/261c807e891b81b28cf8c78b8ff59b81"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        -1472,
+        912
+      ],
+      "id": "b8df2a52-5d30-4a37-bd53-32b1ad68b359",
+      "name": "Get Full 35-Day Structure10",
+      "credentials": {
+        "notionApi": {
+          "id": "<CRED_NOTION>",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "<NOTION_DB_BASELINES_STAGE3>",
+          "mode": "list",
+          "cachedResultName": "Baselines (3)",
+          "cachedResultUrl": "https://www.notion.so/261c807e891b81039c2ee738bf4c180b"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        -1472,
+        1200
+      ],
+      "id": "d6877d7f-873e-4255-b671-91cc646ea7fd",
+      "name": "Get Full 35-Day Structure11",
+      "credentials": {
+        "notionApi": {
+          "id": "<CRED_NOTION>",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "<NOTION_DB_BASELINES_STAGE4>",
+          "mode": "list",
+          "cachedResultName": "Baselines (4)",
+          "cachedResultUrl": "https://www.notion.so/261c807e891b812f8abed7bab145ef7b"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        -1472,
+        1392
+      ],
+      "id": "03a2ac82-9829-470a-a326-26b7848c53ff",
+      "name": "Get Full 35-Day Structure12",
+      "credentials": {
+        "notionApi": {
+          "id": "<CRED_NOTION>",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "<NOTION_DB_THINK_TANK>",
+          "mode": "list",
+          "cachedResultName": "💭 Think Tank",
+          "cachedResultUrl": "https://www.notion.so/23ec807e891b815eb79be48ac2bd63b1"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        -1472,
+        1776
+      ],
+      "id": "3ce2d57a-2819-4bf8-b072-087712e5003e",
+      "name": "Get Full 35-Day Structure13",
+      "credentials": {
+        "notionApi": {
+          "id": "<CRED_NOTION>",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You will receive one or more items from the Notion “Baselines” database in JSON format.\nYour task is to normalize every item into the following exact structure:\n\n{\n  \"table\": \"baselines\",\n  \"id\": \"\",\n  \"name\": \"\",\n  \"url\": \"\",\n  \"baseline\": \"\",\n  \"how_to\": \"\",\n  \"habit_name\": \"\"\n}\n\nMapping rules:\n- \"id\" → id\n- \"name\" → name\n- \"url\" → url\n- \"baseline\" → property_baseline (string)\n- \"how_to\" → property_how_to (string, never null)\n- \"habit_name\" → property_name\n\nRules:\n- NEVER output null. Replace missing strings with \"\".\n- ALWAYS output an array of normalized objects. Even if input has 1 item.\n- Do not infer or guess values. Only map what exists.\n- Do not add text, commentary, or markdown. Output ONLY raw JSON.\n- Preserve all text exactly as given (do not rewrite user content).\nHere's the data:\n{{$('Get Full 35-Day Structure8').item.json.toJsonString()}}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -896,
+        -224
+      ],
+      "id": "22b99f09-5d6c-42a2-b2a5-99723eefbae2",
+      "name": "Message a model9",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You will receive exactly ONE raw item from the Notion \"Library\" database in JSON.\nYour task is to normalize this object into THIS EXACT structure:\n\n{\n  \"table\": \"library\",\n  \"id\": \"\",\n  \"name\": \"\",\n  \"url\": \"\",\n  \"format\": \"\",\n  \"is_created\": false,\n  \"related_scripts\": [],\n  \"tool_name\": \"\"\n}\n\nMapping rules:\n- \"id\" → id\n- \"name\" → name\n- \"url\" → url\n- \"format\" → property_format (if null, return \"\")\n- \"is_created\" → property_created (true/false)\n- \"related_scripts\" → property_related_script (always list, never null)\n- \"tool_name\" → property_tool\n\nRules:\n- Never output null. Replace with \"\" or [].\n- ALWAYS return an array with exactly one normalized object.\n- Do NOT add markdown. Output ONLY raw JSON.\n- Do NOT guess. Only map fields that exist.\n- Preserve all values exactly as given.\n\nHere is the item:\n{{$('Get Full 35-Day Structure7').item.json.toJsonString()}}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -896,
+        -720
+      ],
+      "id": "3fa52c5b-bc13-4c79-b4c6-2660aba1a72b",
+      "name": "Message a model10",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You will receive one or more items from the Notion “Baselines (Day-wise)” database as JSON.\nYour task is to normalize every item into the following exact structure:\n\n{\n  \"table\": \"baselines_daywise\",\n  \"id\": \"\",\n  \"name\": \"\",\n  \"url\": \"\",\n  \"day\": \"\",\n  \"how_to\": \"\",\n  \"habit_name\": \"\"\n}\n\nMapping rules:\n- \"id\" → id\n- \"name\" → name\n- \"url\" → url\n- \"day\" → property_day (strip the word “Day ” and keep only the number; if missing, use \"\")\n- \"how_to\" → property_how_to (string, never null)\n- \"habit_name\" → property_name\n\nRules:\n- NEVER output null. Convert missing fields to an empty string \"\".\n- ALWAYS output an array of objects, even if a single item is given.\n- Never rewrite or alter user content in any field.\n- No commentary, no markdown, no code fencing.\n- Output ONLY clean JSON.\n{{$('Get Full 35-Day Structure9').item.json.toJsonString()}}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -896,
+        416
+      ],
+      "id": "67cfb95f-43f8-4b4d-b838-93aaac30c86b",
+      "name": "Message a model11",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You will receive items from the Notion “Baselines 2” dataset as JSON.\nYour task is to normalize every item into the following exact structure:\n\n{\n  \"table\": \"baselines_stage2\",\n  \"id\": \"\",\n  \"name\": \"\",\n  \"url\": \"\",\n  \"habit\": \"\",\n  \"how_to\": \"\",\n  \"day\": \"\",\n  \"habit_name\": \"\"\n}\n\nMapping rules:\n- \"id\" → id\n- \"name\" → name\n- \"url\" → url\n- \"habit\" → property_habit (convert null to \"\")\n- \"how_to\" → property_how_to (string; convert null to \"\")\n- \"day\" → property_day (remove the word “Day ” and output only the number; if missing, output \"\")\n- \"habit_name\" → property_name (never null; if null, output \"\")\n\nRequirements:\n- NEVER output null; if a field is missing or null, output \"\".\n- ALWAYS output an array of objects, even if only one item is provided.\n- Do not alter text inside any field. Preserve all line breaks exactly.\n- Output ONLY clean JSON. No markdown. No commentary.\n {{$('Get Full 35-Day Structure10').item.json.toJsonString()}}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -896,
+        912
+      ],
+      "id": "12c20e89-0126-4cae-be1a-7c4ec8476b8c",
+      "name": "Message a model12",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You will receive an array of JSON objects representing the VivaRays 35-Day Library dataset. \nEach item includes:\n- id\n- name (habit or anchor menu)\n- property_name\n- property_baseline\n- property_how_to\n\nYour task:\n1. Normalize all objects.\n2. Extract only:\n   - Habit name\n   - Baseline statement\n3. Convert into:\n   {\n     \"day\": null,\n     \"habit_name\": \"...\",\n     \"baseline\": \"...\"\n   }\n\nDO NOT expand, rewrite, or add extra explanations.\nReturn as a compressed JSON array.\n {{$('Get Full 35-Day Structure11').item.json.toJsonString()}}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -976,
+        1200
+      ],
+      "id": "d7e74011-e3b1-475e-9117-99dcb2c8852b",
+      "name": "Message a model13",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You will receive items from the Notion “Baselines 4” dataset.\nYour task is to normalize every item into this exact structure:\n\n{\n  \"table\": \"baselines_stage4\",\n  \"id\": \"\",\n  \"name\": \"\",\n  \"url\": \"\",\n  \"day\": \"\",\n  \"how_to\": \"\",\n  \"habit_name\": \"\"\n}\n\nMapping rules:\n- \"id\" → id\n- \"name\" → name\n- \"url\" → url\n- “day” → extract numeric part from property_day (e.g., \"Day 33\" → \"33\"); if missing, return \"\".\n- “how_to” → property_how_to (PRESERVE ALL LINE BREAKS EXACTLY; do not modify text at all)\n- “habit_name” → property_name (convert null to \"\")\n\nProcessing rules:\n- NEVER return null. Replace any null or missing field with \"\".\n- ALWAYS output an array of objects, even if input is a single item.\n- Output ONLY raw JSON (no markdown, no commentary).\n- Do not add or remove any words inside the “how_to”.\n- Do NOT create or infer fields. Only map what exists.\n{{$('Get Full 35-Day Structure12').item.json.toJsonString()}}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -912,
+        1456
+      ],
+      "id": "886a10e5-c0d3-4874-af7a-b4569366a642",
+      "name": "Message a model14",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4.1-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You will receive items from the Notion “Think Tank” dataset.\n\nYour job is to:\n1. CLASSIFY each item into one of three tables:\n   - \"circadian_teaching\"\n   - \"tone_of_voice\"\n   - \"customer_persona\"\n\n2. NORMALIZE the item into its correct schema.\n\n----------------------------------------------------\nCLASSIFICATION PRIORITY (IMPORTANT)\n----------------------------------------------------\n\nAlways evaluate in this exact order:\n\n### 1. TONE OF VOICE (highest priority)\nAssign to **tone_of_voice** if ANY of the following are true:\n- name, database, or content includes:\n  - “storytelling”\n  - “language”\n  - “language analysis”\n  - “voice”\n  - “scripting framework”\n  - “communication”\n  - “communication style”\n  - “tone”\n- property_format = \"Script\" AND the script is NOT educational, but about\n  writing, speaking, storytelling, or communication structure.\n- reference_link is a video/article about communication (TEDx talk, storytelling)\n\nIf ANY of the above match → classify as **tone_of_voice**, no matter what other fields say.\n\n### 2. CUSTOMER PERSONA (next)\nAssign to **customer_persona** if ANY of these match:\n- property_format = \"Meeting\"\n- OR property_tags contains “Buyers” or “Non-Buyers”\n- OR property_url/property_link is a Fathom/Zoom/Interview recording\n- OR content clearly relates to customer interviews or insights\n\n### 3. CIRCADIAN TEACHING (default)\nAssign to **circadian_teaching** for everything else:\n- Illumination Academy\n- Script (non-meeting)\n- Blocks (Foundation, Light Mastery, Advanced Integration)\n- Behavior Science educational content\n- Light science, circadian biology, metabolism, learning modules\n- Resources & lessons not related to communication\n\n----------------------------------------------------\nOUTPUT SCHEMAS\n----------------------------------------------------\n\n=== circadian_teaching ===\n{\n  \"table\": \"circadian_teaching\",\n  \"id\": \"\",\n  \"name\": \"\",\n  \"url\": \"\",\n  \"format\": \"\",\n  \"block\": \"\",\n  \"status\": \"\",\n  \"type\": \"\",\n  \"due_date_for_review\": \"\",\n  \"completion_date\": \"\",\n  \"completion_due_date\": \"\",\n  \"assigned_to\": [],\n  \"notes\": \"\",\n  \"context\": \"\",\n  \"attendees\": \"\",\n  \"reference_link\": \"\",\n  \"database\": \"\",\n  \"tags\": []\n}\n\n=== tone_of_voice ===\n{\n  \"table\": \"tone_of_voice\",\n  \"id\": \"\",\n  \"name\": \"\",\n  \"url\": \"\",\n  \"format\": \"\",\n  \"status\": \"\",\n  \"notes\": \"\",\n  \"context\": \"\",\n  \"tags\": [],\n  \"reference_link\": \"\",\n  \"database\": \"\"\n}\n\n=== customer_persona ===\n{\n  \"table\": \"customer_persona\",\n  \"id\": \"\",\n  \"name\": \"\",\n  \"url\": \"\",\n  \"status\": \"\",\n  \"meeting_url\": \"\",\n  \"notes\": \"\",\n  \"context\": \"\",\n  \"attendees\": \"\",\n  \"tags\": [],\n  \"assigned_to\": []\n}\n\n----------------------------------------------------\nNORMALIZATION RULES\n----------------------------------------------------\n- NEVER output null. Convert null → \"\".\n- ALWAYS return an ARRAY of objects.\n- If completion_date exists, return the \"start\" value only.\n- Remove empty objects from assigned_to.\n- tags must always be an array of strings.\n- meeting_url must come from property_url or property_link ONLY for meetings.\n- Do not infer or add data.\n- Preserve all strings exactly.\n\n----------------------------------------------------\nOUTPUT FORMAT\n----------------------------------------------------\nRETURN ONLY raw JSON. No markdown. No explanations.\n{{$('Get Full 35-Day Structure13').item.json.toJsonString()}}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -1136,
+        2096
+      ],
+      "id": "f1a6ae3a-1a98-4491-8bb6-745a3d5ea272",
+      "name": "Message a model15",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.message.content.table }}",
+                    "rightValue": "circadian_teaching",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "bb56f58f-4697-41f8-9ebb-34e6e1ac83cb"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Circadian Teaching"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "ba0f1797-f9a0-4fa1-a587-454db7665084",
+                    "leftValue": "={{ $json.message.content.table }}",
+                    "rightValue": "customer_persona",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Customer Persona"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "ebea3b16-c448-4682-b3dc-ba36c30aacc7",
+                    "leftValue": "={{ $json.message.content.table }}",
+                    "rightValue": "tone_of_voice",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Tone of Voice"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -736,
+        2064
+      ],
+      "id": "1c31771c-0f83-44f1-8911-7439f1f1b4b6",
+      "name": "Switch1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2720,
+        880
+      ],
+      "id": "27e4a821-3282-4bd5-9ef9-57228afabee8",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -544,
+        -592
+      ],
+      "id": "fa04ef9b-c181-440e-9ca4-109351ddf4e8",
+      "name": "Embeddings OpenAI",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "behavioral_design",
+          "mode": "list",
+          "cachedResultName": "behavioral_design"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -544,
+        -816
+      ],
+      "id": "03e465c6-f647-401a-82ee-0e942a3daf03",
+      "name": "Supabase Vector Store",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -416,
+        -592
+      ],
+      "id": "c1064c0e-aed0-470b-bfac-d45d258f7994",
+      "name": "Default Data Loader1"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1184,
+        -592
+      ],
+      "id": "6a554372-e44c-4711-994a-30e010efce5f",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -192,
+        -592
+      ],
+      "id": "60008952-0079-442c-912e-0a9a405b6194",
+      "name": "Wait",
+      "webhookId": "1d095f4f-b6af-447f-be5d-5f3a3179e076"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1184,
+        -96
+      ],
+      "id": "3ec2cd0c-26f1-4500-a9fa-1215ba2ea9e1",
+      "name": "Loop Over Items1"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -544,
+        -96
+      ],
+      "id": "a126733b-88b0-4258-b1c8-84f4bdeb23c3",
+      "name": "Embeddings OpenAI1",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "behavioral_design",
+          "mode": "list",
+          "cachedResultName": "behavioral_design"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -544,
+        -320
+      ],
+      "id": "873efbc1-aaed-4182-afe1-817b750af02d",
+      "name": "Supabase Vector Store1",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -416,
+        -96
+      ],
+      "id": "44345397-3da6-42a6-bd11-9776f511cfb9",
+      "name": "Default Data Loader"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -192,
+        -96
+      ],
+      "id": "ed31834c-4052-467f-b98b-afc1e662e5fb",
+      "name": "Wait1",
+      "webhookId": "d0625457-d1df-49c5-b79a-d58a24ecaacd"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1184,
+        416
+      ],
+      "id": "45762a42-ee3d-4ab0-9a3c-db3a74f3cc92",
+      "name": "Loop Over Items2"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -544,
+        400
+      ],
+      "id": "9e945551-05ed-48c4-b5b5-1cb4939d57cc",
+      "name": "Embeddings OpenAI2",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "behavioral_design",
+          "mode": "list",
+          "cachedResultName": "behavioral_design"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -544,
+        176
+      ],
+      "id": "a64c482c-253d-4106-ae74-b10d4468055b",
+      "name": "Supabase Vector Store2",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -416,
+        400
+      ],
+      "id": "9f71db7d-6480-48f5-af9a-390f81f2ad49",
+      "name": "Default Data Loader2"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -192,
+        416
+      ],
+      "id": "96f392d7-d8a2-4870-83f6-6de77eb4e6ee",
+      "name": "Wait2",
+      "webhookId": "58514d99-1b71-4cf2-9b41-951008ff2a9f"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1184,
+        912
+      ],
+      "id": "d213ce66-15ff-4c08-b7b0-d15111576c6b",
+      "name": "Loop Over Items3"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -528,
+        1008
+      ],
+      "id": "a1fde905-951f-465e-88cd-4c320f4440d5",
+      "name": "Embeddings OpenAI3",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "behavioral_design",
+          "mode": "list",
+          "cachedResultName": "behavioral_design"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -544,
+        784
+      ],
+      "id": "0899df90-55b3-4554-a341-f32c1d031c42",
+      "name": "Supabase Vector Store3",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -416,
+        1008
+      ],
+      "id": "a5931758-d7aa-41ac-891b-6229b19650a6",
+      "name": "Default Data Loader3"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -192,
+        912
+      ],
+      "id": "f7827dd6-5f27-473c-8872-c3087454e10b",
+      "name": "Wait3",
+      "webhookId": "435c19f2-5a8a-44e7-afd9-fa6cab1b108e"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1264,
+        1200
+      ],
+      "id": "c6b4a61e-c1aa-4be5-9fba-a3950a655237",
+      "name": "Loop Over Items4"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -640,
+        1296
+      ],
+      "id": "09bd9926-3c6b-4de9-b680-15980124d7e9",
+      "name": "Embeddings OpenAI4",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "behavioral_design",
+          "mode": "list",
+          "cachedResultName": "behavioral_design"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -560,
+        1152
+      ],
+      "id": "42a4f7bc-41b3-4e74-a601-61333a21d1df",
+      "name": "Supabase Vector Store4",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -368,
+        1296
+      ],
+      "id": "dd57498e-d3f5-4fe5-9314-e4f1246a0a19",
+      "name": "Default Data Loader4"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -160,
+        1184
+      ],
+      "id": "67daaa00-5ee5-4529-bfaf-4dd2b5c8edee",
+      "name": "Wait4",
+      "webhookId": "435c19f2-5a8a-44e7-afd9-fa6cab1b108e"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1264,
+        1392
+      ],
+      "id": "133c61e0-3c2d-4874-a5c8-70a5eb69a872",
+      "name": "Loop Over Items5"
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "behavioral_design",
+          "mode": "list",
+          "cachedResultName": "behavioral_design"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -496,
+        1424
+      ],
+      "id": "2e93b187-b759-4667-8b61-e1f2cbeb79e3",
+      "name": "Supabase Vector Store5",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -336,
+        1600
+      ],
+      "id": "96315a60-ec66-47e0-8db8-627f93190793",
+      "name": "Default Data Loader5"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -176,
+        1456
+      ],
+      "id": "45f8702d-1688-48d3-b3a7-8b4dbcc6f5fa",
+      "name": "Wait5",
+      "webhookId": "435c19f2-5a8a-44e7-afd9-fa6cab1b108e"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -608,
+        1600
+      ],
+      "id": "dc158303-750c-4b64-af74-0c41e1972dbd",
+      "name": "Embeddings OpenAI5",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "circadian_teachings",
+          "mode": "list",
+          "cachedResultName": "circadian_teachings"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -320,
+        1856
+      ],
+      "id": "f5891b55-f369-446f-8d98-4170716ada8b",
+      "name": "Supabase Vector Store6",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -176,
+        2000
+      ],
+      "id": "45ccc076-adb4-4de6-89e5-0c6249cbe1d9",
+      "name": "Default Data Loader6"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -352,
+        2032
+      ],
+      "id": "0e9a0909-fe5d-4ed4-9dd9-c3e1b0b88d7c",
+      "name": "Embeddings OpenAI6",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        48,
+        1856
+      ],
+      "id": "b102ca8d-c8e0-4b5d-ac41-850cf97638be",
+      "name": "Wait6",
+      "webhookId": "2e5dbcc2-7692-431e-a4cb-19c400fb2ae9"
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "customer_persona",
+          "mode": "list",
+          "cachedResultName": "customer_persona"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -320,
+        2208
+      ],
+      "id": "d0805f13-c476-4086-96ed-60519dfc0d8c",
+      "name": "Supabase Vector Store7",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -208,
+        2368
+      ],
+      "id": "d626377d-8c43-4d42-b1c3-3ad0b7ad9f67",
+      "name": "Default Data Loader7"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -448,
+        2368
+      ],
+      "id": "6bc8f0d5-81e8-4d2a-8b74-1924203e110f",
+      "name": "Embeddings OpenAI7",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        16,
+        2176
+      ],
+      "id": "8bfbe8f1-77a5-43a9-bf51-19345b3e4c08",
+      "name": "Wait7",
+      "webhookId": "2e5dbcc2-7692-431e-a4cb-19c400fb2ae9"
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "value": "tone_of_voice",
+          "mode": "list",
+          "cachedResultName": "tone_of_voice"
+        },
+        "embeddingBatchSize": "=500",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        -432,
+        2496
+      ],
+      "id": "aceac1ea-53df-4a85-b77b-098744d783e4",
+      "name": "Supabase Vector Store8",
+      "credentials": {
+        "supabaseApi": {
+          "id": "<CRED_SUPABASE>",
+          "name": "Supabase account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -304,
+        2784
+      ],
+      "id": "623e6658-7350-497d-a556-d3a6ae4c54bd",
+      "name": "Default Data Loader8"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -496,
+        2800
+      ],
+      "id": "f32a4140-90e9-4da7-ba01-9ad0c6e1b6b9",
+      "name": "Embeddings OpenAI8",
+      "credentials": {
+        "openAiApi": {
+          "id": "<CRED_OPENAI>",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -80,
+        2512
+      ],
+      "id": "d6e7653a-0b68-4454-b8f3-c20a2b06aa57",
+      "name": "Wait8",
+      "webhookId": "2e5dbcc2-7692-431e-a4cb-19c400fb2ae9"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1328,
+        2000
+      ],
+      "id": "d3e88c71-e795-4f12-9c30-937c538a81fb",
+      "name": "Loop Over Items6"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Get Full 35-Day Structure7": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full 35-Day Structure8": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full 35-Day Structure9": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full 35-Day Structure10": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full 35-Day Structure11": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full 35-Day Structure12": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full 35-Day Structure13": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model9": {
+      "main": [
+        [
+          {
+            "node": "Supabase Vector Store1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model10": {
+      "main": [
+        [
+          {
+            "node": "Supabase Vector Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model11": {
+      "main": [
+        [
+          {
+            "node": "Supabase Vector Store2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model12": {
+      "main": [
+        [
+          {
+            "node": "Supabase Vector Store3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model13": {
+      "main": [
+        [
+          {
+            "node": "Supabase Vector Store4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model14": {
+      "main": [
+        [
+          {
+            "node": "Supabase Vector Store5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model15": {
+      "main": [
+        [
+          {
+            "node": "Switch1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch1": {
+      "main": [
+        [
+          {
+            "node": "Supabase Vector Store6",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase Vector Store7",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase Vector Store8",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Get Full 35-Day Structure7",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Full 35-Day Structure8",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Full 35-Day Structure9",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Full 35-Day Structure10",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Full 35-Day Structure11",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Full 35-Day Structure12",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Full 35-Day Structure13",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader1": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Message a model10",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items1": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Message a model9",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI1": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store1",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store1",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store1": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items2": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Message a model11",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI2": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store2",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader2": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store2",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store2": {
+      "main": [
+        [
+          {
+            "node": "Wait2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait2": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items3": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Message a model12",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI3": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store3",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader3": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store3",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store3": {
+      "main": [
+        [
+          {
+            "node": "Wait3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait3": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items4": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Message a model13",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI4": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store4",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store4": {
+      "main": [
+        [
+          {
+            "node": "Wait4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader4": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store4",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait4": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items5": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Message a model14",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store5": {
+      "main": [
+        [
+          {
+            "node": "Wait5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader5": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store5",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI5": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store5",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait5": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader6": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store6",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI6": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store6",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store6": {
+      "main": [
+        [
+          {
+            "node": "Wait6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store7": {
+      "main": [
+        [
+          {
+            "node": "Wait7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader7": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store7",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI7": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store7",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase Vector Store8": {
+      "main": [
+        [
+          {
+            "node": "Wait8",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader8": {
+      "ai_document": [
+        [
+          {
+            "node": "Supabase Vector Store8",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI8": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Supabase Vector Store8",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items6": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Message a model15",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait6": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait7": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait8": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "191e82f4-12df-4127-86bc-4ce7cf167b87",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "11ac6b7580415f3da899774565504df1fe81f2531b73031feaf2d5d6ffffd533"
+  },
+  "id": "hG3QbHvMzptsUg8o",
+  "tags": []
+}

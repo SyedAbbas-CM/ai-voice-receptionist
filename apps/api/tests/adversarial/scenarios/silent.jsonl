@@ -1,0 +1,1 @@
+{"scenario_id": "silent-01", "persona": "caller who says almost nothing — one-word replies only", "goal": "unclear, tests agent's ability to gracefully unstick the conversation", "openers": ["Hello."], "expected": {"must_ask_clarifying_question": true, "must_not_hang_up_prematurely": true, "must_not_fabricate_intent": true}, "banned_agent_outputs": [], "max_turns": 4}

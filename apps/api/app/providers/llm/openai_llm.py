@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import json
+from typing import Optional
+
+import httpx
+
+from app.core.config import settings
+from packages.schemas import ToolCall, ToolDefinition
+
+from ..base import LLMProvider, LLMResponse
+
+
+class OpenAILLM(LLMProvider):
+    """OpenAI Chat Completions.
+
+    Prompt caching: OpenAI caches prefixes >1024 tokens automatically as long
+    as the beginning of the prompt is byte-identical across requests. Our
+    brain always sends [system, ...transcript] — the system prompt is at
+    position 0 and stable across turns of the same session, so cache hits
+    happen automatically from turn 2 onward. No code change needed.
+    Verify hits via `usage.prompt_tokens_details.cached_tokens` in the
+    response. See https://platform.openai.com/docs/guides/prompt-caching
+    """
+
+    name = "openai"
+
+    def __init__(self) -> None:
+        self.api_key = settings.openai_api_key
+        self.model = settings.openai_model or "gpt-4o-mini"
+        self.base_url = "https://api.openai.com/v1"
+
+    async def complete(
+        self,
+        messages: list[dict],
+        tools: Optional[list[ToolDefinition]] = None,
+        temperature: float = 0.3,
+        max_tokens: int = 1024,
+    ) -> LLMResponse:
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY not set")
+
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = [t.to_openai_format() for t in tools]
+            payload["tool_choice"] = "auto"
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        choice = data["choices"][0]
+        msg = choice["message"]
+        tool_calls = []
+        for tc in msg.get("tool_calls") or []:
+            args_raw = tc["function"]["arguments"]
+            args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            tool_calls.append(ToolCall(id=tc["id"], name=tc["function"]["name"], arguments=args))
+
+        return LLMResponse(
+            text=msg.get("content") or "",
+            tool_calls=tool_calls,
+            finish_reason=choice.get("finish_reason", "stop"),
+            raw=data,
+        )

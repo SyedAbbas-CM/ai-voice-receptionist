@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>voiceops-ai-agent · call simulator</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header>
+    <h1>voiceops call simulator</h1>
+    <div class="config" id="config">loading config...</div>
+  </header>
+
+  <main>
+    <section class="controls">
+      <button id="start-btn">Start call</button>
+      <button id="record-btn" disabled>Hold to talk</button>
+      <button id="text-toggle">Use text mode</button>
+      <button id="end-btn" disabled>End call</button>
+      <div class="status" id="status">idle</div>
+    </section>
+
+    <section class="text-input hidden" id="text-input-wrap">
+      <input id="text-input" placeholder="Type as the caller..." />
+      <button id="text-send">Send</button>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>Transcript</h2>
+        <div id="transcript" class="transcript"></div>
+      </div>
+      <div class="panel">
+        <h2>Extracted</h2>
+        <pre id="extracted">{}</pre>
+        <h2>Last tool calls</h2>
+        <pre id="tools">[]</pre>
+        <h2>Status</h2>
+        <pre id="meta">{}</pre>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

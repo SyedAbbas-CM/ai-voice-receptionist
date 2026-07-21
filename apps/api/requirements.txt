@@ -1,0 +1,15 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.4
+sqlalchemy>=2.0
+httpx>=0.27
+python-multipart>=0.0.9
+
+# Optional — uncomment what you actually use
+# faster-whisper>=1.0                          # local STT
+# silero-vad>=4.0                              # local VAD
+# openai>=1.40                                 # if you prefer the official SDK over httpx
+# anthropic>=0.34
+# google-api-python-client>=2.140              # Google Calendar + Sheets
+# google-auth>=2.32                            # service account auth
