@@ -69,9 +69,43 @@ async def whatsapp_verify(
     raise HTTPException(status_code=403, detail="verification failed")
 
 
+async def _verify_whatsapp_signature(request: Request, raw_body: bytes) -> None:
+    """AUDIT FIX 2026-08-01 (WH-003): verify X-Hub-Signature-256 with the
+    Meta app secret so spoofed messages cannot trigger LLM/tool actions."""
+    import os, hashlib, hmac
+    if os.environ.get("WHATSAPP_SIGNATURE_ENFORCE", "true").lower() in ("0", "false", "no"):
+        return
+    secret = settings.whatsapp_app_secret or ""
+    if not secret:
+        raise HTTPException(500, "WHATSAPP_APP_SECRET not configured")
+    header = request.headers.get("x-hub-signature-256", "")
+    if not header.startswith("sha256="):
+        raise HTTPException(401, "missing/malformed X-Hub-Signature-256")
+    got = header.split("=", 1)[1]
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, got):
+        raise HTTPException(401, "invalid X-Hub-Signature-256")
+
+
+async def _verify_telegram_secret(request: Request) -> None:
+    """AUDIT FIX 2026-08-01 (WH-004): verify X-Telegram-Bot-Api-Secret-Token."""
+    import os, hmac
+    if os.environ.get("TELEGRAM_SIGNATURE_ENFORCE", "true").lower() in ("0", "false", "no"):
+        return
+    expected = settings.telegram_webhook_secret or ""
+    if not expected:
+        raise HTTPException(500, "TELEGRAM_WEBHOOK_SECRET not configured")
+    got = request.headers.get("x-telegram-bot-api-secret-token", "")
+    if not hmac.compare_digest(expected, got):
+        raise HTTPException(401, "invalid Telegram webhook secret")
+
+
 @router.post("/whatsapp/webhook")
 async def whatsapp_webhook(request: Request) -> dict:
-    payload = await request.json()
+    raw = await request.body()
+    await _verify_whatsapp_signature(request, raw)
+    import json as _json
+    payload = _json.loads(raw)
     channel = _whatsapp_channel()
     pipeline = _build_pipeline(channel)
     results = []
@@ -88,6 +122,7 @@ async def whatsapp_webhook(request: Request) -> dict:
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> dict:
+    await _verify_telegram_secret(request)
     payload = await request.json()
     channel = _telegram_channel()
     pipeline = _build_pipeline(channel)

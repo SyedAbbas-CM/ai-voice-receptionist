@@ -154,19 +154,31 @@ async def text_to_speech_stream(payload: dict):
                 return
 
             try:
+                # AUDIT FIX 2026-08-01 (PROV-022): browser TTS is a client-side
+                # synthesizer with no server audio.  The sentence loop below
+                # yields one (empty-bytes, "text/x-browser-speak") event PER
+                # sentence, and the OLD code emitted the FULL original text
+                # for every sentinel — so the browser said the whole reply
+                # N times.  Fast-path browser to a single sentinel with the
+                # whole text and skip the loop.
+                if getattr(tts, "name", "") == "browser":
+                    yield _json.dumps({
+                        "seq": 0, "provider": "browser",
+                        "speak": text, "audio_b64": None,
+                        "mime": "text/x-browser-speak",
+                    }) + "\n"
+                    yield _json.dumps({"seq": -1, "done": True, "n_chunks": 1}) + "\n"
+                    span.set_attribute("chunks.emitted", 1)
+                    span.set_attribute("audio.bytes_total", 0)
+                    span.set_attribute("cost_usd_est", 0.0)
+                    return
+
                 async for audio_bytes, mime in tts.stream_sentences(text, voice=voice):
-                    # Browser fallback (no local audio) — emit text-only chunk
-                    if mime == "text/x-browser-speak":
-                        line = _json.dumps({
-                            "seq": seq, "provider": "browser",
-                            "speak": text, "audio_b64": None, "mime": mime,
-                        })
-                    else:
-                        line = _json.dumps({
-                            "seq": seq,
-                            "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
-                            "mime": mime,
-                        })
+                    line = _json.dumps({
+                        "seq": seq,
+                        "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
+                        "mime": mime,
+                    })
                     seq += 1
                     total_bytes += len(audio_bytes or b"")
                     yield line + "\n"

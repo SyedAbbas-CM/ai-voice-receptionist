@@ -38,7 +38,7 @@ import uuid
 import wave
 from typing import Optional
 
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from app.core import session_manager
@@ -85,8 +85,44 @@ def _twiml_stream_response(public_url: str) -> str:
 </Response>"""
 
 
+async def _verify_twilio_signature(request: Request) -> None:
+    """AUDIT FIX 2026-08-01 (WH-001): verify X-Twilio-Signature so nobody
+    else can hit our TwiML endpoint and drive fake call setups.
+
+    Twilio's algorithm: HMAC-SHA1 over URL + sorted-form-values, base64
+    encoded, compared constant-time against the header.  When
+    TWILIO_SIGNATURE_ENFORCE=false, verification is skipped (dev only).
+    """
+    import os
+    if os.environ.get("TWILIO_SIGNATURE_ENFORCE", "true").lower() in ("0", "false", "no"):
+        return
+    token = settings.twilio_auth_token or ""
+    if not token:
+        raise HTTPException(500, "Twilio signature enforcement is on but TWILIO_AUTH_TOKEN is not configured")
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not signature:
+        raise HTTPException(401, "missing X-Twilio-Signature")
+    # Build the canonical URL (Twilio hashes the exact URL they POSTed to)
+    public_base = (settings.twilio_public_url or "").rstrip("/")
+    if not public_base:
+        raise HTTPException(500, "TWILIO_PUBLIC_URL not configured for signature verification")
+    url = f"{public_base}{request.url.path}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
+    # Twilio appends sorted form values
+    form = await request.form()
+    payload = url + "".join(f"{k}{form.get(k)}" for k in sorted(form.keys()))
+    import base64, hashlib, hmac
+    expected = base64.b64encode(
+        hmac.new(token.encode("utf-8"), payload.encode("utf-8"), hashlib.sha1).digest()
+    ).decode("ascii")
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(401, "invalid Twilio signature")
+
+
 @router.post("/twilio/voice")
 async def twilio_voice_webhook(request: Request) -> Response:
+    await _verify_twilio_signature(request)
     public = settings.twilio_public_url or ""
     if not public:
         return Response(
@@ -112,27 +148,59 @@ def _mulaw_frames_to_wav(mulaw: bytes, sample_rate: int = TWILIO_SAMPLE_RATE) ->
 def _tts_bytes_to_mulaw(audio_bytes: bytes, mime: str) -> bytes:
     """Downsample TTS audio to 8kHz mono µ-law for Twilio playback.
 
-    Handles WAV (Qwen3, Piper) directly. For MP3 (11L, OpenAI) callers should
-    prefer a WAV-emitting provider on the phone leg — MP3 decode would need
-    an extra dep. We refuse MP3 loudly rather than fail silently."""
-    if "wav" not in mime:
-        raise RuntimeError(
-            f"twilio stream needs WAV TTS output, got {mime}. "
-            "Set TTS_PROVIDER=qwen3 or add mp3 decode to _tts_bytes_to_mulaw."
-        )
-    with wave.open(io.BytesIO(audio_bytes), "rb") as w:
-        pcm = w.readframes(w.getnframes())
-        src_rate = w.getframerate()
-        channels = w.getnchannels()
-        sampwidth = w.getsampwidth()
+    AUDIT FIX 2026-08-01 (PROV-014): every TTS provider on the Twilio
+    route MUST produce audio the transport can handle.  Supported inputs:
 
-    if channels == 2:
-        pcm = audioop.tomono(pcm, sampwidth, 1, 1)
-    if sampwidth != 2:
-        pcm = audioop.lin2lin(pcm, sampwidth, 2)
-    if src_rate != TWILIO_SAMPLE_RATE:
-        pcm, _ = audioop.ratecv(pcm, 2, 1, src_rate, TWILIO_SAMPLE_RATE, None)
-    return audioop.lin2ulaw(pcm, 2)
+      * WAV — Qwen3, Piper, one-shot Cartesia (`wav` container)
+      * raw PCM s16le — Cartesia SSE default (`audio/pcm;rate=NNNN`)
+      * µ-law 8kHz — providers that natively emit telephony audio
+        (Cartesia `ulaw_8000`, Deepgram `mulaw`, ElevenLabs `ulaw_8000`)
+
+    MP3 is NOT decoded — MP3-emitting providers (11L default, OpenAI TTS
+    default) MUST be configured to return one of the above formats on the
+    Twilio route.  We raise loudly rather than emit silence.
+    """
+    mime = (mime or "").lower()
+
+    # --- Case 1: already µ-law 8kHz — pass through ---
+    if "mulaw" in mime or "ulaw" in mime or "pcmu" in mime:
+        return audio_bytes
+
+    # --- Case 2: raw PCM s16le — extract sample rate from MIME param ---
+    if mime.startswith("audio/pcm") or "pcm_s16le" in mime or "l16" in mime:
+        src_rate = TWILIO_SAMPLE_RATE
+        if "rate=" in mime:
+            try:
+                src_rate = int(mime.split("rate=", 1)[1].split(";")[0].strip())
+            except (ValueError, IndexError):
+                pass
+        pcm = audio_bytes
+        if src_rate != TWILIO_SAMPLE_RATE:
+            pcm, _ = audioop.ratecv(pcm, 2, 1, src_rate, TWILIO_SAMPLE_RATE, None)
+        return audioop.lin2ulaw(pcm, 2)
+
+    # --- Case 3: WAV container ---
+    if "wav" in mime:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as w:
+            pcm = w.readframes(w.getnframes())
+            src_rate = w.getframerate()
+            channels = w.getnchannels()
+            sampwidth = w.getsampwidth()
+        if channels == 2:
+            pcm = audioop.tomono(pcm, sampwidth, 1, 1)
+        if sampwidth != 2:
+            pcm = audioop.lin2lin(pcm, sampwidth, 2)
+        if src_rate != TWILIO_SAMPLE_RATE:
+            pcm, _ = audioop.ratecv(pcm, 2, 1, src_rate, TWILIO_SAMPLE_RATE, None)
+        return audioop.lin2ulaw(pcm, 2)
+
+    # --- Case 4: MP3 / anything else — refuse loudly ---
+    raise RuntimeError(
+        f"twilio stream cannot handle TTS mime {mime!r}. Supported: "
+        "audio/wav, audio/pcm;rate=NNNN, audio/x-mulaw. Configure your "
+        "TTS provider to emit one of these (Cartesia: use `container=raw` "
+        "or `container=wav`; ElevenLabs: `output_format=ulaw_8000`)."
+    )
 
 
 class TwilioStreamSession:

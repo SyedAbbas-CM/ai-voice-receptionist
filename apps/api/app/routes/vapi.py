@@ -79,9 +79,16 @@ async def vapi_chat_completions(request: Request) -> dict:
     import logging
     _log = logging.getLogger(__name__)
 
-    if settings.vapi_secret:
+    # AUDIT FIX 2026-08-01 (WH-005): mandatory in prod, constant-time compare
+    import os as _os, hmac as _hmac
+    _enforce = _os.environ.get("VAPI_SIGNATURE_ENFORCE", "true").lower() not in ("0", "false", "no")
+    if _enforce:
+        if not settings.vapi_secret:
+            raise HTTPException(status_code=500, detail="VAPI_SECRET not configured")
         auth = request.headers.get("authorization", "")
-        if not auth.endswith(settings.vapi_secret):
+        # Accept both "Bearer <secret>" and bare "<secret>" forms
+        provided = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else auth.strip()
+        if not _hmac.compare_digest(provided, settings.vapi_secret):
             raise HTTPException(status_code=401, detail="invalid webhook secret")
 
     body = await request.json()
@@ -162,9 +169,16 @@ class VapiEventPayload(BaseModel):
 async def vapi_events(payload: VapiEventPayload, request: Request) -> dict:
     """Vapi call lifecycle events: end-of-call, hang-up, status changes.
     We use end-of-call-report to close the session and finalize DB rows."""
-    if settings.vapi_secret:
+    # AUDIT FIX 2026-08-01 (WH-005): mandatory in prod, constant-time compare
+    import os as _os, hmac as _hmac
+    _enforce = _os.environ.get("VAPI_SIGNATURE_ENFORCE", "true").lower() not in ("0", "false", "no")
+    if _enforce:
+        if not settings.vapi_secret:
+            raise HTTPException(status_code=500, detail="VAPI_SECRET not configured")
         auth = request.headers.get("authorization", "")
-        if not auth.endswith(settings.vapi_secret):
+        # Accept both "Bearer <secret>" and bare "<secret>" forms
+        provided = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else auth.strip()
+        if not _hmac.compare_digest(provided, settings.vapi_secret):
             raise HTTPException(status_code=401, detail="invalid webhook secret")
 
     msg = payload.message or {}

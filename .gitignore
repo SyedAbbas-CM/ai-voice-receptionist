@@ -84,3 +84,4 @@ docs/rnd-2026-07/
 # temp backups from sed -i
 .env.bak
 *.bak
+.github/workflows/

@@ -230,14 +230,21 @@ class SqliteVecRetriever(Retriever):
         # Sort and cap
         ranked = sorted(fused.values(), key=lambda t: -t[1])[:top_k]
 
-        # Confidence normalization: top-1 raw fused score maps to [0, 1].
-        # RRF scores are small; scale using the top-1 as reference.
-        max_score = max((s for _, s in ranked), default=1.0) or 1.0
+        # AUDIT FIX 2026-08-01 (RAG-003): use ABSOLUTE RRF ceiling, not
+        # top-normalization.  Previous behavior divided by max_score so the
+        # top result was ALWAYS 1.0, making the confidence threshold gate
+        # meaningless — a hopeless match at position 1 read as 100% confident.
+        #
+        # RRF ceiling with k_rrf=60: a chunk ranked #1 in BOTH channels scores
+        # alpha * 1/61 + (1-alpha) * 1/61 = 1/61 ≈ 0.0164.  We scale by that
+        # so a "hit in both channels at rank 1" caps at ~1.0 and everything
+        # weaker scales down honestly.
+        _RRF_CEIL = 1.0 / (k_rrf + 1)
         return [
             RetrievalHit(
                 chunk=chunk,
                 score=score,
-                confidence=min(1.0, score / max_score),
+                confidence=min(1.0, score / _RRF_CEIL),
             )
             for chunk, score in ranked
         ]

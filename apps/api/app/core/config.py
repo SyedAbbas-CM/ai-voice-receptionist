@@ -169,8 +169,12 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: Optional[str] = None
     whatsapp_verify_token: Optional[str] = None
     whatsapp_graph_version: str = "v22.0"
+    # 2026-08-01 audit WH-003: Meta app secret to verify X-Hub-Signature-256
+    whatsapp_app_secret: Optional[str] = None
 
     telegram_bot_token: Optional[str] = None
+    # 2026-08-01 audit WH-004: Telegram-provided secret for webhook auth
+    telegram_webhook_secret: Optional[str] = None
 
     twilio_account_sid: Optional[str] = None
     twilio_auth_token: Optional[str] = None

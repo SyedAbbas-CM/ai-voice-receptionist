@@ -33,7 +33,34 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="voiceops-ai-agent", version="0.1.0")
 
-    origins = [o.strip() for o in settings.cors_origins.split(",")] if settings.cors_origins != "*" else ["*"]
+    # AUDIT FIX 2026-08-01 (SEC-012): baseline security headers
+    from starlette.middleware.base import BaseHTTPMiddleware as _BHM
+    class SecurityHeadersMiddleware(_BHM):
+        async def dispatch(self, request, call_next):
+            response = await call_next(request)
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+            response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+            return response
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    # AUDIT FIX 2026-08-01 (SEC-001..SEC-004): API-key auth + tenant scoping
+    from app.middleware.auth import AuthTenantMiddleware
+    app.add_middleware(AuthTenantMiddleware)
+
+    # AUDIT FIX 2026-08-01 (SEC-009): tighter CORS default.  Wildcard only in
+    # explicit dev mode; production requires a comma-separated allowlist in
+    # CORS_ORIGINS env.
+    if settings.cors_origins == "*":
+        origins = ["*"]
+        import os
+        if os.environ.get("ENVIRONMENT", "").lower() == "production":
+            raise RuntimeError(
+                "CORS_ORIGINS=* is forbidden in production; set an explicit allowlist"
+            )
+    else:
+        origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
