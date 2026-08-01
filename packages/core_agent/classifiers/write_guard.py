@@ -184,8 +184,18 @@ async def validate_write(
             max_tokens=32,
         )
     except Exception as e:
-        log.warning("write_guard LLM check failed, failing open: %s", e)
-        return GuardVerdict(approved=True, reason="guard_error", detail=str(e))
+        # AUDIT FIX 2026-08-01 (BOOK-001): fail CLOSED on validator exception.
+        # Previous behavior approved the booking during any LLM outage, which
+        # bypassed the whole point of the write guard.  Now we ask the caller
+        # to reconfirm; the brain treats a rejected guard as "read the details
+        # back and re-ask".  Cost of a false rejection: caller repeats their
+        # name once.  Cost of a false approval: unwanted booking in the DB.
+        log.error("write_guard LLM check failed, failing CLOSED: %s", e)
+        return GuardVerdict(
+            approved=False,
+            reason="validator_unavailable",
+            detail="Sorry, could you say that back to me one more time to make sure I have it right?",
+        )
 
     raw = (resp.text or "").strip()
     upper = raw.upper()
@@ -199,6 +209,10 @@ async def validate_write(
             reason="rejected",
             detail=f"I want to make sure I have that right — {reason_tail}. Could you confirm?"
         )
-    # Malformed output: fail open with a log
-    log.warning("write_guard got unparseable output %r; failing open", raw)
-    return GuardVerdict(approved=True, reason="unparseable_response")
+    # AUDIT FIX 2026-08-01 (BOOK-001): unparseable also fails CLOSED, same reasoning.
+    log.error("write_guard got unparseable output %r; failing CLOSED", raw)
+    return GuardVerdict(
+        approved=False,
+        reason="unparseable_response",
+        detail="Sorry, could you say that back to me one more time to make sure I have it right?",
+    )

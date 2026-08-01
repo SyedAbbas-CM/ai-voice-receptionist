@@ -190,8 +190,10 @@ async def test_llm_rejects_with_reason():
 
 
 @pytest.mark.asyncio
-async def test_llm_error_fails_open():
-    """A broken guard should NOT block real bookings."""
+async def test_llm_error_fails_CLOSED():
+    """AUDIT FIX 2026-08-01 (BOOK-001): broken guard MUST block bookings.
+    Previous behavior of failing open let hallucinated bookings through during
+    any Groq outage.  Cost of false rejection = caller reconfirms once."""
     class BrokenLLM(LLMProvider):
         name = "broken"
         async def complete(self, *a, **kw):
@@ -200,21 +202,23 @@ async def test_llm_error_fails_open():
     v = await validate_write(
         BrokenLLM(), "book_appointment",
         {"caller_name": "John Carter", "phone": "5551234567", "service": "consult", "start_iso": "2026-07-15T10:00"},
-        ["USER: book me tomorrow at 10"],  # date word so hallucinated_date fast-path passes
+        ["USER: book me tomorrow at 10"],
     )
-    assert v.approved is True
-    assert v.reason == "guard_error"
+    assert v.approved is False
+    assert v.reason == "validator_unavailable"
+    assert "one more time" in v.detail.lower()
 
 
 @pytest.mark.asyncio
-async def test_unparseable_output_fails_open():
+async def test_unparseable_output_fails_CLOSED():
+    """AUDIT FIX 2026-08-01 (BOOK-001): unparseable validator output = block."""
     llm = ScriptedLLM("I'm not sure about this booking.")
     v = await validate_write(
         llm, "book_appointment",
         {"caller_name": "John Carter", "phone": "5551234567", "service": "consult", "start_iso": "2026-07-15T10:00"},
-        ["USER: book me tomorrow at 10"],  # date word so hallucinated_date fast-path passes
+        ["USER: book me tomorrow at 10"],
     )
-    assert v.approved is True  # fails open
+    assert v.approved is False
     assert v.reason == "unparseable_response"
 
 

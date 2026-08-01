@@ -62,9 +62,11 @@ class GeminiLLM(LLMProvider):
                 ],
             }]
 
-        url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
+        # AUDIT FIX 2026-08-01 (PROV-012): key in header, not URL query.
+        # URLs land in proxy/access logs; headers usually don't.
+        url = f"{self.base_url}/models/{self.model}:generateContent"
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=payload, headers={"x-goog-api-key": self.api_key})
             resp.raise_for_status()
             data = resp.json()
 

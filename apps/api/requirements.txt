@@ -13,3 +13,11 @@ python-multipart>=0.0.9
 # anthropic>=0.34
 # google-api-python-client>=2.140              # Google Calendar + Sheets
 # google-auth>=2.32                            # service account auth
+
+# --- audit fixes 2026-08-01 ---
+# PROV-015: audioop module removed in Python 3.13; drop-in shim from PSF
+audioop-lts>=0.2.1; python_version>="3.13"
+# num2words used by speech sanitizer (was already installed but not pinned)
+num2words>=0.5.13
+# cartesia SDK (was undeclared per DEV-001)
+cartesia>=3.0

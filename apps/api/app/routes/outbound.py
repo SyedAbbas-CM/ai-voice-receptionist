@@ -155,9 +155,34 @@ def _load_leads(sheets: GoogleSheets, req: BatchRequest) -> tuple[list[dict], li
     return rows, leads
 
 
+# --- AUDIT FIX 2026-08-01 (SEC-005 + OUT-001/002/003/006/014) ---
+# Outbound endpoints are DISABLED by default pending the safety-review sprint.
+# Findings blocking re-enablement:
+#   * SEC-005: client-supplied sheet_id, assistant_id, phone_number_id
+#   * OUT-001: consent provider disabled by default
+#   * OUT-002: production route bypasses consent-aware decision path
+#   * OUT-003: DNC is client-controlled
+#   * OUT-006: client-supplied Google sheet — confused-deputy risk
+#   * OUT-014: caller-ID override
+# To temporarily re-enable for internal testing, set OUTBOUND_ROUTE_ENABLED=true
+# in .env AND make sure the deployment is not publicly exposed.
+def _outbound_disabled_guard() -> None:
+    import os
+    if os.environ.get("OUTBOUND_ROUTE_ENABLED", "").lower() not in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Outbound routes are disabled pending the Sprint-5 safety review. "
+                "See docs/AUDIT_RESPONSE.md for the release plan. To temporarily "
+                "enable for internal testing, set OUTBOUND_ROUTE_ENABLED=true."
+            ),
+        )
+
+
 @router.post("/dry_run", response_model=BatchPreview)
 async def dry_run(req: BatchRequest) -> BatchPreview:
     """Preview which leads WOULD be dialed. Zero API calls to Vapi."""
+    _outbound_disabled_guard()
     sheets = _sheet_client(req)
     rows, leads = _load_leads(sheets, req)
     policy = _build_policy(req)
@@ -200,6 +225,7 @@ def _load_business_profile(business_id: str) -> "object":
 
 @router.post("/start_batch", response_model=BatchResult)
 async def start_batch(req: BatchRequest) -> BatchResult:
+    _outbound_disabled_guard()
     """Actually dial. Non-blocking.
 
     - transport=vapi: POST /call/phone to Vapi; end-of-call arrives at /vapi/events
