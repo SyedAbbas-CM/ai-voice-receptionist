@@ -1,0 +1,131 @@
+%%{init: {
+  "theme": "base",
+  "look": "handDrawn",
+  "themeVariables": {
+    "fontFamily": "Geist, -apple-system, Segoe UI, sans-serif",
+    "fontSize": "14px",
+    "primaryColor": "#12161d",
+    "primaryTextColor": "#dfe4ec",
+    "primaryBorderColor": "#5fa8ff",
+    "lineColor": "#5fa8ff",
+    "secondaryColor": "#171c25",
+    "tertiaryColor": "#232937",
+    "background": "#0b0e13",
+    "mainBkg": "#12161d",
+    "secondBkg": "#171c25",
+    "clusterBkg": "#0e1219",
+    "clusterBorder": "#232937",
+    "edgeLabelBackground": "#0b0e13",
+    "titleColor": "#dfe4ec"
+  },
+  "flowchart": { "curve": "basis", "padding": 20, "nodeSpacing": 40, "rankSpacing": 60 }
+} }%%
+
+flowchart LR
+
+  %% ===== INBOUND =====
+  subgraph inbound["📞 Inbound Call"]
+    direction TB
+    caller(["Caller<br/><i>phone / browser</i>"])
+    transport["Twilio / Vapi<br/><b>&lt; 40 ms</b><br/><i>PSTN + WebRTC</i>"]
+    caller ==> transport
+  end
+
+  %% ===== PIPELINE =====
+  subgraph pipeline["🧠 Voice Agent"]
+    direction LR
+
+    subgraph stt_stage["Speech → Text"]
+      direction TB
+      stt["Deepgram Nova-3<br/><b>150 ms P50</b><br/><i>streaming</i>"]
+      vad["Silero VAD<br/><b>~30 ms</b><br/><i>endpointing</i>"]
+    end
+
+    subgraph guard_stage["Safety Gate"]
+      direction TB
+      guard["Input Guard<br/><b>&lt; 1 ms</b><br/><i>regex: jailbreak,<br/>exfil, fake-authority,<br/>minor</i>"]
+      safe_reply["Canned Safe Reply<br/><i>4 templates<br/>zero-LLM cost</i>"]
+    end
+
+    subgraph brain_stage["Brain (LLM cascade)"]
+      direction TB
+      brain["Groq Llama-3.3-70B<br/><b>300 ms P50</b><br/><i>$0.00003/turn</i>"]
+      fallback1["Gemini 2.5 Flash<br/><i>fallback #1</i>"]
+      fallback2["Nvidia Nemotron 70B<br/><i>fallback #2</i>"]
+      brain -.-> fallback1
+      fallback1 -.-> fallback2
+    end
+
+    subgraph tools_stage["Tools"]
+      direction TB
+      tool_router{{"Tool Router<br/><b>~20 ms/call</b>"}}
+      subgraph restaurant_tools["Restaurant · 8 tools"]
+        direction TB
+        t_reso["check_availability<br/>make_reservation<br/>get_menu<br/>check_allergen<br/>build_order<br/>quote_delivery_eta<br/>apply_loyalty<br/>capture_deposit_link"]
+      end
+      subgraph clinic_tools["Clinic · 8 tools"]
+        direction TB
+        t_med["check_availability<br/>book_appointment<br/>verify_insurance<br/>triage_urgency<br/>request_refill<br/>check_referral<br/>escalate_to_nurse<br/>escalate_to_911"]
+      end
+      escalate["escalate_to_human<br/><i>always available</i>"]
+      tool_router --> restaurant_tools
+      tool_router --> clinic_tools
+      tool_router --> escalate
+    end
+
+    subgraph tts_stage["Text → Speech"]
+      direction TB
+      tts["Cartesia Sonic-3<br/><b>188 ms P50 first-byte</b><br/><i>sentence streaming</i>"]
+      cache["Greeting Cache<br/><b>0 ms</b><br/><i>pre-warmed</i>"]
+      filler["Filler Pool<br/><i>&#39;one sec&#39;, &#39;checking&#39;</i>"]
+    end
+
+    stt --> vad --> guard
+    guard -- "flagged" --> safe_reply
+    guard -- "clean" --> brain
+    brain --> tool_router
+    tool_router -- "results" --> brain
+    brain --> tts
+    cache -.-> tts
+    filler -.-> tts
+    safe_reply --> tts
+  end
+
+  %% ===== INTEGRATIONS =====
+  subgraph external["🔌 Business Integrations"]
+    direction TB
+    calendar[("Calendar<br/><i>Resy / Athena /<br/>Google</i>")]
+    crm[("CRM / EHR<br/><i>Toast / athenaOne</i>")]
+    sms["Twilio SMS<br/><i>deposit links,<br/>confirmations</i>"]
+    stripe["Stripe<br/><i>deposits</i>"]
+  end
+
+  tools_stage --> calendar
+  tools_stage --> crm
+  tools_stage --> sms
+  tools_stage --> stripe
+
+  %% ===== OBSERVABILITY =====
+  subgraph observe["📊 Observability"]
+    direction TB
+    tracer["OpenTelemetry Tracer<br/><i>every span, every cost</i>"]
+    dashboard["Live Graph Dashboard<br/><b>/graph</b>"]
+    logs["SQLite Transcript Log<br/><i>PII-redacted</i>"]
+  end
+
+  pipeline -. spans .-> tracer
+  tracer --> dashboard
+  tracer --> logs
+
+  %% ===== OUTBOUND =====
+  tts ==> transport
+
+  %% ===== 3-COLOR PALETTE =====
+  %% signal path (blue) · safety (red) · side-effects (purple)
+  classDef signalStyle fill:#12161d,stroke:#5fa8ff,stroke-width:2px,color:#dfe4ec
+  classDef safetyStyle fill:#12161d,stroke:#ff6b6b,stroke-width:2px,color:#dfe4ec
+  classDef sideStyle   fill:#12161d,stroke:#b98cff,stroke-width:2px,color:#dfe4ec
+
+  class caller,transport,stt,vad,brain,fallback1,fallback2,tts,cache,filler signalStyle
+  class guard,safe_reply safetyStyle
+  class tool_router,t_reso,t_med,escalate,calendar,crm,sms,stripe,tracer,dashboard,logs sideStyle

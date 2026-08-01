@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Call our receptionist</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main id="app">
+
+    <!-- SCREEN 1: idle / call button -->
+    <section id="screen-idle" class="screen active">
+      <div class="business-card">
+        <div class="avatar" id="avatar">
+          <svg viewBox="0 0 64 64" width="80" height="80" fill="none">
+            <circle cx="32" cy="32" r="30" fill="#12161d" stroke="#5fa8ff" stroke-width="2"/>
+            <path d="M32 20 c-6 0 -10 4 -10 10 s4 10 10 10 s10 -4 10 -10 s-4 -10 -10 -10 z m0 4 c3.3 0 6 2.7 6 6 s-2.7 6 -6 6 s-6 -2.7 -6 -6 s2.7 -6 6 -6 z" fill="#dfe4ec"/>
+            <path d="M14 50 c0 -8 8 -12 18 -12 s18 4 18 12" stroke="#dfe4ec" stroke-width="2" fill="none" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h1 id="business-name">Loading…</h1>
+        <p id="business-tag">AI receptionist · always available</p>
+        <button id="call-btn" class="call-btn">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="vertical-align:middle;margin-right:8px">
+            <path d="M20 15.5c-1.25 0-2.45-.2-3.57-.57-.35-.11-.74-.03-1.02.24l-2.2 2.2c-2.83-1.44-5.15-3.75-6.59-6.58l2.2-2.21c.28-.27.36-.66.25-1.01A11.36 11.36 0 0 1 8.5 4c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1 0 9.39 7.61 17 17 17 .55 0 1-.45 1-1v-3.5c0-.55-.45-1-1-1z"/>
+          </svg>
+          Call agent
+        </button>
+        <p class="sub-help">Uses your browser mic and speakers · zero cost</p>
+      </div>
+    </section>
+
+    <!-- SCREEN 2: active call -->
+    <section id="screen-active" class="screen">
+      <div class="call-header">
+        <div class="avatar-small">
+          <div class="pulse-ring" id="pulse-ring"></div>
+          <svg viewBox="0 0 64 64" width="56" height="56" fill="none">
+            <circle cx="32" cy="32" r="30" fill="#12161d" stroke="#5fa8ff" stroke-width="2"/>
+            <path d="M32 20 c-6 0 -10 4 -10 10 s4 10 10 10 s10 -4 10 -10 s-4 -10 -10 -10 z m0 4 c3.3 0 6 2.7 6 6 s-2.7 6 -6 6 s-6 -2.7 -6 -6 s2.7 -6 6 -6 z" fill="#dfe4ec"/>
+            <path d="M14 50 c0 -8 8 -12 18 -12 s18 4 18 12" stroke="#dfe4ec" stroke-width="2" fill="none" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="call-header-text">
+          <div id="call-business">Smile Dental</div>
+          <div class="call-status" id="call-status">connecting…</div>
+          <div class="call-timer" id="call-timer">00:00</div>
+        </div>
+      </div>
+
+      <div class="transcript-live" id="transcript-live">
+        <div class="hint">Say something. Hold the button below to talk.</div>
+      </div>
+
+      <div class="talk-area">
+        <button id="talk-btn" class="talk-btn">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
+            <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3z"/>
+            <path d="M17 11a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z"/>
+          </svg>
+          <span id="talk-label">Hold to talk</span>
+        </button>
+        <button id="end-btn" class="end-btn" title="End call">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.996.996 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.1-.7-.28a11.27 11.27 0 0 0-2.66-1.85.996.996 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/>
+          </svg>
+        </button>
+      </div>
+    </section>
+
+    <!-- SCREEN 3: call ended -->
+    <section id="screen-ended" class="screen">
+      <div class="ended-card">
+        <h1>Call ended</h1>
+        <div class="stat-row"><span>Duration</span><b id="ended-duration">—</b></div>
+        <div class="stat-row"><span>Turns</span><b id="ended-turns">—</b></div>
+        <button id="restart-btn" class="call-btn">Call again</button>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="powered">
+    Powered by <a href="/">voiceops-ai-agent</a>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

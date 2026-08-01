@@ -1,0 +1,56 @@
+%%{init: {
+  "theme": "base",
+  "look": "handDrawn",
+  "themeVariables": {
+    "fontFamily": "Geist, -apple-system, Segoe UI, sans-serif",
+    "fontSize": "14px",
+    "primaryColor": "#12161d",
+    "primaryTextColor": "#dfe4ec",
+    "primaryBorderColor": "#5fa8ff",
+    "lineColor": "#5fa8ff",
+    "secondaryColor": "#171c25",
+    "tertiaryColor": "#232937",
+    "background": "#0b0e13",
+    "mainBkg": "#12161d",
+    "secondBkg": "#171c25",
+    "actorBkg": "#12161d",
+    "actorTextColor": "#dfe4ec",
+    "actorLineColor": "#5fa8ff",
+    "signalColor": "#dfe4ec",
+    "signalTextColor": "#dfe4ec",
+    "noteBkgColor": "#171c25",
+    "noteTextColor": "#6ee7b7",
+    "noteBorderColor": "#232937",
+    "activationBorderColor": "#5fa8ff",
+    "activationBkgColor": "#12161d",
+    "sequenceNumberColor": "#dfe4ec"
+  }
+} }%%
+
+sequenceDiagram
+    autonumber
+    actor C as 📞 Caller
+    participant T as Twilio · Vapi
+    participant S as Deepgram Nova-3
+    participant G as Input Guard
+    participant B as Groq Llama-3.3-70B
+    participant Tools as Tool Router
+    participant TTS as Cartesia Sonic-3
+
+    C->>T: "table for four tonight at seven"
+    Note over T: t = 0 ms
+    T->>S: audio stream (µ-law)
+    S-->>G: partial transcripts
+    Note over S: +150 ms · first partial
+    S->>G: final transcript
+    Note over G: +1 ms · regex check passes
+    G->>B: clean utterance + tool schema
+    B->>Tools: check_availability(4, 2026-07-28)
+    Note over B: +300 ms · first token
+    Tools-->>B: slots: 6:45, 7:15, 7:30
+    Note over Tools: +80 ms · in-memory lookup
+    B->>TTS: "I have 6:45, 7:15, or 7:30"
+    TTS->>T: audio bytes (streaming)
+    Note over TTS: +188 ms · first audio byte
+    T->>C: response plays
+    Note over C: 🎉 total ≈ 719 ms

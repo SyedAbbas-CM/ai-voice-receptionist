@@ -12,14 +12,20 @@ from ..base import LLMProvider, LLMResponse
 
 
 class GroqLLM(LLMProvider):
-    """Groq is OpenAI-API compatible. Same shape as OpenAILLM with a different base URL."""
+    """Groq is OpenAI-API compatible. Same shape as OpenAILLM with a different base URL.
+
+    2026-07-31: when constructed by RouterLLM, pass raise_on_rate_limit=True to
+    disable this class's own cross-provider fallback ladder — the router owns
+    fallover in that mode.  When used standalone (LLM_PROVIDER=groq) the
+    legacy fallback ladder still fires."""
 
     name = "groq"
 
-    def __init__(self) -> None:
+    def __init__(self, raise_on_rate_limit: bool = False) -> None:
         self.api_key = settings.groq_api_key
         self.model = settings.groq_model or "llama-3.3-70b-versatile"
         self.base_url = "https://api.groq.com/openai/v1"
+        self.raise_on_rate_limit = raise_on_rate_limit
 
     async def complete(
         self,
@@ -72,6 +78,13 @@ class GroqLLM(LLMProvider):
                 # legitimately take that long during heavy harness runs).
                 retry_after = float(resp.headers.get("retry-after", 2 ** (attempt + 1)))
 
+                # 2026-07-31: when RouterLLM constructed us, raise cleanly on
+                # 429 so router picks the next provider immediately.  Otherwise
+                # router's timeout races this class's retry loop and the caller
+                # sees dead air.
+                if self.raise_on_rate_limit:
+                    resp.raise_for_status()
+
                 # Fallback ladder (updated 2026-07-20). When Groq TPD is exhausted:
                 #   1. Gemini 2.5 Flash Lite — 1.1s, 1000 RPD free tier, no shared quota
                 #   2. OpenRouter Llama-3.3-70B — ~2s, pay-per-token
@@ -81,7 +94,12 @@ class GroqLLM(LLMProvider):
                 openrouter_key = settings.openrouter_api_key
                 nvidia_key = settings.nvidia_api_key
 
-                if retry_after > 180 and gemini_key:
+                # 2026-07-29: dropped fallback threshold from 180s → 5s so a
+                # single voice caller doesn't wait through Groq's TPM cooldown
+                # (typical 10-30s). Voice UX budget is ~1s per turn; anything
+                # over ~5s of sleep already breaks the conversation. Fall
+                # over to the next provider immediately instead of sleeping.
+                if retry_after > 5 and gemini_key:
                     _log.warning(
                         "Groq 429 with %.0fs backoff → falling back to Gemini Flash Lite",
                         retry_after,
@@ -93,7 +111,7 @@ class GroqLLM(LLMProvider):
                     except Exception as e:
                         _log.warning("Gemini fallback failed (%s) — trying OpenRouter next", e)
 
-                if retry_after > 180 and openrouter_key:
+                if retry_after > 5 and openrouter_key:
                     _log.warning(
                         "Groq 429 with %.0fs backoff → falling back to OpenRouter",
                         retry_after,
@@ -105,7 +123,7 @@ class GroqLLM(LLMProvider):
                     except Exception as e:
                         _log.warning("OpenRouter fallback failed (%s) — trying NVIDIA next", e)
 
-                if retry_after > 180 and nvidia_key:
+                if retry_after > 5 and nvidia_key:
                     _log.warning(
                         "Groq 429 with %.0fs backoff → falling back to NVIDIA Nemotron",
                         retry_after,
@@ -120,7 +138,7 @@ class GroqLLM(LLMProvider):
                 # LAST resort: degrade to smaller Groq model (8B has known
                 # tool-calling regression → 400s. Only use when all else has
                 # failed.)
-                if retry_after > 180 and current_model in _FALLBACK_CHAIN:
+                if retry_after > 5 and current_model in _FALLBACK_CHAIN:
                     fallback = _FALLBACK_CHAIN[current_model]
                     _log.warning("Groq 429 with %.0fs backoff on %s → degrading to %s",
                                   retry_after, current_model, fallback)

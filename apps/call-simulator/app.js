@@ -100,9 +100,42 @@ async function sendUserText(text) {
   await speak(data.reply);
 }
 
-// Streaming TTS: fetch /voice/tts-stream (NDJSON), decode each chunk as it
-// arrives, queue and play sequentially. First audio arrives ~1.5-2s instead
-// of waiting for the whole reply to synth (was 5-10s+).
+// Reusable AudioContext for gap-free sample-accurate chunk playback.
+// Created lazily on first speak() so autoplay policy is satisfied by the
+// user gesture (Start Call button).
+let _audioCtx = null;
+function _getAudioCtx() {
+  if (_audioCtx && _audioCtx.state !== "closed") return _audioCtx;
+  _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return _audioCtx;
+}
+
+// Decode a base64 WAV/audio blob → AudioBuffer we can schedule.
+// Cartesia + our TTS providers stream RAW PCM s16le (no WAV header).  Browser
+// decodeAudioData needs a container, so for raw PCM we build the AudioBuffer
+// by hand from Int16 samples.  Fixed 2026-07-31 (was silently dropping audio).
+async function _decodeChunk(b64, mime) {
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const ctx = _getAudioCtx();
+  if (mime && mime.startsWith("audio/pcm")) {
+    const rateMatch = mime.match(/rate=(\d+)/);
+    const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 16000;
+    const dv = new DataView(bytes.buffer);
+    const nSamples = Math.floor(bytes.length / 2);
+    const buf = ctx.createBuffer(1, nSamples, sampleRate);
+    const chan = buf.getChannelData(0);
+    for (let i = 0; i < nSamples; i++) {
+      chan[i] = dv.getInt16(i * 2, true) / 32768;
+    }
+    return buf;
+  }
+  return await ctx.decodeAudioData(bytes.buffer);
+}
+
+// Streaming TTS: fetch /voice/tts-stream (NDJSON) and schedule each chunk
+// back-to-back via Web Audio API. Zero gap between chunks (unlike <audio>
+// element chain which had ~100-300ms load overhead per chunk). First audio
+// arrives ~1.5-2s; subsequent chunks slot in with sample-accurate timing.
 async function speak(text) {
   try {
     const r = await fetch(`${API}/voice/tts-stream`, {
@@ -115,33 +148,34 @@ async function speak(text) {
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
+    const ctx = _getAudioCtx();
+    if (ctx.state === "suspended") await ctx.resume();
 
-    // Play chunks strictly in seq order — but decode/queue as they arrive.
-    // Each chunk plays on an <audio> element; the promise resolves at 'ended'
-    // so the NEXT queued chunk starts immediately.
-    const playQueue = [];
-    let playing = false;
+    // Scheduling cursor — when the NEXT chunk should start playing.
+    // Initialized when the first chunk decodes.
+    let nextStartAt = 0;
+    const sources = [];  // keep refs so GC doesn't kill mid-playback
 
-    const drainQueue = async () => {
-      if (playing) return;
-      playing = true;
-      while (playQueue.length > 0) {
-        const src = playQueue.shift();
-        const audio = new Audio(src);
-        await new Promise((res, rej) => {
-          audio.onended = res;
-          audio.onerror = res;   // don't stall on a bad chunk
-          audio.play().catch(res);
-        });
+    const scheduleChunk = async (b64, mime) => {
+      try {
+        const audioBuf = await _decodeChunk(b64, mime);
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(ctx.destination);
+        // First chunk starts ~50ms in the future to give decoder margin
+        const startAt = Math.max(ctx.currentTime + 0.05, nextStartAt);
+        src.start(startAt);
+        nextStartAt = startAt + audioBuf.duration;
+        sources.push(src);
+      } catch (e) {
+        console.warn("chunk decode/schedule failed:", e);
       }
-      playing = false;
     };
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
-      // Split on newline; last partial line stays in buf
       let idx;
       while ((idx = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, idx).trim();
@@ -150,7 +184,6 @@ async function speak(text) {
         let obj;
         try { obj = JSON.parse(line); } catch { continue; }
         if (obj.seq === -1) {
-          // Sentinel — end of stream or error
           if (obj.error) console.warn("tts stream error:", obj.error);
           continue;
         }
@@ -159,14 +192,17 @@ async function speak(text) {
           continue;
         }
         if (obj.audio_b64) {
-          playQueue.push(`data:${obj.mime};base64,${obj.audio_b64}`);
-          drainQueue();  // fire-and-forget; internal lock prevents overlap
+          // Schedule this chunk — no await inside the loop, we WANT
+          // multiple decodes racing so subsequent chunks are ready before
+          // their scheduled start time.
+          scheduleChunk(obj.audio_b64, obj.mime);
         }
       }
     }
-    // Wait for the final chunk to finish playing before returning
-    while (playing || playQueue.length > 0) {
-      await new Promise(res => setTimeout(res, 100));
+    // Wait for the last scheduled chunk to finish playing before returning
+    if (nextStartAt > ctx.currentTime) {
+      const remainingMs = (nextStartAt - ctx.currentTime) * 1000;
+      await new Promise(res => setTimeout(res, remainingMs + 100));
     }
   } catch (e) {
     console.warn("tts-stream failed, falling back:", e);

@@ -66,14 +66,67 @@ def _openai_response(reply: str, model: str) -> dict:
 
 
 @router.post("/chat/completions")
-async def vapi_chat_completions(req: VapiCompletionRequest, request: Request) -> dict:
-    """Vapi's custom-LLM endpoint. Vapi handles STT/TTS/telephony; we own the brain."""
+async def vapi_chat_completions(request: Request) -> dict:
+    """Vapi's custom-LLM endpoint. Vapi handles STT/TTS/telephony; we own the brain.
+
+    Accepts the raw request body so we can log + tolerate Vapi's payload-shape
+    drift.  2026-07-31: users reported the agent going silent mid-call; server
+    logs showed the POST landed with 200 OK but no LLM span fired for the turn.
+    Root-cause turned out to be Pydantic silently accepting a payload where
+    `messages` was empty (Vapi's newer shape wraps under `message.artifact` or
+    similar).  Now we parse defensively and log every payload for debugging.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
     if settings.vapi_secret:
         auth = request.headers.get("authorization", "")
         if not auth.endswith(settings.vapi_secret):
             raise HTTPException(status_code=401, detail="invalid webhook secret")
 
-    session_id = _session_id_from_request(req)
+    body = await request.json()
+    _log.info("VAPI POST body keys=%s", list(body.keys())[:20])
+
+    # Extract messages from any of Vapi's known payload shapes
+    messages = body.get("messages")
+    call_meta = body.get("call") or {}
+
+    # New Vapi wrapper shape: {"message": {"artifact": {"messages": [...]}, "call": {...}}}
+    if not messages and isinstance(body.get("message"), dict):
+        wrapped = body["message"]
+        artifact = wrapped.get("artifact") or {}
+        messages = artifact.get("messages") or wrapped.get("messages")
+        call_meta = wrapped.get("call") or call_meta
+
+    if not messages:
+        _log.warning("VAPI: no messages found in payload. Body keys=%s", list(body.keys()))
+        # Return greeting instead of silence
+        try:
+            biz_name = session_manager.load_business().name
+        except Exception:
+            biz_name = "our office"
+        return _openai_response(
+            f"Hi, thanks for calling {biz_name}. How can I help you today?",
+            body.get("model") or "voiceops-brain",
+        )
+
+    # Coerce messages into simple {role, content} dicts
+    coerced_messages = []
+    for m in messages:
+        if isinstance(m, dict):
+            coerced_messages.append({
+                "role": m.get("role", "user"),
+                "content": m.get("content") or m.get("message") or "",
+            })
+
+    _log.info(
+        "VAPI turn: session=%s, msg_count=%d, last_user=%r",
+        call_meta.get("id", "?")[:12],
+        len(coerced_messages),
+        (coerced_messages[-1]["content"] if coerced_messages else "")[:80],
+    )
+
+    session_id = f"vapi_{call_meta.get('id', uuid.uuid4().hex[:12])}"
     handle = session_manager.get_session(session_id)
     if handle is None:
         state, brain = session_manager.start_session_with_id(session_id)
@@ -81,12 +134,24 @@ async def vapi_chat_completions(req: VapiCompletionRequest, request: Request) ->
     else:
         state, brain = handle
 
-    user_text = _last_user_text(req.messages)
-    if not user_text:
-        return _openai_response(f"Hi, thanks for calling {brain.business.name}. How can I help you today?", req.model)
+    # Find the last user turn
+    user_text = ""
+    for msg in reversed(coerced_messages):
+        if msg["role"] == "user" and msg["content"]:
+            user_text = msg["content"]
+            break
 
+    if not user_text:
+        return _openai_response(
+            f"Hi, thanks for calling {brain.business.name}. How can I help you today?",
+            body.get("model"),
+        )
+
+    _log.info("VAPI running brain turn: %r", user_text[:80])
     payload = await session_manager.run_user_turn(state, brain, user_text)
-    return _openai_response(payload["reply"], req.model)
+    reply = payload.get("reply", "I didn't catch that, can you say it again?")
+    _log.info("VAPI reply (%d chars): %r", len(reply), reply[:100])
+    return _openai_response(reply, body.get("model"))
 
 
 class VapiEventPayload(BaseModel):

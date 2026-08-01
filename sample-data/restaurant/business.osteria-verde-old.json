@@ -1,0 +1,33 @@
+{
+  "id": "demo-restaurant-001",
+  "name": "Osteria Verde",
+  "vertical": "restaurant",
+  "timezone": "America/New_York",
+  "hours": {
+    "monday": null,
+    "tuesday": "17:00-22:00",
+    "wednesday": "17:00-22:00",
+    "thursday": "17:00-22:00",
+    "friday": "17:00-23:00",
+    "saturday": "12:00-23:00",
+    "sunday": "12:00-21:00"
+  },
+  "services": [
+    { "name": "Table for 2", "duration_minutes": 90, "description": "Standard reservation for 2 guests" },
+    { "name": "Table for 4", "duration_minutes": 90, "description": "Standard reservation for 4 guests" },
+    { "name": "Table for 6", "duration_minutes": 120, "description": "Reservation for 6 guests, back room" },
+    { "name": "Private dining", "duration_minutes": 180, "description": "Private dining room, minimum 8 guests, tasting menu" }
+  ],
+  "faqs": {
+    "dietary": "We can accommodate gluten-free, vegetarian, vegan, and most allergies. Please tell us when booking so the kitchen can prep.",
+    "corkage": "$25 per bottle. Two-bottle maximum per table.",
+    "kids": "Kids are welcome. Highchairs and a kids menu are available.",
+    "parking": "Street parking on Elm St; a paid lot is one block north.",
+    "dress code": "Smart casual. No shorts or flip-flops after 6pm.",
+    "cancellation": "Please give 4 hours notice. Same-day cancellations are charged $15 per person.",
+    "gift cards": "Available at the host stand or by phone. Any amount from $25."
+  },
+  "escalation_phone": "+1-555-020-3311",
+  "address": "88 Elm Street, Brooklyn",
+  "voice_persona": "warm, hospitable, quick to confirm details, uses guest's first name once"
+}

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>voiceops-ai-agent · live graph</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/reactflow@11/dist/umd/index.js" crossorigin></script>
+  <link rel="stylesheet" href="https://unpkg.com/reactflow@11/dist/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>voiceops · live agent graph</h1>
+    </div>
+    <div class="header-right">
+      <span id="mode-badge" class="badge">connecting…</span>
+      <select id="session-select" class="session-select"><option value="">all sessions</option></select>
+      <button id="mock-btn" class="btn">▶ demo mode</button>
+      <button id="pause-btn" class="btn">⏸ pause</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="graph"></div>
+    <aside id="inspector">
+      <div class="inspector-header">
+        <h2 id="inspector-title">Click a node</h2>
+        <button id="close-inspector" class="btn-icon">×</button>
+      </div>
+      <div id="inspector-body">
+        <p class="hint">Click any node in the graph to see its input, output, latency, and cost for the most recent call.</p>
+      </div>
+    </aside>
+  </main>
+
+  <footer>
+    <div class="footer-stats">
+      <span>calls: <b id="stat-calls">0</b></span>
+      <span>spans buffered: <b id="stat-spans">0</b></span>
+      <span>last turn e2e: <b id="stat-e2e">—</b></span>
+      <span>llm p50: <b id="stat-llm">—</b></span>
+      <span>tts p50: <b id="stat-tts">—</b></span>
+      <span>stt p50: <b id="stat-stt">—</b></span>
+      <span>total cost: <b id="stat-cost">$0.00</b></span>
+    </div>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

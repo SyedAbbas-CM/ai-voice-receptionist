@@ -121,6 +121,12 @@ async def text_to_speech_stream(payload: dict):
     tts = get_tts()
     tracer = get_tracer()
 
+    # Sprint 4a: pre-cached greeting fast-path. If the exact text matches
+    # a warmed greeting, skip TTS entirely and send cached bytes as one
+    # chunk. Saves 2-3s cold-synth on turn 1 of every call.
+    from packages.voice import get_cached_greeting
+    cached = get_cached_greeting(text)
+
     async def _generate():
         seq = 0
         total_bytes = 0
@@ -130,8 +136,23 @@ async def text_to_speech_stream(payload: dict):
                 "tts.provider": tts.name,
                 "tts.streaming_native": bool(getattr(tts, "supports_streaming", False)),
                 "text.length": len(text),
+                "cache_hit": cached is not None,
             },
         ) as span:
+            if cached is not None:
+                cached_bytes, cached_mime = cached
+                line = _json.dumps({
+                    "seq": 0,
+                    "audio_b64": base64.b64encode(cached_bytes).decode("ascii"),
+                    "mime": cached_mime,
+                })
+                yield line + "\n"
+                yield _json.dumps({"seq": -1, "done": True, "n_chunks": 1, "cache_hit": True}) + "\n"
+                span.set_attribute("chunks.emitted", 1)
+                span.set_attribute("audio.bytes_total", len(cached_bytes))
+                span.set_attribute("cost_usd_est", 0.0)  # cache hit = free
+                return
+
             try:
                 async for audio_bytes, mime in tts.stream_sentences(text, voice=voice):
                     # Browser fallback (no local audio) — emit text-only chunk

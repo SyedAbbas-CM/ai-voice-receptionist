@@ -1,6 +1,29 @@
 # voiceops-ai-agent
 
-AI receptionist starter kit for local businesses. Inbound calls, appointment booking, lead qualification, FAQs, SMS/email follow-up, CRM logging.
+AI receptionist for restaurants + medical clinics. Answers inbound calls, handles reservations / appointments / FAQs, escalates to a human when needed. Provider-swappable STT + LLM + TTS.
+
+**Two verticals shipped:** Corvina Coastal Kitchen (Portland restaurant, 10 tools) + Smile Dental Clinic (4 tools). Both drivable through the same brain via a JSON business profile.
+
+## 📄 Start here
+
+- **[`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)** — technical inventory: every important class + function + API endpoint + what it does
+- **[`docs/ENTERPRISE_ROADMAP.md`](docs/ENTERPRISE_ROADMAP.md)** — honest gap analysis vs 15 competitors + 90-day roadmap to first paying customer + first enterprise deal
+- **[`docs/assets/`](docs/assets/)** — architecture diagrams (Mermaid + D2 + sequence with latency ruler)
+
+## What's live (2026-08-01)
+
+- **`/call/`** — customer-facing browser call widget. Mic + speakers, real-time. Public URL when tunnel is running.
+- **`/graph/`** — live n8n-style architecture dashboard. Every stage lights up as calls flow through.
+- **`/simulator/`** — dev tool with transcript + tool-call panels
+- **Vapi + Twilio** — number `+1-417-574-3859` routes to Vapi assistant → hits our custom-LLM webhook via cloudflare tunnel
+
+**Current stack:**
+- LLM router: Groq llama-3.3-70B primary → Gemini / NVIDIA / OpenRouter fallback, 8s timeout, 30s cool-down
+- STT: Deepgram Nova-3 streaming (150ms P50)
+- TTS: Cartesia Sonic-3 SSE (188ms P50) — stock Nova voice, ElevenLabs Abby also wired
+- 477 pytest tests pass. Adversarial harness: 18/34 pass, 0 hard-fails.
+
+**Also:** provider-swappable (env-driven), speech sanitizer with numeric normalization + flow mode, input guard (jailbreak/exfil/fake-authority/minor detection), greeting cache, write guard on booking tools, PII redaction on transcripts, per-provider cost estimator attached to spans.
 
 Provider-swappable: every cloud piece (STT, LLM, TTS, transport) can be replaced by a local/free equivalent during testing via `.env`.
 

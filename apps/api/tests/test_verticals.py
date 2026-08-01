@@ -144,6 +144,97 @@ async def test_restaurant_faq_lookup(restaurant_business, calendar):
     assert any("corkage" in k.lower() for k in res.result.keys())
 
 
+@pytest.mark.asyncio
+async def test_restaurant_menu_and_allergen(restaurant_business, calendar):
+    handler = RestaurantToolHandler(restaurant_business, calendar)
+
+    all_menu = await handler(ToolCall(id="m1", name="get_menu", arguments={}))
+    assert all_menu.error is None
+    assert all_menu.result["count"] >= 8
+
+    mains = await handler(ToolCall(id="m2", name="get_menu", arguments={"category": "main"}))
+    assert mains.error is None
+    assert all(i["category"] == "main" for i in mains.result["items"])
+
+    shellfish = await handler(ToolCall(id="a1", name="check_allergen", arguments={"allergen": "shellfish"}))
+    assert shellfish.error is None
+    assert "Dungeness crab tostada" in shellfish.result["items_containing"]
+    assert "shared" in shellfish.result["shared_kitchen_warning"].lower()
+
+
+@pytest.mark.asyncio
+async def test_restaurant_build_order_and_eta(restaurant_business, calendar):
+    handler = RestaurantToolHandler(restaurant_business, calendar)
+
+    order = await handler(ToolCall(
+        id="o1", name="build_order",
+        arguments={"items": ["Corvina crudo", "Whole roasted branzino", "not on menu"], "fulfillment": "pickup"},
+    ))
+    assert order.error is None
+    assert len(order.result["line_items"]) == 2
+    assert order.result["unmatched"] == ["not on menu"]
+    assert order.result["total_usd"] == 64.00   # 18 + 46
+
+    eta = await handler(ToolCall(id="e1", name="quote_delivery_eta", arguments={"fulfillment": "pickup"}))
+    assert eta.error is None
+    assert 20 <= eta.result["eta_minutes"] <= 40
+
+    no_delivery = await handler(ToolCall(id="e2", name="quote_delivery_eta", arguments={"fulfillment": "delivery"}))
+    assert no_delivery.error is None
+    assert no_delivery.result["eta_minutes"] is None
+
+
+@pytest.mark.asyncio
+async def test_restaurant_loyalty_and_deposit(restaurant_business, calendar):
+    handler = RestaurantToolHandler(restaurant_business, calendar)
+
+    loyalty = await handler(ToolCall(id="l1", name="apply_loyalty", arguments={"phone": "5035550199"}))
+    assert loyalty.error is None
+    assert loyalty.result["phone_last4"] == "0199"
+
+    # deposit rejected for small party
+    small = await handler(ToolCall(
+        id="d1", name="capture_deposit_link",
+        arguments={"phone": "5035550199", "party_size": 4, "reservation_iso": "2026-08-01T19:00"},
+    ))
+    assert small.error is not None
+
+    # deposit accepted for large party
+    big = await handler(ToolCall(
+        id="d2", name="capture_deposit_link",
+        arguments={"phone": "5035550199", "party_size": 12, "reservation_iso": "2026-08-01T19:00"},
+    ))
+    assert big.error is None
+    assert big.result["sent"] is True
+    assert big.result["amount_usd"] == 200
+
+
+@pytest.mark.asyncio
+async def test_restaurant_large_party_flags_deposit(restaurant_business, calendar):
+    handler = RestaurantToolHandler(restaurant_business, calendar)
+    when = (datetime.utcnow() + timedelta(days=3)).replace(hour=19, minute=0, second=0, microsecond=0)
+    book = await handler(ToolCall(
+        id="b1", name="book_reservation",
+        arguments={
+            "caller_name": "Marisol Party", "phone": "5035550199",
+            "party_size": 10, "start_iso": when.isoformat(),
+        },
+    ))
+    assert book.error is None
+    assert book.result.get("requires_deposit") is True
+    assert book.result.get("deposit_usd") == 200
+
+
+def test_restaurant_registers_all_nine_tools(restaurant_business, calendar):
+    tools = build_restaurant_tools()
+    names = {t.name for t in tools}
+    assert names == {
+        "check_availability", "book_reservation", "get_menu", "check_allergen",
+        "build_order", "quote_delivery_eta", "apply_loyalty", "capture_deposit_link",
+        "escalate_to_human", "lookup_faq",
+    }
+
+
 def test_unknown_vertical_falls_back_to_clinic(calendar):
     biz = BusinessProfile(id="x", name="X", vertical="widget_shop")
     tools, handler = build_tools_for_vertical(biz, calendar)

@@ -1,8 +1,8 @@
 {
-  "id": "demo-restaurant-001",
-  "name": "Osteria Verde",
+  "id": "corvina-coastal-001",
+  "name": "Corvina Coastal Kitchen",
   "vertical": "restaurant",
-  "timezone": "America/New_York",
+  "timezone": "America/Los_Angeles",
   "hours": {
     "monday": null,
     "tuesday": "17:00-22:00",
@@ -13,21 +13,30 @@
     "sunday": "12:00-21:00"
   },
   "services": [
-    { "name": "Table for 2", "duration_minutes": 90, "description": "Standard reservation for 2 guests" },
-    { "name": "Table for 4", "duration_minutes": 90, "description": "Standard reservation for 4 guests" },
-    { "name": "Table for 6", "duration_minutes": 120, "description": "Reservation for 6 guests, back room" },
-    { "name": "Private dining", "duration_minutes": 180, "description": "Private dining room, minimum 8 guests, tasting menu" }
+    { "name": "Table for 2", "duration_minutes": 90, "description": "Standard dinner reservation for two. Bar seating also available walk-in." },
+    { "name": "Table for 4", "duration_minutes": 90, "description": "Standard dinner reservation for four guests." },
+    { "name": "Table for 6", "duration_minutes": 120, "description": "Larger table, requires a note on any dietary restrictions when booking." },
+    { "name": "Chef's counter", "duration_minutes": 120, "description": "Seats up to four at the pass. Watch Chef Elliot plate. Requires 24 hour notice." },
+    { "name": "Private dining room", "duration_minutes": 180, "description": "Private room for parties of eight to twenty. $200 deposit required, minimum spend applies. Book two weeks out." },
+    { "name": "Weekend brunch", "duration_minutes": 75, "description": "Saturday and Sunday brunch until three p m. Bottomless mimosas add nineteen dollars per person." }
   ],
   "faqs": {
-    "dietary": "We can accommodate gluten-free, vegetarian, vegan, and most allergies. Please tell us when booking so the kitchen can prep.",
-    "corkage": "$25 per bottle. Two-bottle maximum per table.",
-    "kids": "Kids are welcome. Highchairs and a kids menu are available.",
-    "parking": "Street parking on Elm St; a paid lot is one block north.",
-    "dress code": "Smart casual. No shorts or flip-flops after 6pm.",
-    "cancellation": "Please give 4 hours notice. Same-day cancellations are charged $15 per person.",
-    "gift cards": "Available at the host stand or by phone. Any amount from $25."
+    "dietary": "Chef Elliot can handle most allergies with twenty four hour notice. Vegetarian and vegan are always available. For celiac, we prep dedicated gluten free pasta and reserve a clean station. Just mention it when you book.",
+    "allergen policy": "Nine major allergens per FDA including sesame: milk, egg, fish, shellfish, tree nuts, peanuts, wheat, soybeans, and sesame. We disclose menu items containing these on request but there is always shared kitchen risk.",
+    "corkage": "Thirty five dollars per bottle, two bottle max per table. No corkage on Wednesdays.",
+    "kids": "Kids welcome until eight p m. We have a small kids menu with grilled fish, buttered noodles, and fries. Highchairs available.",
+    "parking": "Street parking on N W Vaughn Street and a paid lot at N W 21st and Wilson, about a block south.",
+    "dress code": "Smart casual. Nothing too formal but no gym clothes after five.",
+    "cancellation": "Please give us four hours notice for tables of two to four. For six or more we ask 24 hours. Same day no shows for parties of six plus are charged twenty five dollars per person to the card on file.",
+    "large parties": "Nine or more requires a two hundred dollar deposit via SMS Stripe link and a signed prix fixe menu two days out.",
+    "gift cards": "Available at the host stand or by phone. Any amount from fifty dollars. Digital delivery same day.",
+    "delivery": "We do pickup through our own site only. No third party delivery — we tried DoorDash and the quality just did not travel well.",
+    "concept": "Pacific Northwest seafood with a coastal Latin American influence. Our whole roasted branzino and the Peruvian style corvina crudo are our two most ordered dishes.",
+    "chef": "Chef Elliot Voss trained at the CIA and cooked at Le Bernardin for four years. Owner Marisol Aguilar-Chen was previously at Kann here in Portland.",
+    "wine list": "We focus on Willamette Valley Pinot Noir, coastal Oregon whites, and Peruvian and Chilean bottles. Half of our list is under seventy dollars.",
+    "reservation platform": "We take reservations through Resy and by phone. Our website links straight to Resy for online booking."
   },
-  "escalation_phone": "+1-555-020-3311",
-  "address": "88 Elm Street, Brooklyn",
-  "voice_persona": "warm, hospitable, quick to confirm details, uses guest's first name once"
+  "escalation_phone": "+1-503-555-0174",
+  "address": "2214 N W Vaughn Street, Suite A, in Slabtown, Portland Oregon 97210",
+  "voice_persona": "You are Nia — the front-of-house host at Corvina Coastal Kitchen. You've worked here for two years since Marisol opened the doors. You know Chef Elliot's dietary strengths personally. You're warm and Pacific Northwest friendly — casually knowledgeable, never stuffy, never pushy on upsells. You know which regulars come in for the corvina crudo and which pretend to like Pinot but actually order Malbec. On big-party bookings you calmly get the deposit sorted without making it feel transactional. You never quote a wait time you don't believe."
 }

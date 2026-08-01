@@ -1,0 +1,126 @@
+# voiceops-ai-agent — hero render (D2 sketch mode)
+# Render:  d2 --sketch --layout=elk --theme=200 architecture.d2 architecture.svg
+# Falls back to Kroki if D2 CLI not installed:
+#   curl https://kroki.io/d2/svg -X POST --data-binary @architecture.d2 > architecture.svg
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    sketch: true
+    theme-id: 200
+    dark-theme-id: 200
+  }
+}
+
+# ==================== INBOUND ====================
+caller: "📞 Caller" {
+  shape: person
+  style: { fill: "#12161d"; stroke: "#5fa8ff"; font-color: "#dfe4ec" }
+}
+
+transport: "Twilio · Vapi\nPSTN + WebRTC\n**< 40 ms**" {
+  style: { fill: "#12161d"; stroke: "#5fa8ff"; font-color: "#dfe4ec" }
+}
+
+# ==================== VOICE AGENT ====================
+agent: "🧠 Voice Agent" {
+  style: { fill: "#0e1219"; stroke: "#232937"; font-color: "#dfe4ec" }
+
+  stt: "Deepgram Nova-3\n**150 ms P50**" {
+    style: { fill: "#12161d"; stroke: "#5fa8ff"; font-color: "#dfe4ec" }
+  }
+
+  vad: "Silero VAD\n~30 ms" {
+    style: { fill: "#12161d"; stroke: "#5fa8ff"; font-color: "#dfe4ec" }
+  }
+
+  guard: "Input Guard\n**< 1 ms**\nregex: jailbreak,\nexfil, fake-authority,\nminor detection" {
+    style: { fill: "#12161d"; stroke: "#ff6b6b"; font-color: "#dfe4ec" }
+  }
+
+  safe_reply: "Safe Reply\n4 canned templates\n**zero LLM cost**" {
+    style: { fill: "#12161d"; stroke: "#ff6b6b"; font-color: "#dfe4ec" }
+  }
+
+  brain: "Groq Llama-3.3-70B\n**300 ms P50**\n0.00003 USD/turn" {
+    style: { fill: "#12161d"; stroke: "#5fa8ff"; font-color: "#dfe4ec" }
+  }
+
+  fallbacks: "→ Gemini 2.5 Flash\n→ Nemotron 70B" {
+    style: { fill: "#12161d"; stroke: "#5fa8ff"; stroke-dash: 3; font-color: "#dfe4ec" }
+  }
+
+  tools: "Tool Router\n**~20 ms/call**\n8 restaurant + 8 clinic\n+ escalate_to_human" {
+    style: { fill: "#12161d"; stroke: "#b98cff"; font-color: "#dfe4ec" }
+  }
+
+  tts: "Cartesia Sonic-3\n**188 ms P50**\nSSE streaming" {
+    style: { fill: "#12161d"; stroke: "#5fa8ff"; font-color: "#dfe4ec" }
+  }
+
+  cache: "Greeting Cache\n**0 ms**\npre-warmed" {
+    style: { fill: "#12161d"; stroke: "#5fa8ff"; font-color: "#dfe4ec" }
+  }
+
+  # ---- signal edges ----
+  stt -> vad
+  vad -> guard
+  guard -> brain: "clean"
+  guard -> safe_reply: "flagged"
+  brain -> tools
+  tools -> brain: "results"
+  brain -> tts
+  cache -> tts
+  safe_reply -> tts
+  brain -> fallbacks: "on error"
+}
+
+# ==================== INTEGRATIONS ====================
+integrations: "🔌 Integrations" {
+  style: { fill: "#0e1219"; stroke: "#232937"; font-color: "#dfe4ec" }
+
+  cal: "Calendar\nResy · Athena · Google" {
+    shape: cylinder
+    style: { fill: "#12161d"; stroke: "#b98cff"; font-color: "#dfe4ec" }
+  }
+  crm: "CRM · EHR\nToast · athenaOne" {
+    shape: cylinder
+    style: { fill: "#12161d"; stroke: "#b98cff"; font-color: "#dfe4ec" }
+  }
+  pay: "Stripe\ndeposits" {
+    style: { fill: "#12161d"; stroke: "#b98cff"; font-color: "#dfe4ec" }
+  }
+  sms: "Twilio SMS\nconfirmations" {
+    style: { fill: "#12161d"; stroke: "#b98cff"; font-color: "#dfe4ec" }
+  }
+}
+
+# ==================== OBSERVABILITY ====================
+observe: "📊 Observability" {
+  style: { fill: "#0e1219"; stroke: "#232937"; font-color: "#dfe4ec" }
+
+  otel: "OpenTelemetry\nevery span, every cost" {
+    style: { fill: "#12161d"; stroke: "#b98cff"; font-color: "#dfe4ec" }
+  }
+  dash: "Live Dashboard\n/graph" {
+    style: { fill: "#12161d"; stroke: "#b98cff"; font-color: "#dfe4ec" }
+  }
+  log: "SQLite Transcripts\nPII-redacted" {
+    style: { fill: "#12161d"; stroke: "#b98cff"; font-color: "#dfe4ec" }
+  }
+}
+
+# ==================== WIRING ====================
+caller -> transport
+transport -> agent.stt
+agent.tts -> transport
+transport -> caller
+
+agent.tools -> integrations.cal
+agent.tools -> integrations.crm
+agent.tools -> integrations.pay
+agent.tools -> integrations.sms
+
+agent -> observe.otel: "spans"
+observe.otel -> observe.dash
+observe.otel -> observe.log

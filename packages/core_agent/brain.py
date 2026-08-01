@@ -119,9 +119,10 @@ class ReceptionistBrain:
         # Input guard: short-circuit obvious jailbreak/injection attempts
         # BEFORE we spend LLM tokens on them. The system prompt has an
         # identity-lock clause as backup; this is belt-and-suspenders.
-        from .input_guard import is_probable_injection, safe_reply_for
+        from .input_guard import is_probable_injection, classify_injection, safe_reply_for
         if is_probable_injection(user_text):
-            safe_reply = safe_reply_for(self.business.name)
+            kind = classify_injection(user_text)
+            safe_reply = safe_reply_for(self.business.name, kind)
             state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=safe_reply))
             await self._refresh_extraction(state)
             return BrainTurnResult(reply=safe_reply, state=state)
@@ -145,15 +146,18 @@ class ReceptionistBrain:
                     "n_messages": len(messages),
                 },
             ) as _span:
-                # max_tokens=120 hard-caps reply length. Chatterbox at RTF ~0.5
-                # means 120 tokens ≈ ~40 words ≈ ~5s of audio ≈ ~2.5s to
-                # synth. Combined with sentence-streaming, first-sound latency
-                # stays under 2s. The system prompt already asks for 1-2
-                # sentences; this is the enforceable ceiling.
+                # 2026-07-31: bumped max_tokens 120 → 300.  The old 120 cap was
+                # sized for Chatterbox RTF ~0.5.  Now on Cartesia (RTF ~0.15)
+                # we can afford ~10s of audio.  120 was strangling the model on
+                # answers longer than a sentence (e.g. "tell me about your
+                # clinic") — it would tool-loop forever without producing
+                # text, exhaust MAX_TOOL_ITERATIONS, and hit the teammate
+                # fallback.  300 tokens ≈ ~100 words ≈ ~15s audio ≈ still
+                # in-budget for a real receptionist reply.
                 try:
                     response = await self.llm.complete(
                         messages, tools=self.tools,
-                        temperature=0.3, max_tokens=120,
+                        temperature=0.3, max_tokens=300,
                     )
                 except Exception as e:
                     # LLM crashed — most common cause is a Groq 400 when the
@@ -272,6 +276,34 @@ class ReceptionistBrain:
                     escalated = True
                     state.status = CallStatus.ESCALATED
                     state.escalation_reason = str(tc.arguments.get("reason") or "caller requested human")
+
+        # 2026-07-31: loop exhausted without a text reply — most common cause
+        # is the LLM tool-looping on "no_match" from lookup_faq without ever
+        # committing to a plain answer.  Do ONE final non-tool call to force
+        # a text reply from whatever context we have.
+        try:
+            messages_no_tools = [{"role": "system", "content": self.system_prompt}] + state.to_llm_messages()
+            forced = await self.llm.complete(
+                messages_no_tools,
+                tools=None,           # force text-only
+                temperature=0.3,
+                max_tokens=300,
+            )
+            if forced.text and forced.text.strip():
+                reply_text = sanitize_for_speech(forced.text)
+                state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=reply_text))
+                await self._refresh_extraction(state)
+                return BrainTurnResult(
+                    reply=reply_text,
+                    state=state,
+                    tool_results=tool_results_payload,
+                    escalated=escalated,
+                )
+        except Exception as e:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Force-text final call failed: %s — using teammate fallback", e
+            )
 
         fallback = "Let me have a teammate call you back to sort this out."
         state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=fallback))

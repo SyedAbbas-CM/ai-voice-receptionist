@@ -33,6 +33,13 @@ def get_llm() -> LLMProvider:
     if provider in ("nvidia", "nim", "nvidia_nim"):
         from .llm.nvidia_nim_llm import NvidiaNimLLM
         return NvidiaNimLLM()
+    if provider == "router":
+        # LLM_PROVIDER=router → RouterLLM cycles through providers listed in
+        # LLM_ROUTER_ORDER (default: groq,gemini,nvidia,openrouter). Any
+        # timeout/429/5xx cools that provider down for LLM_ROUTER_COOLDOWN_S
+        # and the next one takes over — no waiting, no manual failover.
+        from .llm.router_llm import RouterLLM
+        return RouterLLM()
     raise ValueError(f"Unknown LLM provider: {provider}")
 
 
