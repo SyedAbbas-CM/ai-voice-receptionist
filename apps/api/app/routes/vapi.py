@@ -186,6 +186,17 @@ async def vapi_events(payload: VapiEventPayload, request: Request) -> dict:
     call = msg.get("call") or {}
     call_id = call.get("id")
 
+    # Sprint 6d: webhook dedup — Vapi retries end-of-call-report on 5xx and
+    # sometimes on network glitches.  Without this, disposition write-back
+    # can run twice and update the Sheet counter twice.
+    from app.db.idempotency import check_or_reserve_webhook_event, record_webhook_result
+    tenant_id = getattr(request.state, "tenant_id", None) or "default"
+    if call_id and msg_type:
+        dedup_key = f"{msg_type}:{call_id}"
+        cached = await check_or_reserve_webhook_event(tenant_id, "webhook:vapi", dedup_key)
+        if cached is not None:
+            return {"ok": True, "replay": True}
+
     if msg_type == "end-of-call-report" and call_id:
         # Outbound disposition (SubtoDealz-style) — checks its own registry.
         # If this call was originated via /outbound/start_batch, the handler
@@ -198,7 +209,14 @@ async def vapi_events(payload: VapiEventPayload, request: Request) -> dict:
             outbound_outcome = None
 
         await session_manager.end_session_async(f"vapi_{call_id}")
+        result = {"ok": True}
         if outbound_outcome and outbound_outcome.get("reason") != "not_outbound":
-            return {"ok": True, "outbound": outbound_outcome}
+            result = {"ok": True, "outbound": outbound_outcome}
+        # Record dedup result so retries return the same response
+        if call_id:
+            record_webhook_result(tenant_id, "webhook:vapi", f"{msg_type}:{call_id}", 200, result)
+        return result
 
+    if call_id:
+        record_webhook_result(tenant_id, "webhook:vapi", f"{msg_type}:{call_id}", 200, {"ok": True})
     return {"ok": True}

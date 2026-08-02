@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.db.session import init_db
-from app.routes import channels, chat, debug, elevenlabs_compat, outbound, sessions, twilio, vapi, voice
+from app.routes import admin, channels, chat, debug, elevenlabs_compat, outbound, sessions, twilio, vapi, voice
 
 
 def create_app() -> FastAPI:
@@ -49,6 +49,13 @@ def create_app() -> FastAPI:
     from app.middleware.auth import AuthTenantMiddleware
     app.add_middleware(AuthTenantMiddleware)
 
+    # Sprint 6c: cross-tenant leak guard.  Importing installs the SQLAlchemy
+    # before_execute listener that rejects any query on tenant-scoped tables
+    # missing a tenant_id filter.  Defense-in-depth on top of the handler-
+    # side tenant scoping in routes/sessions.py.
+    from app.db import tenant_guard as _tenant_guard
+    _tenant_guard.install()
+
     # AUDIT FIX 2026-08-01 (SEC-009): tighter CORS default.  Wildcard only in
     # explicit dev mode; production requires a comma-separated allowlist in
     # CORS_ORIGINS env.
@@ -78,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(twilio.router)
     app.include_router(outbound.router)
     app.include_router(debug.router)
+    app.include_router(admin.router)
 
     @app.on_event("startup")
     async def _warm_filler_pool() -> None:

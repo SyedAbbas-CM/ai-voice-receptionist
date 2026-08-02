@@ -1,4 +1,24 @@
-from .session import Base, engine, get_session, init_db
-from .models import SessionRow, TranscriptRow, BookingRow
+from .session import (
+    Base,
+    engine,
+    get_session,
+    init_db,
+    get_current_tenant,
+    set_current_tenant,
+    reset_current_tenant,
+)
+from .models import (
+    ApiKey,
+    BookingRow,
+    IdempotencyRow,
+    SessionRow,
+    Tenant,
+    TranscriptRow,
+)
 
-__all__ = ["Base", "engine", "get_session", "init_db", "SessionRow", "TranscriptRow", "BookingRow"]
+__all__ = [
+    "Base", "engine", "get_session", "init_db",
+    "get_current_tenant", "set_current_tenant", "reset_current_tenant",
+    "Tenant", "ApiKey", "IdempotencyRow",
+    "SessionRow", "TranscriptRow", "BookingRow",
+]

@@ -21,3 +21,11 @@ audioop-lts>=0.2.1; python_version>="3.13"
 num2words>=0.5.13
 # cartesia SDK (was undeclared per DEV-001)
 cartesia>=3.0
+
+# Sprint 6e: Postgres async driver.  Used when DATABASE_URL starts with
+# postgresql:// or postgres://.  SQLite stays as dev fallback.
+asyncpg>=0.30
+# psycopg (v3) sync driver for Alembic migrations
+psycopg[binary]>=3.2
+# Alembic (already implicitly installed by SQLAlchemy contrib but pin it)
+alembic>=1.13

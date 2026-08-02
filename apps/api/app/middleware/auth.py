@@ -44,6 +44,7 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/twilio/",            # Twilio path validates X-Twilio-Signature separately
     "/vapi/",              # Vapi path validates its own bearer separately
     "/channels/",          # WhatsApp/Telegram signature-verify separately
+    "/admin/",             # Admin routes have their own ADMIN_TOKEN guard
     "/call/",              # customer-facing widget static assets
     "/simulator/",         # dev-only widget static assets
     "/graph/",             # observability dashboard static assets
@@ -124,7 +125,8 @@ class AuthTenantMiddleware(BaseHTTPMiddleware):
         # Dev/testing bypass
         if not self.enforce:
             request.state.tenant_id = "dev"
-            return await call_next(request)
+            # Sprint 6c: propagate to ORM contextvar so auto-inject sees it
+            return await self._call_with_tenant("dev", request, call_next)
 
         # Authenticated path
         auth = request.headers.get("authorization", "")
@@ -139,7 +141,22 @@ class AuthTenantMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"detail": "invalid API key"}, status_code=401)
 
         request.state.tenant_id = tenant
-        return await call_next(request)
+        return await self._call_with_tenant(tenant, request, call_next)
+
+    async def _call_with_tenant(self, tenant: str, request: Request, call_next):
+        """Set the ORM contextvar for the duration of this request.
+
+        Sprint 6c: DB event listeners (auto-inject tenant_id on insert,
+        cross-tenant leak guard) read this contextvar.  Reset in finally
+        so the token doesn't leak into the next request on this worker.
+        """
+        # Import here to avoid circular import at module load
+        from app.db.session import set_current_tenant, reset_current_tenant
+        token = set_current_tenant(tenant)
+        try:
+            return await call_next(request)
+        finally:
+            reset_current_tenant(token)
 
 
 def get_tenant_id(request: Request) -> str:
