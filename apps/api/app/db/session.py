@@ -102,6 +102,52 @@ def _auto_inject_tenant(db_session, flush_context, instances):
             obj.tenant_id = tenant
 
 
+# ─── Auto-filter tenant_id on SELECT (Sprint 6h) ─────────────────────────────
+# do_orm_execute listener injects `with_loader_criteria(Model, Model.tenant_id
+# == current_tenant)` into every ORM SELECT against tenant-scoped models.
+#
+# This is the belt AND suspenders layer on top of tenant_guard's WHERE-clause
+# grep.  Even if a handler forgets a `filter(tenant_id=X)`, this listener
+# adds it silently.  Cross-tenant leaks become impossible-by-default.
+#
+# Skipped when current_tenant is None (admin routes, migrations, cleanup
+# crons) — those legitimately need to see across tenants.
+
+from sqlalchemy.orm import with_loader_criteria as _wlc
+
+
+@event.listens_for(SessionLocal, "do_orm_execute")
+def _auto_filter_tenant(execute_state):
+    if not execute_state.is_select:
+        return
+
+    # Skip when handler opts out via execution_options=dict(skip_tenant_filter=True)
+    if execute_state.execution_options.get("skip_tenant_filter"):
+        return
+
+    tenant = current_tenant.get()
+    if tenant is None:
+        # Contextvar unset = admin/migration path; don't inject a filter that
+        # would return zero rows.  tenant_guard will still catch queries that
+        # reach the raw SQL layer without a filter.
+        return
+
+    # Lazy-import models to avoid circular deps at module load.
+    from . import models
+
+    # Every tenant-scoped ORM class gets a criteria injected.  The
+    # include_aliases=True flag ensures joins + subqueries also get the filter.
+    for cls in (models.SessionRow, models.TranscriptRow, models.BookingRow,
+                models.ApiKey, models.IdempotencyRow):
+        execute_state.statement = execute_state.statement.options(
+            _wlc(
+                cls,
+                cls.tenant_id == tenant,
+                include_aliases=True,
+            )
+        )
+
+
 def init_db() -> None:
     from . import models  # noqa: F401 — registers tables on Base.metadata
     Base.metadata.create_all(bind=engine)

@@ -285,6 +285,39 @@ def test_admin_disabled_when_token_missing(monkeypatch):
 
 # ─── Cross-tenant fuzz ──────────────────────────────────────────────────────
 
+def test_db_backed_api_key_end_to_end(monkeypatch):
+    """Create tenant + issue key via /admin, then use that key on a
+    protected route.  Proves the DB-backed auth lookup works."""
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    from app.middleware.auth import invalidate_key_cache
+
+    invalidate_key_cache()
+    monkeypatch.setenv("API_AUTH_ENFORCE", "true")
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("API_KEYS_JSON", raising=False)
+
+    client = TestClient(create_app())
+    admin = {"Authorization": "Bearer test-admin-token"}
+    tid = f"dbkey-{uuid.uuid4().hex[:8]}"
+
+    # Create tenant + issue key
+    assert client.post("/admin/tenants", headers=admin,
+                       json={"id": tid, "name": "DB Key Test"}).status_code == 200
+    r = client.post(f"/admin/tenants/{tid}/api-keys", headers=admin, json={"name": "primary"})
+    assert r.status_code == 200
+    plaintext = r.json()["key"]
+
+    # Use the plaintext key on a tenant-scoped route.  /sessions returns [] for
+    # a fresh tenant but the important thing is a 200, not a 401.
+    r = client.get("/sessions", headers={"Authorization": f"Bearer {plaintext}"})
+    assert r.status_code == 200, r.text
+
+    # Wrong key rejected
+    r = client.get("/sessions", headers={"Authorization": "Bearer vk_nonsense"})
+    assert r.status_code == 401
+
+
 def test_tenant_a_cannot_fetch_tenant_b_session(two_tenants):
     """The core cross-tenant leak scenario: tenant A auths, tries to GET
     tenant B's session by its exact ID.  Must 404."""

@@ -137,6 +137,10 @@ def create_api_key(
     finally:
         reset_current_tenant(token)
 
+    # Sprint 6j: invalidate the auth cache so the new key is immediately usable
+    from app.middleware.auth import invalidate_key_cache
+    invalidate_key_cache()
+
     return CreateApiKeyResponse(
         key=plaintext,   # ONLY chance to see this — never stored plaintext
         prefix=prefix,

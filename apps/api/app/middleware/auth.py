@@ -19,10 +19,12 @@ loudly so nobody accidentally ships an unprotected server.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 from fastapi import HTTPException, Request
@@ -89,6 +91,65 @@ def _resolve_tenant(bearer: str, api_keys: dict[str, str]) -> Optional[str]:
     return None
 
 
+# ─── DB-backed key resolver (Sprint 6j) ──────────────────────────────────────
+# Keys issued via POST /admin/tenants/{id}/api-keys are stored SHA-256-hashed
+# in the api_keys table.  This helper hits the DB (with a 30s in-process
+# cache) to look up the tenant for a bearer token.  Env-var keys still work
+# as a bootstrap fallback for the very first tenant creation.
+
+_DB_KEY_CACHE_TTL_S = 30.0
+# {sha256_hash: (tenant_id, cached_at_ts)}
+_db_key_cache: dict[str, tuple[str, float]] = {}
+
+
+def _resolve_tenant_from_db(bearer: str) -> Optional[str]:
+    """Hash the bearer, look it up in api_keys, update last_used_at."""
+    key_hash = hashlib.sha256(bearer.encode()).hexdigest()
+
+    # Cache hit — avoid DB round-trip on every request
+    hit = _db_key_cache.get(key_hash)
+    if hit is not None:
+        tenant_id, cached_at = hit
+        if time.time() - cached_at < _DB_KEY_CACHE_TTL_S:
+            return tenant_id
+
+    # DB miss — look up.  Import lazily to avoid circular deps at module load.
+    try:
+        from app.db import ApiKey
+        from app.db.session import SessionLocal
+        from datetime import datetime, timezone
+
+        with SessionLocal() as db:
+            # api_keys is tenant-scoped, so auto-filter would drop this query.
+            # Bypass the filter for the auth path only.
+            row = (
+                db.query(ApiKey)
+                .execution_options(skip_tenant_filter=True)
+                .filter(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            tenant_id = row.tenant_id
+            # Fire-and-forget last_used_at update
+            try:
+                row.last_used_at = datetime.now(timezone.utc)
+                db.commit()
+            except Exception:
+                db.rollback()
+            _db_key_cache[key_hash] = (tenant_id, time.time())
+            return tenant_id
+    except Exception as e:
+        log.warning("DB api-key lookup failed: %s", e)
+        return None
+
+
+def invalidate_key_cache() -> None:
+    """Called from /admin routes after key create/revoke so the cache picks
+    up the change before the 30s TTL expires."""
+    _db_key_cache.clear()
+
+
 class AuthTenantMiddleware(BaseHTTPMiddleware):
     """Attach `request.state.tenant_id` on authenticated requests.
 
@@ -136,7 +197,10 @@ class AuthTenantMiddleware(BaseHTTPMiddleware):
                 status_code=401,
             )
         provided = auth.removeprefix("Bearer ").strip()
+        # Try env-configured keys first (bootstrap), then DB-issued keys.
         tenant = _resolve_tenant(provided, self.api_keys)
+        if tenant is None:
+            tenant = _resolve_tenant_from_db(provided)
         if tenant is None:
             return JSONResponse({"detail": "invalid API key"}, status_code=401)
 
