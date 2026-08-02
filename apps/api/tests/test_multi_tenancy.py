@@ -340,3 +340,54 @@ def test_tenant_a_cannot_fetch_tenant_b_session(two_tenants):
     finally:
         os.environ.pop("API_KEYS_JSON", None)
         os.environ["API_AUTH_ENFORCE"] = "false"
+
+
+def test_reaudit_critical_01_live_session_ownership():
+    """Re-audit CRITICAL-01 PoC: Tenant A creates a live session via
+    session_manager.  Tenant B (with a valid API key) tries to fetch
+    it by exact session_id.  Must return None (route → 404).
+
+    This test proves the fix even before /chat/turn is reached — we
+    hit session_manager directly the way the auditor did in their
+    isolated local probe."""
+    from app.core import session_manager
+
+    # Tenant A opens a session
+    state_a, brain_a = session_manager.start_session_with_id(
+        f"leak-test-{uuid.uuid4().hex[:8]}", tenant_id="tenant-alpha",
+    )
+    assert state_a.tenant_id == "tenant-alpha"
+
+    # Tenant A can find their own
+    got = session_manager.get_session(state_a.session_id, tenant_id="tenant-alpha")
+    assert got is not None, "owner should be able to fetch their own session"
+
+    # Tenant B — different tenant, same session_id — must NOT find it
+    got = session_manager.get_session(state_a.session_id, tenant_id="tenant-beta")
+    assert got is None, "cross-tenant fetch must return None (CRITICAL-01)"
+
+    # Cleanup
+    session_manager.end_session(state_a.session_id, tenant_id="tenant-alpha")
+
+
+def test_reaudit_critical_06_elevenlabs_telephony_format():
+    """Re-audit CRITICAL-06 PoC: ElevenLabsTTS in Twilio mode must
+    request ulaw_8000 and advertise audio/x-mulaw MIME."""
+    import os as _os
+    _os.environ["ELEVENLABS_API_KEY"] = "test-key"  # bypass the "not set" check
+    from app.providers.tts.elevenlabs_tts import ElevenLabsTTS
+
+    # Default (browser/generic path) still emits MP3 for backward compat
+    default_tts = ElevenLabsTTS()
+    assert default_tts.mime == "audio/mpeg"
+    assert default_tts.output_format == "mp3_44100_128"
+
+    # Twilio path constructs with ulaw_8000 — never MP3
+    phone_tts = ElevenLabsTTS(output_format="ulaw_8000")
+    assert phone_tts.mime == "audio/x-mulaw;rate=8000"
+    assert phone_tts._eleven_fmt == "ulaw_8000"
+
+    # Invalid format rejected
+    import pytest
+    with pytest.raises(ValueError, match="unsupported ElevenLabs output_format"):
+        ElevenLabsTTS(output_format="garbage")

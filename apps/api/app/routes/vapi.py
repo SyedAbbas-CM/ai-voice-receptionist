@@ -134,9 +134,14 @@ async def vapi_chat_completions(request: Request) -> dict:
     )
 
     session_id = f"vapi_{call_meta.get('id', uuid.uuid4().hex[:12])}"
-    handle = session_manager.get_session(session_id)
+    # RE-AUDIT 2026-08-02 (CRITICAL-01/12): tenant on vapi sessions is "default"
+    # until CRITICAL-12 (tenant resolver from provider identifiers) lands in
+    # Sprint 7 later this week.  Interim state = single-tenant Vapi deploys
+    # keep working; multi-tenant Vapi deploys pending resolver.
+    tenant_id = "default"
+    handle = session_manager.get_session(session_id, tenant_id=tenant_id)
     if handle is None:
-        state, brain = session_manager.start_session_with_id(session_id)
+        state, brain = session_manager.start_session_with_id(session_id, tenant_id=tenant_id)
         await session_manager.run_greeting(state, brain)
     else:
         state, brain = handle
@@ -208,7 +213,7 @@ async def vapi_events(payload: VapiEventPayload, request: Request) -> dict:
         except Exception:
             outbound_outcome = None
 
-        await session_manager.end_session_async(f"vapi_{call_id}")
+        await session_manager.end_session_async(f"vapi_{call_id}", tenant_id="default")
         result = {"ok": True}
         if outbound_outcome and outbound_outcome.get("reason") != "not_outbound":
             result = {"ok": True, "outbound": outbound_outcome}

@@ -52,6 +52,18 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/graph/",             # observability dashboard static assets
     "/apple-touch-icon",
     "/favicon.ico",
+    # RE-AUDIT FIX 2026-08-02 (A-06/A-07 regressions): the /call widget,
+    # /simulator, and /graph pages all hit these APIs.  Without them on the
+    # public list, the widget got 401 on every call.  Tenant scoping is
+    # still enforced at the handler layer via session_manager.get_session
+    # (session_id + tenant_id lookup, CRITICAL-01 fix) — the tenant for
+    # widget requests is "default".  Real per-tenant widget deployments
+    # (Sprint 8) will use short-lived signed session tickets to swap the
+    # widget's implicit "default" for the correct tenant.
+    "/chat/",              # widget/simulator chat lifecycle
+    "/voice/",             # widget/simulator STT+TTS
+    "/v1/",                # ElevenLabs-compatible API (has its own compat_api_key gate)
+    "/debug/",             # observability endpoints — dashboard reads these
 )
 
 

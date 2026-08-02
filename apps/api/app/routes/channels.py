@@ -36,10 +36,16 @@ def _telegram_channel() -> TelegramChannel:
 
 
 async def _brain_runner(session_id: str, user_text: str) -> dict:
-    """Bridge the channel pipeline to the session manager's brain."""
-    handle = session_manager.get_session(session_id)
+    """Bridge the channel pipeline to the session manager's brain.
+
+    RE-AUDIT 2026-08-02 (CRITICAL-12): tenant is "default" until the
+    resolver-from-provider-identifier work in Sprint 7.  Interim single-
+    tenant WhatsApp/Telegram deploys keep working.
+    """
+    tenant_id = "default"
+    handle = session_manager.get_session(session_id, tenant_id=tenant_id)
     if handle is None:
-        state, brain = session_manager.start_session_with_id(session_id)
+        state, brain = session_manager.start_session_with_id(session_id, tenant_id=tenant_id)
     else:
         state, brain = handle
     return await session_manager.run_user_turn(state, brain, user_text)

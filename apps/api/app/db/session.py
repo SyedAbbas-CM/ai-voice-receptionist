@@ -149,5 +149,57 @@ def _auto_filter_tenant(execute_state):
 
 
 def init_db() -> None:
+    """Initialize the database.
+
+    RE-AUDIT FIX 2026-08-02 (CRITICAL-03): behavior differs by environment:
+
+      * ENVIRONMENT=production — refuse to run create_all().  Startup
+        FAILS unless the DB is already at the latest Alembic head, so
+        production can't silently drift into a hand-created schema.
+        Deploys must run `alembic upgrade head` first.
+
+      * ENVIRONMENT=development/test (default) — create_all() as before
+        for zero-friction local dev.  Existing tests continue to work.
+    """
+    import os as _os
     from . import models  # noqa: F401 — registers tables on Base.metadata
+
+    env = _os.environ.get("ENVIRONMENT", "development").lower()
+
+    if env == "production":
+        # Verify Alembic head matches; refuse create_all() in prod.
+        try:
+            from alembic.config import Config as _AC
+            from alembic.script import ScriptDirectory
+            from alembic.runtime.migration import MigrationContext
+
+            alembic_ini = Path(__file__).resolve().parents[2] / "alembic.ini"
+            if not alembic_ini.exists():
+                raise RuntimeError(
+                    "ENVIRONMENT=production but alembic.ini not found at "
+                    f"{alembic_ini}; cannot verify migration state."
+                )
+            cfg = _AC(str(alembic_ini))
+            script = ScriptDirectory.from_config(cfg)
+            expected_head = script.get_current_head()
+
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(conn)
+                actual_head = ctx.get_current_revision()
+
+            if actual_head != expected_head:
+                raise RuntimeError(
+                    f"DB migration state mismatch (production): "
+                    f"expected head={expected_head!r} got={actual_head!r}. "
+                    f"Run `alembic upgrade head` before starting the app."
+                )
+        except ImportError as e:
+            raise RuntimeError(
+                f"ENVIRONMENT=production requires Alembic installed to verify "
+                f"migration state: {e}"
+            ) from e
+        # Do NOT call create_all in production — the schema is Alembic-owned.
+        return
+
+    # Development / test mode — same as before.
     Base.metadata.create_all(bind=engine)

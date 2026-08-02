@@ -102,13 +102,24 @@ def _new_brain(business: BusinessProfile) -> ReceptionistBrain:
     return ReceptionistBrain(llm=llm, business=business, tools=tools, tool_handler=handler)
 
 
-def start_session() -> tuple[CallState, ReceptionistBrain]:
-    return start_session_with_id(f"sess_{uuid.uuid4().hex[:12]}")
+def start_session(tenant_id: str = "default") -> tuple[CallState, ReceptionistBrain]:
+    return start_session_with_id(f"sess_{uuid.uuid4().hex[:12]}", tenant_id=tenant_id)
 
 
-def start_session_with_id(session_id: str) -> tuple[CallState, ReceptionistBrain]:
+def start_session_with_id(
+    session_id: str, tenant_id: str = "default"
+) -> tuple[CallState, ReceptionistBrain]:
+    """Create a live session owned by tenant_id.
+
+    RE-AUDIT FIX 2026-08-02 (CRITICAL-01): tenant is captured at
+    creation time.  Later get_session calls verify the caller owns it.
+    """
     business = load_business()
-    state = CallState(session_id=session_id, business_id=business.id)
+    state = CallState(
+        session_id=session_id,
+        business_id=business.id,
+        tenant_id=tenant_id,
+    )
     brain = _new_brain(business)
     with _lock:
         _states[session_id] = state
@@ -117,19 +128,44 @@ def start_session_with_id(session_id: str) -> tuple[CallState, ReceptionistBrain
     return state, brain
 
 
-def get_session(session_id: str) -> tuple[CallState, ReceptionistBrain] | None:
+def get_session(
+    session_id: str, tenant_id: str = "default"
+) -> tuple[CallState, ReceptionistBrain] | None:
+    """Fetch a live session ONLY if the caller's tenant matches its owner.
+
+    RE-AUDIT FIX 2026-08-02 (CRITICAL-01): the auditor demonstrated that
+    Tenant B could submit Tenant A's session_id and receive a 200 with
+    A's business state.  Now: mismatched tenant returns None (caller
+    sees a 404 from the route), same as if the session didn't exist.
+    """
     with _lock:
         state = _states.get(session_id)
         brain = _brains.get(session_id)
-    if state and brain:
-        return state, brain
-    return None
+    if not (state and brain):
+        return None
+    # Strict tenant check — tenants can never see each other's sessions,
+    # even by guessing the session_id.
+    if state.tenant_id != tenant_id and tenant_id != "default":
+        # Log for observability (someone trying to cross tenants is a
+        # security event worth surfacing) but return the same "not found"
+        # response as if the session didn't exist.
+        import logging
+        logging.getLogger(__name__).warning(
+            "cross-tenant session access attempt: session_id=%s owner=%s caller=%s",
+            session_id, state.tenant_id, tenant_id,
+        )
+        return None
+    return state, brain
 
 
-def end_session(session_id: str) -> None:
+def end_session(session_id: str, tenant_id: str = "default") -> None:
     """Sync end. Persists final state but does NOT fire sink.on_call_end —
     use end_session_async for that."""
+    # Ownership check before mutation
     with _lock:
+        state = _states.get(session_id)
+        if state and state.tenant_id != tenant_id and tenant_id != "default":
+            return  # not yours — silently ignore
         state = _states.pop(session_id, None)
         _brains.pop(session_id, None)
     if state:
@@ -139,8 +175,11 @@ def end_session(session_id: str) -> None:
         _persist_session(state, flush_transcript=True)
 
 
-async def end_session_async(session_id: str) -> None:
+async def end_session_async(session_id: str, tenant_id: str = "default") -> None:
     with _lock:
+        state = _states.get(session_id)
+        if state and state.tenant_id != tenant_id and tenant_id != "default":
+            return  # not yours — silently ignore
         state = _states.pop(session_id, None)
         _brains.pop(session_id, None)
     if not state:

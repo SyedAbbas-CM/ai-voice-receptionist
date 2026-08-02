@@ -59,6 +59,40 @@ MAX_UTTERANCE_MS = 12000                 # hard cap so we don't buffer forever
 MIN_UTTERANCE_MS = 400                   # skip too-short blips
 
 
+# RE-AUDIT FIX 2026-08-02 (CRITICAL-06): Twilio needs telephony-native audio
+# (8 kHz µ-law).  ElevenLabs default is MP3 which the Twilio converter
+# refuses.  Cartesia default is 16 kHz PCM which the converter resamples.
+# This factory picks the phone-appropriate format per provider so /twilio/*
+# never has to decode MP3.
+_telephony_tts_singleton = None
+
+
+def _get_telephony_tts():
+    """TTS provider configured for phone-native output (mu-law 8kHz where
+    the provider supports it, else PCM/WAV that our converter can resample).
+    Cached so we don't re-instantiate httpx clients per turn."""
+    global _telephony_tts_singleton
+    if _telephony_tts_singleton is not None:
+        return _telephony_tts_singleton
+
+    provider = (settings.tts_provider or "").lower()
+    if provider == "elevenlabs":
+        from app.providers.tts.elevenlabs_tts import ElevenLabsTTS
+        _telephony_tts_singleton = ElevenLabsTTS(output_format="ulaw_8000")
+    elif provider == "cartesia":
+        # Cartesia already emits raw PCM 16k which the converter handles.
+        # If we later add a ulaw_8000 profile, wire it here.
+        from app.providers import get_tts
+        _telephony_tts_singleton = get_tts()
+    else:
+        from app.providers import get_tts
+        _telephony_tts_singleton = get_tts()
+    log.info("Twilio telephony TTS: %s (format=%s)",
+             _telephony_tts_singleton.name,
+             getattr(_telephony_tts_singleton, "output_format", "default"))
+    return _telephony_tts_singleton
+
+
 # Lazy VAD singleton. Silero is preferred but we fall back to RMS if the
 # torch/onnx deps aren't installed.
 _vad_singleton = None
@@ -336,7 +370,10 @@ class TwilioStreamSession:
         await self._send_frames(mulaw)
 
     async def speak(self, text: str) -> None:
-        tts = get_tts()
+        # RE-AUDIT FIX 2026-08-02 (CRITICAL-06): Twilio path uses telephony-
+        # native TTS so nothing has to decode MP3.  Constructed lazily and
+        # cached per-session so we're not building new httpx clients per turn.
+        tts = _get_telephony_tts()
         try:
             audio_bytes, mime = await tts.synthesize(text)
             if mime == "text/x-browser-speak":

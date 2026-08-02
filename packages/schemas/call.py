@@ -107,6 +107,11 @@ class ExtractedFields(BaseModel):
 class CallState(BaseModel):
     session_id: str
     business_id: str
+    # RE-AUDIT FIX 2026-08-02 (CRITICAL-01): tenant ownership on every
+    # active call.  session_manager rejects lookups where the caller's
+    # tenant_id doesn't match this value.  Defaults to "default" for
+    # backward compat with single-tenant deploys where auth is disabled.
+    tenant_id: str = "default"
     status: CallStatus = CallStatus.ACTIVE
     started_at: datetime = Field(default_factory=datetime.utcnow)
     ended_at: Optional[datetime] = None
