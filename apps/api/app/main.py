@@ -16,9 +16,13 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.db.session import init_db
 from app.routes import admin, channels, chat, debug, elevenlabs_compat, outbound, sessions, twilio, vapi, voice
+from packages.observability.structured_log import maybe_install as maybe_install_json_logs
 
 
 def create_app() -> FastAPI:
+    # Sprint 10 obs: install JSON log formatter if STRUCTURED_LOGS=true.
+    # Called BEFORE init_db so init logs go through the new formatter.
+    maybe_install_json_logs()
     init_db()
 
     # Wire observability tracer once at startup. NoopTracer is the default
@@ -86,6 +90,13 @@ def create_app() -> FastAPI:
     app.include_router(outbound.router)
     app.include_router(debug.router)
     app.include_router(admin.router)
+
+    # Sprint 9b: /metrics scrape endpoint for turn-latency histograms,
+    # barge-in counters, provider fallback counts, ledger heard/generated
+    # ratio.  Gated by METRICS_ENABLED (default true).  OTel tracing
+    # activates separately when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+    from packages.runtime.telemetry import mount_metrics
+    mount_metrics(app)
 
     @app.on_event("startup")
     async def _warm_filler_pool() -> None:
@@ -170,6 +181,22 @@ def create_app() -> FastAPI:
     widget_dir = _REPO_ROOT / "apps" / "call-widget"
     if widget_dir.exists():
         app.mount("/call", StaticFiles(directory=str(widget_dir), html=True), name="call")
+
+    # Mount /call-stream — dev widget that mimics Twilio's Media Streams
+    # protocol against /twilio/stream, plus a live debug-event side-panel.
+    # Refuses to mount in production unless explicitly allowed, since it
+    # exposes an unauth'd view of every call event.
+    stream_widget_dir = _REPO_ROOT / "apps" / "call-stream"
+    if stream_widget_dir.exists():
+        import os as _os_mount
+        _env = _os_mount.environ.get("ENVIRONMENT", "development").lower()
+        _allow = _os_mount.environ.get("ALLOW_DEBUG_WIDGETS", "false").lower() in ("1", "true", "yes")
+        if _env != "production" or _allow:
+            app.mount(
+                "/call-stream",
+                StaticFiles(directory=str(stream_widget_dir), html=True),
+                name="call_stream",
+            )
 
     simulator_dir = _REPO_ROOT / "apps" / "call-simulator"
     if simulator_dir.exists():

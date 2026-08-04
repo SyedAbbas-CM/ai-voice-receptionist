@@ -43,11 +43,13 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/docs",
     "/redoc",
     "/openapi.json",
+    "/metrics",            # Sprint 9b: Prometheus scrape endpoint (no tenant data)
     "/twilio/",            # Twilio path validates X-Twilio-Signature separately
     "/vapi/",              # Vapi path validates its own bearer separately
     "/channels/",          # WhatsApp/Telegram signature-verify separately
     "/admin/",             # Admin routes have their own ADMIN_TOKEN guard
     "/call/",              # customer-facing widget static assets
+    "/call-stream/",       # Sprint 10 streaming-parity dev widget (also unauth'd)
     "/simulator/",         # dev-only widget static assets
     "/graph/",             # observability dashboard static assets
     "/apple-touch-icon",
