@@ -78,6 +78,8 @@ export class CallStreamSession {
     // Boot the audio pipe (mic + speaker).  Frames go straight to the WS.
     this._pipe = new AudioPipe();
     let mediaSeq = 2;
+    let sentFrames = 0;
+    let framesWithVoice = 0;
     await this._pipe.start((mulawBytes) => {
       if (this._ws && this._ws.readyState === 1) {
         const b64 = btoa(String.fromCharCode(...mulawBytes));
@@ -86,6 +88,15 @@ export class CallStreamSession {
           sequenceNumber: String(mediaSeq++),
           media: { track: 'inbound', chunk: String(mediaSeq), timestamp: String(Date.now()), payload: b64 },
         }));
+        sentFrames++;
+        // Peek at frame energy so we know if mic is actually capturing.
+        // µ-law 0xFF = silence, anything not near 0xFF or 0x7F is speech.
+        for (const b of mulawBytes) {
+          if (Math.abs(b - 0xFF) > 20 && Math.abs(b - 0x7F) > 20) { framesWithVoice++; break; }
+        }
+        if (sentFrames === 1 || sentFrames === 50 || sentFrames === 250) {
+          console.log('[mic] sent=' + sentFrames + ' framesWithVoice=' + framesWithVoice + ' firstByte=0x' + mulawBytes[0].toString(16));
+        }
       }
     });
 
@@ -150,6 +161,10 @@ export class CallStreamSession {
           const bin = atob(msg.media.payload);
           const bytes = new Uint8Array(bin.length);
           for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          if (!this._loggedFirstMedia) {
+            console.log('[session] first media frame received, bytes=' + bytes.length);
+            this._loggedFirstMedia = true;
+          }
           this._pipe.playMulawFrame(bytes);
         }
         break;

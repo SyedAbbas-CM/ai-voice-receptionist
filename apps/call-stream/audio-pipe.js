@@ -72,11 +72,33 @@ export class AudioPipe {
   playMulawFrame(mulawBytes) {
     if (!this._ctx) return;
     const nSamples = mulawBytes.length;
-    // Decode µ-law → int16 → Float32.
-    const buf = this._ctx.createBuffer(1, nSamples, TARGET_RATE);
-    const chan = buf.getChannelData(0);
+    // Decode µ-law → int16 → Float32 at 8kHz.
+    const pcm = new Float32Array(nSamples);
+    let peak = 0;
     for (let i = 0; i < nSamples; i++) {
-      chan[i] = ulaw2linear(mulawBytes[i]) / 32768;
+      pcm[i] = ulaw2linear(mulawBytes[i]) / 32768;
+      const abs = Math.abs(pcm[i]);
+      if (abs > peak) peak = abs;
+    }
+    if (!this._loggedPlay) {
+      console.log('[pipe] first frame ctx.state=' + this._ctx.state + ' ctxSr=' + this._ctx.sampleRate + ' bytes=' + nSamples + ' peak=' + peak.toFixed(3));
+      this._loggedPlay = true;
+    }
+    // Upsample from 8kHz to context sample rate using linear interpolation.
+    // Safari (and older browsers) can silently fail on createBuffer at
+    // non-native rates; plus per-frame 20ms buffers scheduled back-to-back
+    // at a foreign rate glitches badly.  Do it ourselves.
+    const targetSr = this._ctx.sampleRate;
+    const ratio = targetSr / TARGET_RATE;
+    const outLen = Math.floor(nSamples * ratio);
+    const buf = this._ctx.createBuffer(1, outLen, targetSr);
+    const chan = buf.getChannelData(0);
+    for (let i = 0; i < outLen; i++) {
+      const srcIdx = i / ratio;
+      const i0 = Math.floor(srcIdx);
+      const i1 = Math.min(i0 + 1, nSamples - 1);
+      const frac = srcIdx - i0;
+      chan[i] = pcm[i0] * (1 - frac) + pcm[i1] * frac;
     }
     const src = this._ctx.createBufferSource();
     src.buffer = buf;
