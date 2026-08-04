@@ -10,11 +10,12 @@ dashboard instead — same span data, different consumer.
 """
 from __future__ import annotations
 
+import asyncio
 import statistics
 from collections import defaultdict
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
 from packages.observability import (
@@ -183,4 +184,229 @@ def get_debug_config() -> dict:
         "pii_redactor": settings.pii_redactor,
         "tracer_kind": settings.tracer_kind,
         "business_profile_path": settings.business_profile_path,
+        # Sprint 9 + Sprint 10 flag state — one call to /debug/config
+        # tells us what intelligence is active for the current call.
+        "intelligence_flags": {
+            "twilio_use_actor": getattr(settings, "twilio_use_actor", False),
+            "two_planner_enabled": getattr(settings, "two_planner_enabled", False),
+            "two_stage_barge_in_enabled": getattr(
+                settings, "two_stage_barge_in_enabled", False,
+            ),
+            "dialogue_kernel_enabled": getattr(
+                settings, "dialogue_kernel_enabled", False,
+            ),
+            "streaming_stt_enabled": getattr(
+                settings, "streaming_stt_enabled", False,
+            ),
+            "turn_manager_enabled": getattr(
+                settings, "turn_manager_enabled", False,
+            ),
+            "telephony_output_gain_db": getattr(
+                settings, "telephony_output_gain_db", 0.0,
+            ),
+        },
     }
+
+
+# ── Sprint 10 obs: call event log endpoints ─────────────────────────
+
+@router.get("/call/{call_id}")
+def get_call_timeline(call_id: str, limit: int = 500) -> dict:
+    """Return the full event timeline for a single call from the
+    durable call_events table.  Includes state transitions, tool
+    outcomes, classified errors, playback marks.
+
+    Feed this into `jq`, a browser tab, or the /graph dashboard's
+    call detail view.  Newest first."""
+    from packages.observability.call_event_log import get_call_event_log
+    log = get_call_event_log()
+    events = log.timeline(call_id, limit=limit)
+    return {
+        "call_id": call_id,
+        "event_count": len(events),
+        "events": events,
+    }
+
+
+@router.get("/errors/recent")
+def get_recent_errors(hours: int = 24, tenant_id: Optional[str] = None,
+                      limit: int = 200) -> dict:
+    """Recent classified errors, newest first.  Filter by tenant_id
+    query param for per-tenant failure investigation."""
+    from packages.observability.call_event_log import get_call_event_log
+    log = get_call_event_log()
+    events = log.recent_errors(tenant_id=tenant_id, hours=hours, limit=limit)
+    return {
+        "window_hours": hours,
+        "tenant_id": tenant_id,
+        "count": len(events),
+        "errors": events,
+    }
+
+
+@router.get("/capabilities")
+def get_capabilities() -> dict:
+    """Sprint 11a: full LLM capability table + per-operation approved
+    model lists.  Answers 'which model handles main_brain vs perf_planner
+    vs write_guard right now?'"""
+    from packages.dialogue import capability_snapshot
+    return capability_snapshot()
+
+
+@router.get("/errors/taxonomy")
+def get_error_taxonomy(hours: int = 24, tenant_id: Optional[str] = None) -> dict:
+    """Rollup counts by ErrorCategory over the last N hours.  This is
+    the "measure failures" surface — see which failure modes are
+    dominating and plan fixes accordingly."""
+    from packages.observability.call_event_log import get_call_event_log
+    log = get_call_event_log()
+    counts = log.error_category_counts(tenant_id=tenant_id, hours=hours)
+    total = sum(counts.values())
+    return {
+        "window_hours": hours,
+        "tenant_id": tenant_id,
+        "total_errors": total,
+        "by_category": counts,
+    }
+
+
+@router.get("/call/{call_id}/timeline")
+def get_call_semantic_timeline(call_id: str, limit: int = 500) -> dict:
+    """Sprint 10 STREAMING WIRING: readable semantic timeline for
+    demo debrief.  Turns the raw event log into a per-turn narrative:
+
+        turn 0 (greeting)
+          agent → "Hi, thanks for calling ..."
+        turn 1 (user)
+          [stt_partial x3, stt_final]
+          user → "book a cleaning next Thursday"
+          [end_of_turn]
+          [state: task_added book_1]
+          agent → "Sure — is 10:30 AM okay?"
+        turn 2 (user)
+          [stt_partial]
+          [interruption]
+          [reconcile → heard: "Sure — is 10:30"]
+          user → "actually make that Thursday afternoon"
+          ...
+
+    Use this to figure out what went wrong on a demo call in one glance."""
+    from packages.observability.call_event_log import get_call_event_log
+    log = get_call_event_log()
+    events = log.timeline(call_id, limit=limit)
+
+    # Group by turn_generation and preserve chronological order within each
+    turns: dict[int, list[dict]] = {}
+    for ev in reversed(events):   # log returns newest-first; want oldest-first
+        tg = int(ev.get("turn_generation") or 0)
+        turns.setdefault(tg, []).append(ev)
+
+    # Build narrative
+    narrative = []
+    for tg in sorted(turns.keys()):
+        turn_events = turns[tg]
+        events_summary = []
+        for ev in turn_events:
+            src = ev.get("source")
+            kind = ev.get("kind")
+            payload = ev.get("payload") or {}
+            summary = {
+                "source": src, "kind": kind,
+                "wall_ts": ev.get("wall_ts"),
+            }
+            # Extract the most useful field per event type
+            if src == "stt":
+                summary["text"] = payload.get("text", "")[:200]
+            elif src == "control":
+                summary["text"] = payload.get("text", "")[:200]
+            elif src == "state":
+                summary["detail"] = {k: str(v)[:100]
+                                     for k, v in payload.items()
+                                     if k in ("task_id", "kind", "slot",
+                                              "value", "status")}
+            elif src == "commit":
+                summary["detail"] = {
+                    "outcome": payload.get("outcome"),
+                    "action_id": payload.get("action_id"),
+                    "error": payload.get("error"),
+                }
+            elif src == "error":
+                summary["error_category"] = ev.get("error_category")
+                summary["message"] = payload.get("message", "")[:200]
+            events_summary.append(summary)
+        narrative.append({"turn": tg, "events": events_summary})
+
+    return {
+        "call_id": call_id,
+        "turn_count": len(turns),
+        "event_count": len(events),
+        "timeline": narrative,
+    }
+
+
+@router.get("/failures/patterns")
+def get_failure_patterns(hours: int = 24, tenant_id: Optional[str] = None) -> dict:
+    """Sprint 11c: cluster recent failures by category + signature +
+    suggest a next action per cluster.  Answers 'what's my #1 failure
+    mode right now and what should I do about it?'"""
+    from packages.observability.failure_intelligence import failure_patterns_report
+    return failure_patterns_report(hours=hours, tenant_id=tenant_id)
+
+
+@router.get("/failures/call/{call_id}")
+def get_failure_summary_for_call(call_id: str) -> dict:
+    """Per-call failure profile — used from /debug/call/{id}.  Which
+    categories fired, at which turns."""
+    from packages.observability.failure_intelligence import per_call_failure_summary
+    return per_call_failure_summary(call_id)
+
+
+# ── Sprint 10 streaming-parity: live event stream for the browser widget ──
+
+@router.websocket("/live")
+async def debug_live_ws(ws: WebSocket, call_id: str) -> None:
+    """Live-tail every classified event for `call_id` to the browser
+    /call-stream widget.  Backfills the last 50 events on connect, then
+    forwards each new fan-out from CallEventLog.subscribe.
+
+    Dev-only surface — do not expose without auth in production."""
+    await ws.accept()
+    from packages.observability.call_event_log import get_call_event_log
+    log = get_call_event_log()
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
+
+    def _enqueue_nowait(event: dict) -> None:
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            pass  # bounded drop rather than block writer
+
+    def _on_event(event: dict) -> None:
+        # Called from any thread (SQLite writer may be off the loop).
+        # Schedule the queue put back on the loop so we don't touch it
+        # from a foreign thread.
+        try:
+            loop.call_soon_threadsafe(_enqueue_nowait, event)
+        except RuntimeError:
+            # Loop closed — client is gone, nothing to do.
+            pass
+
+    log.subscribe(call_id, _on_event)
+    try:
+        # Backfill: last 50 events, oldest first (timeline returns newest first)
+        history = list(reversed(log.timeline(call_id, limit=50)))
+        for ev in history:
+            await ws.send_json(ev)
+        # Live tail
+        while True:
+            ev = await queue.get()
+            await ws.send_json(ev)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        # Never crash on a client hangup or transient error.
+        pass
+    finally:
+        log.unsubscribe(call_id, _on_event)
