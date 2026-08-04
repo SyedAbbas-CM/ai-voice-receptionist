@@ -35,6 +35,11 @@ class MulawEncoderProcessor extends AudioWorkletProcessor {
     if (!input || !input[0]) return true;
     const src = input[0];  // mono channel 0, Float32Array length ~128
 
+    // Boost input by 10x — laptop mics deliver very quiet signal
+    // (peaks around 0.02-0.05) and Deepgram needs meaningful amplitude
+    // (peaks > 0.1) to fire SpeechStarted reliably.
+    const GAIN = 10.0;
+
     // Simple nearest-sample downsample. Good enough for speech at
     // 8 kHz; STT won't notice the anti-alias absence in practice.
     for (let i = 0; i < src.length; i++) {
@@ -42,7 +47,8 @@ class MulawEncoderProcessor extends AudioWorkletProcessor {
       if (this._srcAccum >= this._ratio) {
         this._srcAccum -= this._ratio;
         // Convert Float32 (-1..1) to int16 range then µ-law.
-        const s16 = Math.max(-1, Math.min(1, src[i])) * 32767;
+        const boosted = Math.max(-1, Math.min(1, src[i] * GAIN));
+        const s16 = boosted * 32767;
         this._resampleBuf.push(linear2ulaw(s16));
       }
     }

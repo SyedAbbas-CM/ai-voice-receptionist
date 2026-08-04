@@ -72,17 +72,10 @@ export class AudioPipe {
   playMulawFrame(mulawBytes) {
     if (!this._ctx) return;
     const nSamples = mulawBytes.length;
-    // Decode µ-law → int16 → Float32 at 8kHz.
+    // Decode µ-law → Float32 at 8kHz.
     const pcm = new Float32Array(nSamples);
-    let peak = 0;
     for (let i = 0; i < nSamples; i++) {
       pcm[i] = ulaw2linear(mulawBytes[i]) / 32768;
-      const abs = Math.abs(pcm[i]);
-      if (abs > peak) peak = abs;
-    }
-    if (!this._loggedPlay) {
-      console.log('[pipe] first frame ctx.state=' + this._ctx.state + ' ctxSr=' + this._ctx.sampleRate + ' bytes=' + nSamples + ' peak=' + peak.toFixed(3));
-      this._loggedPlay = true;
     }
     // Upsample from 8kHz to context sample rate using linear interpolation.
     // Safari (and older browsers) can silently fail on createBuffer at

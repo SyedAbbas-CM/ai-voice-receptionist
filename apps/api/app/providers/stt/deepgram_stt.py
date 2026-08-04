@@ -95,7 +95,15 @@ class DeepgramSTT(STTProvider):
         # Use an asyncio.Queue to bridge websocket reads → our async generator.
         event_queue: asyncio.Queue = asyncio.Queue()
 
-        async with websockets.connect(url, additional_headers=headers) as ws:
+        # Support both websockets 12+ (additional_headers) and older (extra_headers)
+        try:
+            _ws_ctx = websockets.connect(url, additional_headers=headers)
+        except TypeError:
+            _ws_ctx = websockets.connect(url, extra_headers=headers)
+
+        ws = await _ws_ctx.__aenter__()
+
+        try:
 
             async def _producer():
                 """Push caller audio chunks into the WS. On end-of-iteration,
@@ -114,9 +122,18 @@ class DeepgramSTT(STTProvider):
                         pass
 
             async def _consumer():
-                """Read WS messages, translate to STTEvent, push to queue."""
+                """Read WS messages, translate to STTEvent, push to queue.
+
+                Use explicit await ws.recv() loop instead of async for —
+                websockets v15's async iterator can starve on hot paths
+                where the producer holds the event loop; explicit recv()
+                yields deterministically on each read."""
                 try:
-                    async for raw in ws:
+                    while True:
+                        try:
+                            raw = await ws.recv()
+                        except websockets.ConnectionClosed:
+                            break
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
@@ -156,3 +173,5 @@ class DeepgramSTT(STTProvider):
             finally:
                 producer.cancel()
                 consumer.cancel()
+        finally:
+            await _ws_ctx.__aexit__(None, None, None)
