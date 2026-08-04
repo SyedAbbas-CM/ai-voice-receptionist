@@ -1,5 +1,147 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Call Stream (placeholder)</title></head>
-<body><h1>placeholder — real UI lands in Task 7</h1></body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streaming widget · voiceops</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main id="app">
+
+    <section id="call-surface">
+      <!-- Idle -->
+      <div id="idle-screen" class="active">
+        <h1>Smile Dental Clinic</h1>
+        <p class="subhead">Streaming intelligence · dev widget</p>
+        <button id="call-btn">Call</button>
+        <p class="subhead" style="margin-top:16px">Uses your browser mic and speakers · zero cost</p>
+      </div>
+
+      <!-- Active -->
+      <div id="active-screen">
+        <h1 id="active-business">Smile Dental Clinic</h1>
+        <div class="status-pill" id="status-pill">connecting…</div>
+        <div class="timer" id="timer">00:00</div>
+        <div class="transcript" id="transcript"></div>
+        <button id="end-btn">End call</button>
+      </div>
+
+      <!-- Ended -->
+      <div id="ended-screen">
+        <h1>Call ended</h1>
+        <p class="subhead">Duration <b id="ended-duration">—</b> · turns <b id="ended-turns">—</b></p>
+        <button id="restart-btn">Call again</button>
+      </div>
+    </section>
+
+    <section id="debug-panel">
+      <div id="debug-header">
+        <h2>debug · live intelligence stream</h2>
+        <div id="debug-controls">
+          <button id="pause-btn">pause scroll</button>
+          <button id="clear-btn">clear</button>
+        </div>
+      </div>
+      <div id="debug-log"></div>
+    </section>
+
+  </main>
+
+  <script type="module">
+    import { CallStreamSession } from './session.js';
+
+    const $ = (id) => document.getElementById(id);
+    let session = null;
+    let paused = false;
+    let timerHandle = null;
+    let callStartedAt = 0;
+
+    function showScreen(id) {
+      for (const s of ['idle-screen', 'active-screen', 'ended-screen']) {
+        $(s).classList.toggle('active', s === id);
+      }
+    }
+    function setStatus(text) { $('status-pill').textContent = text; }
+    function fmtDur(s) {
+      const m = Math.floor(s / 60), ss = String(s % 60).padStart(2, '0');
+      return `${String(m).padStart(2, '0')}:${ss}`;
+    }
+    function startTimer() {
+      stopTimer();
+      const tick = () => $('timer').textContent = fmtDur(Math.floor((Date.now() - callStartedAt) / 1000));
+      tick(); timerHandle = setInterval(tick, 1000);
+    }
+    function stopTimer() { if (timerHandle) { clearInterval(timerHandle); timerHandle = null; } }
+
+    function addBubble(who, text) {
+      const wrap = document.createElement('div');
+      wrap.className = `bubble ${who}`;
+      wrap.textContent = text;
+      const label = document.createElement('div');
+      label.className = `who ${who}`;
+      label.textContent = who === 'user' ? 'you' : 'agent';
+      const row = document.createElement('div');
+      row.appendChild(label); row.appendChild(wrap);
+      $('transcript').appendChild(row);
+      $('transcript').scrollTop = $('transcript').scrollHeight;
+    }
+
+    function addDebugRow(ev) {
+      const row = document.createElement('div');
+      const src = ev.source || 'unknown';
+      row.className = `event-row src-${src}`;
+      const ts = new Date((ev.wall_ts || Date.now() / 1000) * 1000).toISOString().slice(11, 23);
+      const payload = ev.payload ? JSON.stringify(ev.payload).slice(0, 200) : '';
+      row.innerHTML =
+        `<span class="ts">${ts}</span>` +
+        `<span class="src">${src}.${ev.kind || '?'}</span>` +
+        `<span>${payload}</span>`;
+      $('debug-log').appendChild(row);
+      if (!paused) $('debug-panel').scrollTop = $('debug-panel').scrollHeight;
+    }
+
+    async function startCall() {
+      $('call-btn').disabled = true;
+      $('call-btn').textContent = 'connecting…';
+      try {
+        session = new CallStreamSession();
+        await session.startCall({
+          onTranscript: ({ who, text }) => addBubble(who, text),
+          onStatus: (text) => setStatus(text),
+          onDebugEvent: (ev) => addDebugRow(ev),
+          onEnded: ({ durationSec, turnCount }) => {
+            $('ended-duration').textContent = fmtDur(durationSec);
+            $('ended-turns').textContent = turnCount;
+            showScreen('ended-screen');
+            stopTimer();
+            session = null;
+          },
+        });
+        callStartedAt = Date.now();
+        startTimer();
+        showScreen('active-screen');
+      } catch (e) {
+        alert('Failed to start call: ' + (e.message || e));
+        $('call-btn').disabled = false;
+        $('call-btn').textContent = 'Call';
+      }
+    }
+
+    $('call-btn').addEventListener('click', startCall);
+    $('end-btn').addEventListener('click', () => session && session.endCall());
+    $('restart-btn').addEventListener('click', () => {
+      $('transcript').innerHTML = '';
+      $('debug-log').innerHTML = '';
+      $('call-btn').disabled = false;
+      $('call-btn').textContent = 'Call';
+      showScreen('idle-screen');
+    });
+    $('pause-btn').addEventListener('click', () => {
+      paused = !paused;
+      $('pause-btn').textContent = paused ? 'resume scroll' : 'pause scroll';
+    });
+    $('clear-btn').addEventListener('click', () => $('debug-log').innerHTML = '');
+  </script>
+</body>
 </html>
