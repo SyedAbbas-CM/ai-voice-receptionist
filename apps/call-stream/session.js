@@ -40,16 +40,22 @@ export class CallStreamSession {
 
     this._ws = new WebSocket(audioUrl);
     this._ws.binaryType = 'arraybuffer';
+    // If the socket opens synchronously before we attach onopen we'd hang
+    // forever — check readyState after registering the handler.
     await new Promise((resolve, reject) => {
-      this._ws.onopen = resolve;
-      this._ws.onerror = reject;
+      if (this._ws.readyState === WebSocket.OPEN) { resolve(); return; }
+      if (this._ws.readyState === WebSocket.CLOSED) { reject(new Error('ws closed before open')); return; }
+      this._ws.addEventListener('open', () => resolve(), { once: true });
+      this._ws.addEventListener('error', (e) => reject(new Error('ws error before open')), { once: true });
     });
     this._setStatus('connected');
+    console.log('[session] audio ws open, sending handshake');
 
     // Send Twilio-format handshake so the server's actor path accepts it.
     this._ws.send(JSON.stringify({
       event: 'connected', protocol: 'Call', version: '1.0.0',
     }));
+    console.log('[session] sent connected');
     this._ws.send(JSON.stringify({
       event: 'start',
       sequenceNumber: '1',
@@ -62,6 +68,7 @@ export class CallStreamSession {
         customParameters: { origin: 'browser' },
       },
     }));
+    console.log('[session] sent start callSid=' + this._callId);
 
     // Route server-to-client events.
     this._ws.onmessage = (ev) => this._handleServerMessage(ev);
