@@ -88,15 +88,17 @@
     }
 
     function addDebugRow(ev) {
+      // Build the row from DOM API + textContent so untrusted server-side
+      // payload strings can never break out into HTML/script.
       const row = document.createElement('div');
       const src = ev.source || 'unknown';
       row.className = `event-row src-${src}`;
       const ts = new Date((ev.wall_ts || Date.now() / 1000) * 1000).toISOString().slice(11, 23);
       const payload = ev.payload ? JSON.stringify(ev.payload).slice(0, 200) : '';
-      row.innerHTML =
-        `<span class="ts">${ts}</span>` +
-        `<span class="src">${src}.${ev.kind || '?'}</span>` +
-        `<span>${payload}</span>`;
+      const tsEl = document.createElement('span'); tsEl.className = 'ts'; tsEl.textContent = ts;
+      const srcEl = document.createElement('span'); srcEl.className = 'src'; srcEl.textContent = `${src}.${ev.kind || '?'}`;
+      const payloadEl = document.createElement('span'); payloadEl.textContent = payload;
+      row.appendChild(tsEl); row.appendChild(srcEl); row.appendChild(payloadEl);
       $('debug-log').appendChild(row);
       if (!paused) $('debug-panel').scrollTop = $('debug-panel').scrollHeight;
     }
