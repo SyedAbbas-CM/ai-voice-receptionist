@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     cerebras_api_key: Optional[str] = None
     cerebras_model: Optional[str] = "llama-3.3-70b"
 
+    # Mistral La Plateforme — added 2026-08-04.  8 working models
+    # (mistral-large-latest, mistral-small-latest, ministral-3b/8b,
+    # codestral, pixtral, open-mistral-nemo).  EU-hosted.
+    mistral_api_key: Optional[str] = None
+    mistral_model: Optional[str] = "mistral-large-latest"
+
     openrouter_api_key: Optional[str] = None
     openrouter_model: Optional[str] = "meta-llama/llama-3.3-70b-instruct"
     openrouter_site_url: Optional[str] = None
@@ -179,6 +185,62 @@ class Settings(BaseSettings):
     twilio_account_sid: Optional[str] = None
     twilio_auth_token: Optional[str] = None
     twilio_public_url: Optional[str] = None
+
+    # Sprint 9a: gate CallActor-backed Twilio path.  Default false so the
+    # legacy TwilioStreamSession keeps running until we've soaked the
+    # new path.  Flip to true to route inbound calls through the
+    # per-call actor + PlaybackLedger kernel.
+    twilio_use_actor: bool = False
+
+    # Sprint 9e: enable the two-planner path (semantic + performance
+    # LLM + VPL compilation).  Requires twilio_use_actor=true.  When
+    # False, TwilioActorSession uses the direct text-to-TTS path.
+    two_planner_enabled: bool = False
+    # Timeout for the performance planner LLM call in milliseconds.
+    performance_planner_timeout_ms: int = 200
+    # Model to use for performance planning.  llama-3.1-8b-instant is
+    # the fastest option on Groq that reliably emits valid JSON.
+    performance_planner_model: str = "llama-3.1-8b-instant"
+
+    # Sprint 9f: two-stage barge-in.  When enabled, VAD-detected speech
+    # during agent SPEAKING first "ducks" outbound audio (stops new
+    # frames + attenuates in-flight) then waits up to
+    # `barge_stage2_deadline_ms` for the classifier to say
+    # INTERRUPT/CONTINUE.  On timeout without classification the duck
+    # is released and the agent resumes speaking (false-trigger path).
+    two_stage_barge_in_enabled: bool = False
+    barge_stage2_deadline_ms: int = 400
+
+    # Fix for quiet-phone-voice complaint (2026-08-04): boost outbound
+    # µ-law amplitude before send.  0 = pass through (current behavior),
+    # positive values scale up.  Range +0..+12 dB.  Above +6 clipping
+    # is likely on peaks.  Applied per-frame in _send_mulaw_frames.
+    telephony_output_gain_db: float = 0.0
+
+    # Sprint 10 WIRING (2026-08-04): enable the intelligence kernel
+    # on the live call path.  When True:
+    #   * ReceptionistBrain emits StatePatches into CallState.dialogue
+    #   * TemporalResolver normalizes date/time slots before booking
+    #   * CommitCoordinator wraps book_appointment (idempotency + evidence)
+    # When False, legacy path unchanged.  Default False so we soak.
+    dialogue_kernel_enabled: bool = False
+
+    # Sprint 10 STREAMING WIRING (2026-08-04): route inbound Twilio
+    # frames through the StreamingSTTBridge + TurnManager instead of
+    # the batch STT path.  Enables partial hypotheses, eager end-of-
+    # turn, semantic backchannel/interruption/pause detection, and
+    # heard-text reconciliation.
+    # Requires DEEPGRAM_API_KEY.  Falls back gracefully if the STT
+    # provider doesn't support streaming.
+    streaming_stt_enabled: bool = False
+    turn_manager_enabled: bool = False
+
+    # Sprint 12 Track A: mailbox handlers spawn+return instead of
+    # awaiting long-running LLM/TTS/tool work.  Turn events dispatched
+    # during agent speech get processed within ~50ms instead of queueing
+    # behind the operation they're meant to interrupt.
+    # Flip false to restore pre-Sprint-12 inline-await behavior.
+    actor_nonblocking_handlers: bool = True
 
     database_url: Optional[str] = None
     business_profile_path: Optional[str] = None
