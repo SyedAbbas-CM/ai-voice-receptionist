@@ -75,6 +75,11 @@ export class CallStreamSession {
     // Boot the audio pipe (mic + speaker).  Frames go straight to the WS.
     this._pipe = new AudioPipe();
     let mediaSeq = 2;
+    // Sprint 12: mic stays HOT the entire call so barge-in works.
+    // The browser's built-in AEC (echoCancellation: true in getUserMedia)
+    // handles most speaker→mic feedback.  Any residual echo the audit
+    // pipeline sees is safer to handle server-side (backchannel
+    // classifier, ledger reconciliation) than by muting the mic.
     await this._pipe.start((mulawBytes) => {
       if (this._ws && this._ws.readyState === 1) {
         const b64 = btoa(String.fromCharCode(...mulawBytes));
@@ -86,7 +91,8 @@ export class CallStreamSession {
       }
     });
 
-    // When the local playback queue drains, ack any pending marks.
+    // When the local playback queue drains, ack any pending marks
+    // back to the server so the ledger advances.
     this._pipe.onPlaybackCaughtUp(() => {
       while (this._pendingMarks.length > 0) {
         const name = this._pendingMarks.shift();
@@ -147,7 +153,14 @@ export class CallStreamSession {
           const bin = atob(msg.media.payload);
           const bytes = new Uint8Array(bin.length);
           for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          this._pipe.playMulawFrame(bytes);
+          const fmt = (msg.media && msg.media.format) || '';
+          const m = fmt.match(/^pcm_s16le_(\d+)$/);
+          if (m) {
+            this._pipe.playPcmFrame(bytes, parseInt(m[1], 10));
+          } else {
+            // No format marker → legacy Twilio µ-law 8kHz.
+            this._pipe.playMulawFrame(bytes);
+          }
         }
         break;
       case 'mark':
