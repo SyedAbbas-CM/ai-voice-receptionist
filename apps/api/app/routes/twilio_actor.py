@@ -118,6 +118,35 @@ def _infer_speech_act_from_payload(payload: dict) -> str:
 log = logging.getLogger(__name__)
 
 
+def _looks_like_agent_echo(transcript: str, recent_agent: list[str]) -> bool:
+    """Sprint 12 Track B: return True if `transcript` is almost certainly
+    the mic picking up the agent's own speaker output rather than a
+    real caller utterance.
+
+    Heuristic: normalize both to lowercase word bags and check that
+    the transcript's meaningful-word set is a subset of any recent
+    agent utterance with a high overlap ratio.  We only reject if:
+      - transcript is at least 3 words long (avoid nuking short real
+        answers like "yes" / "cleaning" / "tomorrow")
+      - AND ≥60% of the transcript's words appeared in a recent agent
+        utterance
+    Short caller turns pass through even if they happen to match a
+    common word in the agent's speech."""
+    import re as _re
+    words = _re.findall(r"[a-z']+", transcript.lower())
+    if len(words) < 3:
+        return False
+    trans_set = set(words)
+    for agent_utt in recent_agent:
+        agent_words = set(_re.findall(r"[a-z']+", agent_utt.lower()))
+        if not agent_words:
+            continue
+        overlap = len(trans_set & agent_words)
+        if overlap / max(len(trans_set), 1) >= 0.6:
+            return True
+    return False
+
+
 TWILIO_SAMPLE_RATE = 8000
 TWILIO_FRAME_MS = 20
 SILENCE_HANG_MS = 700
@@ -213,6 +242,13 @@ class TwilioActorSession:
         # else?"), then say goodbye + hangup on the next silence window.
         self._idle_task: Optional[asyncio.Task] = None
         self._idle_prompted: bool = False
+
+        # Sprint 12 Track B addendum: echo suppression.  Track the last
+        # 3 agent utterances (a short rolling buffer) so we can drop
+        # STT finals that are actually just the mic hearing our own
+        # speaker.  Only reject finals that overlap significantly with
+        # something the agent JUST said.
+        self._recent_agent_utterances: list[str] = []
 
         self.actor: Optional[CallActor] = None
 
@@ -339,8 +375,21 @@ class TwilioActorSession:
         if self._stt_bridge is not None:
             self._stt_bridge.feed(mulaw_frame)
 
+        # Sprint 12 Track B: kill the split-brain barge system.  When
+        # streaming STT + turn manager are the authority, the legacy
+        # VAD/batch _buffer_barge_frame path just duplicates work,
+        # hammers the Deepgram REST endpoint (causing 408 timeouts),
+        # and fires the brain twice on the same interruption.
+        # Only run the legacy path when the streaming path is OFF.
+        streaming_barge_active = (
+            settings.streaming_stt_enabled
+            and settings.turn_manager_enabled
+            and self._stt_bridge is not None
+            and self._turn_manager is not None
+        )
         if self.actor.state == CallState.SPEAKING:
-            await self._buffer_barge_frame(mulaw_frame)
+            if not streaming_barge_active:
+                await self._buffer_barge_frame(mulaw_frame)
             return
 
         # Sprint 10 STREAMING WIRING: when turn_manager is enabled, the
@@ -747,6 +796,14 @@ class TwilioActorSession:
         if actor is None:
             return
 
+        # Sprint 12 Track B addendum: remember what the agent just said
+        # so we can filter STT finals that are actually mic-hearing-speaker
+        # echo.  Rolling buffer of last 3 utterances (~15 sec at typical
+        # pace) since Deepgram lag can arrive multi-utterance-late.
+        self._recent_agent_utterances.append(text)
+        if len(self._recent_agent_utterances) > 3:
+            self._recent_agent_utterances.pop(0)
+
         # Log utterance so /debug/call/{id}/timeline shows what the agent said
         try:
             from packages.observability.call_event_log import (
@@ -1067,6 +1124,15 @@ class TwilioActorSession:
         mailbox).  On success, emits control.brain_completed with the
         reply.  On failure, emits control.brain_failed.  Handler
         _on_brain_completed then spawns _speech_job."""
+        # Sprint 12 Track B addendum: filter echo before spending an
+        # LLM turn on it.  If the transcript matches recent agent
+        # utterances closely, it's the mic picking up our own speaker.
+        if _looks_like_agent_echo(transcript, self._recent_agent_utterances):
+            log.info("dropping echo turn=%d text=%r", turn_gen, transcript[:80])
+            self._streaming_utterance_text = ""
+            self._arm_idle_followup()
+            return
+
         from packages.observability.call_event_log import (
             get_call_event_log, CallEvent as _CE, EventSourceKind as _SK,
         )
