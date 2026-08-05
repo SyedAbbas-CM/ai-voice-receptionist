@@ -208,6 +208,12 @@ class TwilioActorSession:
         # has a final utterance to feed the brain.
         self._streaming_utterance_text = ""
 
+        # Idle-followup: after the agent finishes speaking, we wait
+        # for the caller.  If they stay silent, we prompt once ("Anything
+        # else?"), then say goodbye + hangup on the next silence window.
+        self._idle_task: Optional[asyncio.Task] = None
+        self._idle_prompted: bool = False
+
         self.actor: Optional[CallActor] = None
 
     # ── lifecycle ────────────────────────────────────────────────────
@@ -256,6 +262,8 @@ class TwilioActorSession:
 
     async def stop(self, reason: str = "hangup") -> None:
         self._close_turn_span()
+        # Don't leak the idle-followup timer past the call
+        self._cancel_idle_followup()
         # Sprint 9f: don't leak the stage-2 deadline task on hangup
         if self._stage2_deadline_task and not self._stage2_deadline_task.done():
             self._stage2_deadline_task.cancel()
@@ -305,6 +313,12 @@ class TwilioActorSession:
             actor.handlers[(EventSource.CONTROL, TurnEventKind.INTERRUPTION.value)] = self._on_turn_event_interruption
             actor.handlers[(EventSource.CONTROL, TurnEventKind.USER_REQUESTED_PAUSE.value)] = self._on_turn_event_pause
             actor.handlers[(EventSource.CONTROL, TurnEventKind.FALSE_INTERRUPTION.value)] = self._on_turn_event_false_int
+        # Sprint 12 Track A: brain + speech job completion handlers.
+        # These fire from control events emitted BY the supervised jobs
+        # spawned from _on_turn_event_end (nonblocking path).
+        actor.handlers[(EventSource.CONTROL, "brain_completed")] = self._on_brain_completed
+        actor.handlers[(EventSource.CONTROL, "brain_failed")] = self._on_brain_failed
+        actor.handlers[(EventSource.CONTROL, "speech_completed")] = self._on_speech_completed
 
     # ── inbound events (called by the /twilio/stream loop) ──────────
 
@@ -682,6 +696,49 @@ class TwilioActorSession:
 
     # ── outbound TTS ─────────────────────────────────────────────────
 
+    # ── Idle-followup: prompt then hangup on caller silence ──────────
+
+    _IDLE_FIRST_PROMPT_S: float = 15.0
+    _IDLE_HANGUP_AFTER_PROMPT_S: float = 15.0
+    _IDLE_FAREWELL: str = "Alright, thanks for calling Smile Dental. Have a great day!"
+    _IDLE_PROMPT: str = "Anything else I can help you with?"
+
+    def _arm_idle_followup(self) -> None:
+        """Start the idle-timeout ladder.  Cancels any previous idle
+        task so successive agent turns reset the clock."""
+        self._cancel_idle_followup()
+        self._idle_prompted = False
+        self._idle_task = asyncio.create_task(
+            self._idle_followup_loop(),
+            name=f"idle-{self.call_id}",
+        )
+
+    def _cancel_idle_followup(self) -> None:
+        """Caller spoke — kill the pending idle prompt/hangup."""
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+        self._idle_task = None
+        self._idle_prompted = False
+
+    async def _idle_followup_loop(self) -> None:
+        try:
+            # First silence window — nudge if the caller stays quiet.
+            await asyncio.sleep(self._IDLE_FIRST_PROMPT_S)
+            if self.actor is None or self.actor.state != CallState.LISTENING:
+                return
+            self._idle_prompted = True
+            await self._speak(self._IDLE_PROMPT)
+            # Second window — say goodbye and hangup.
+            await asyncio.sleep(self._IDLE_HANGUP_AFTER_PROMPT_S)
+            if self.actor is None or self.actor.state != CallState.LISTENING:
+                return
+            await self._speak(self._IDLE_FAREWELL)
+            # Give the farewell time to actually stream out before we tear down.
+            await asyncio.sleep(2.0)
+            await self.stop(reason="idle_timeout")
+        except asyncio.CancelledError:
+            pass
+
     async def _speak(self, text: str) -> None:
         """Synthesize `text`, chunk it, send to Twilio, register each
         chunk in the ledger with a mark ID.  Cancellable — bump_turn
@@ -689,6 +746,20 @@ class TwilioActorSession:
         actor = self.actor
         if actor is None:
             return
+
+        # Log utterance so /debug/call/{id}/timeline shows what the agent said
+        try:
+            from packages.observability.call_event_log import (
+                get_call_event_log, CallEvent as _CE, EventSourceKind as _SK,
+            )
+            get_call_event_log().write(_CE(
+                call_id=self.session_id, tenant_id=self.tenant_id,
+                source=_SK.TTS, kind="utterance",
+                payload={"text": text},
+                turn_generation=actor.turn_generation,
+            ))
+        except Exception:
+            pass
 
         actor.transition(CallState.SPEAKING)
         gen = actor.speech_generation
@@ -706,6 +777,12 @@ class TwilioActorSession:
         finally:
             if actor.state == CallState.SPEAKING:
                 actor.transition(CallState.LISTENING)
+            # After the agent finishes speaking, arm an idle-followup
+            # timer.  If the caller stays silent for 15s we nudge with
+            # "Anything else?"; another 15s of silence → say goodbye
+            # and hang up.  Cancelled the moment END_OF_TURN fires
+            # (i.e. the caller says something).
+            self._arm_idle_followup()
 
     async def _stream_tts(self, text: str, gen: int) -> None:
         """Do the actual synth + send.  Broken out so it's a
@@ -716,7 +793,7 @@ class TwilioActorSession:
         compiler path.  Everything else falls through to the direct
         synthesize(text) path so browser/greeting/legacy callers stay
         untouched."""
-        from app.routes.twilio import _get_telephony_tts, _tts_bytes_to_mulaw
+        from app.routes.twilio import _get_telephony_tts
         span = self._current_turn_span
         try:
             if span is not None:
@@ -739,22 +816,22 @@ class TwilioActorSession:
             if mime == "text/x-browser-speak":
                 log.warning("browser TTS can't drive telephony")
                 return
-            mulaw = _tts_bytes_to_mulaw(audio_bytes, mime)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             log.exception("actor speak failed: %s", e)
             return
 
-        # Single-chunk ledger entry.  Sprint 9c/9d will produce multiple
-        # aligned chunks so heard_text_for() advances mid-utterance.
+        # Ledger entry sized by the PCM bytes going out.  Duration math is
+        # bytes / (rate * bytes_per_sample / 1000) — the outbound sender
+        # knows how to encode to whatever wire format the transport needs.
         self._mark_counter += 1
         mark_id = f"m{gen}-{self._mark_counter}"
         chunk = AudioChunk(
             generation_id=f"gen-{gen}",
             sequence=0,
-            audio_bytes=len(mulaw),
-            duration_ms=int(len(mulaw) / (TWILIO_SAMPLE_RATE / 1000)),
+            audio_bytes=len(audio_bytes),
+            duration_ms=int(len(audio_bytes) / 32),  # 16kHz s16le = 32 bytes/ms
             text=text,
             text_start=0,
             text_end=len(text),
@@ -764,7 +841,7 @@ class TwilioActorSession:
         if self.actor is not None:
             self.actor.ledger.queue_chunk(gen, chunk)
 
-        await self._send_mulaw_frames(mulaw)
+        await self._send_audio_frames(audio_bytes, mime)
         await self._send_twilio_mark(mark_id)
 
     # ── Sprint 9e: two-planner + VPL compilation path ──────────────
@@ -886,14 +963,24 @@ class TwilioActorSession:
 
     async def _on_stt_final(self, actor: CallActor, event: CallEvent) -> bool:
         """Streaming STT final hypothesis.  Passes to turn manager
-        which decides EAGER_END_OF_TURN vs INTERRUPTION vs redundant."""
+        which decides EAGER_END_OF_TURN vs INTERRUPTION vs redundant.
+
+        `is_final=True` means "text won't be revised"; it can still be a
+        mid-sentence endpoint.  `speech_final=True` means VAD confirmed
+        the utterance is truly over — only then is END_OF_TURN safe."""
         text = event.payload.get("text", "")
+        speech_final = event.payload.get("speech_final", False)
         if text:
             self._streaming_utterance_text = text
+            # Caller spoke a real chunk — kill any pending idle prompt/hangup.
+            # Cancel only on speech_final so echo/noise fragments don't
+            # reset the idle timer between agent responses.
+            if speech_final:
+                self._cancel_idle_followup()
         _tel.record_stream_event(self.tenant_id, kind="stt_final")
         if self._turn_manager is not None:
             await self._turn_manager.on_stt_event(
-                "final", text=text, is_final=True,
+                "final", text=text, is_final=True, speech_final=speech_final,
             )
         return True
 
@@ -928,27 +1015,41 @@ class TwilioActorSession:
         return True
 
     async def _on_turn_event_end(self, actor: CallActor, event: CallEvent) -> bool:
-        """END_OF_TURN — caller committed their turn.  Fire the brain
-        with the accumulated streaming utterance text.
+        """END_OF_TURN — caller committed their turn.
 
-        This is the streaming-path equivalent of the batch
-        `_on_utterance_ready` — no WAV, no batch STT, just the text
-        that Deepgram already gave us."""
+        Sprint 12 Track A: MUST return quickly.  Brain runs as a
+        supervised job that emits control.brain_completed back to the
+        actor when done.  A subsequent INTERRUPTION event won't queue
+        behind a 2-second LLM call.
+
+        Legacy inline behavior available under
+        settings.actor_nonblocking_handlers=False for rollback."""
         _tel.record_turn_event(self.tenant_id, kind=event.kind)
         text = event.payload.get("text") or self._streaming_utterance_text
         if not text or not text.strip():
             return True
 
-        # Bump the turn generation so late partials from the previous
-        # utterance get dropped.
         await actor.bump_turn(reason="end-of-turn")
-        # Open a per-turn telemetry span for this new turn
         self._open_turn_span(actor.turn_generation)
         if self._current_turn_span is not None:
             self._current_turn_span.mark("media_in")
             self._current_turn_span.mark("stt_final")
 
         turn_gen = actor.turn_generation
+        # Reset the utterance buffer for next turn
+        self._streaming_utterance_text = ""
+
+        if settings.actor_nonblocking_handlers:
+            # New path: spawn brain job, return immediately.  Job emits
+            # control.brain_completed when done.
+            actor.spawn_supervised(
+                self._brain_job(text, turn_gen),
+                generation=turn_gen,
+                name=f"brain-{self.call_id}-{turn_gen}",
+            )
+            return True
+
+        # Legacy path: inline await for rollback safety.
         brain_task = asyncio.create_task(
             self._run_brain_from_text(text, turn_gen),
             name=f"brain-{self.call_id}-{turn_gen}",
@@ -959,14 +1060,177 @@ class TwilioActorSession:
         except asyncio.CancelledError:
             log.info("brain cancelled by newer turn call=%s gen=%d",
                      self.call_id, turn_gen)
-        # Reset for next turn
-        self._streaming_utterance_text = ""
+        return True
+
+    async def _brain_job(self, transcript: str, turn_gen: int) -> None:
+        """Sprint 12 Track A: brain runs as a supervised job (off the
+        mailbox).  On success, emits control.brain_completed with the
+        reply.  On failure, emits control.brain_failed.  Handler
+        _on_brain_completed then spawns _speech_job."""
+        from packages.observability.call_event_log import (
+            get_call_event_log, CallEvent as _CE, EventSourceKind as _SK,
+        )
+        try:
+            _elog = get_call_event_log()
+            _elog.write(_CE(
+                call_id=self.session_id, tenant_id=self.tenant_id,
+                source=_SK.STT, kind="final",
+                payload={"text": transcript}, turn_generation=turn_gen,
+            ))
+        except Exception:
+            _elog = None
+
+        try:
+            log.info("brain-job %s turn=%d heard: %s",
+                     self.session_id, turn_gen, transcript)
+            handle = session_manager.get_session(
+                self.session_id, tenant_id=self.tenant_id,
+            )
+            if handle is None:
+                state, brain = session_manager.start_session_with_id(
+                    self.session_id, tenant_id=self.tenant_id,
+                )
+            else:
+                state, brain = handle
+
+            payload = await session_manager.run_user_turn(state, brain, transcript)
+            reply = (payload.get("reply") or "").strip()
+            escalated = bool(payload.get("escalated"))
+            tool_results = payload.get("tool_results") or []
+            speech_act = _infer_speech_act_from_payload(payload)
+
+            if _elog is not None:
+                try:
+                    _elog.write(_CE(
+                        call_id=self.session_id, tenant_id=self.tenant_id,
+                        source=_SK.LLM, kind="reply",
+                        payload={
+                            "reply": reply,
+                            "escalated": escalated,
+                            "tool_results": tool_results,
+                        },
+                        turn_generation=turn_gen,
+                    ))
+                except Exception:
+                    pass
+
+            if self.actor is not None:
+                self.actor.emit_local(CallEvent.new(
+                    call_id=self.call_id, tenant_id=self.tenant_id,
+                    source=EventSource.CONTROL,
+                    turn_generation=turn_gen,
+                    speech_generation=self.actor.speech_generation,
+                    kind="brain_completed",
+                    payload={
+                        "reply": reply,
+                        "escalated": escalated,
+                        "tool_results": tool_results,
+                        "speech_act": speech_act,
+                        "turn_gen": turn_gen,
+                    },
+                    source_epoch=turn_gen,
+                ))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("brain job failed: %s", e)
+            if _elog is not None:
+                try:
+                    _elog.write_error(
+                        call_id=self.session_id, tenant_id=self.tenant_id,
+                        message=str(e), exc_type=type(e).__name__,
+                        turn_generation=turn_gen,
+                    )
+                except Exception:
+                    pass
+            if self.actor is not None:
+                self.actor.emit_local(CallEvent.new(
+                    call_id=self.call_id, tenant_id=self.tenant_id,
+                    source=EventSource.CONTROL,
+                    turn_generation=turn_gen,
+                    speech_generation=self.actor.speech_generation,
+                    kind="brain_failed",
+                    payload={
+                        "error": str(e),
+                        "exc_type": type(e).__name__,
+                        "turn_gen": turn_gen,
+                    },
+                    source_epoch=turn_gen,
+                ))
+
+    async def _on_brain_completed(self, actor: CallActor, event: CallEvent) -> bool:
+        """Brain job finished.  Save speech-act for VPL, spawn a
+        supervised speech job for the reply text."""
+        payload = event.payload or {}
+        reply = (payload.get("reply") or "").strip()
+        self._current_speech_act = payload.get("speech_act")
+        if not reply:
+            # No reply text — just arm idle followup so we don't hang.
+            self._arm_idle_followup()
+            return True
+        turn_gen = payload.get("turn_gen", actor.turn_generation)
+        actor.spawn_supervised(
+            self._speech_job(reply, turn_gen),
+            generation=turn_gen,
+            name=f"speech-{self.call_id}-{turn_gen}",
+        )
+        return True
+
+    async def _on_brain_failed(self, actor: CallActor, event: CallEvent) -> bool:
+        """Brain job errored.  Log-only for now — caller can retry.
+        Don't play a fallback string; silence is better than confusion
+        for demo debugging."""
+        payload = event.payload or {}
+        log.warning("brain job failed turn=%s: %s (%s)",
+                    payload.get("turn_gen"),
+                    payload.get("error"), payload.get("exc_type"))
+        self._arm_idle_followup()
+        return True
+
+    async def _speech_job(self, text: str, turn_gen: int) -> None:
+        """Sprint 12 Track A: TTS+playback runs as a supervised job.
+        On completion emits control.speech_completed."""
+        try:
+            await self._speak(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("speech job failed: %s", e)
+        if self.actor is not None:
+            self.actor.emit_local(CallEvent.new(
+                call_id=self.call_id, tenant_id=self.tenant_id,
+                source=EventSource.CONTROL,
+                turn_generation=turn_gen,
+                speech_generation=self.actor.speech_generation,
+                kind="speech_completed",
+                payload={"turn_gen": turn_gen},
+                source_epoch=turn_gen,
+            ))
+
+    async def _on_speech_completed(self, actor: CallActor, event: CallEvent) -> bool:
+        """Speech job finished — arm idle followup so we prompt if the
+        caller stays silent."""
+        self._arm_idle_followup()
         return True
 
     async def _run_brain_from_text(self, transcript: str, turn_gen: int) -> None:
         """Streaming-path brain execution.  Same shape as _run_brain
         but skips the WAV→STT step (we already have text)."""
         span = self._current_turn_span
+        # Direct log-event calls so /debug/call/{id}/timeline reflects
+        # streaming-path brain activity, not just kernel_wiring hooks.
+        try:
+            from packages.observability.call_event_log import (
+                get_call_event_log, CallEvent as _CE, EventSourceKind as _SK,
+            )
+            _elog = get_call_event_log()
+            _elog.write(_CE(
+                call_id=self.session_id, tenant_id=self.tenant_id,
+                source=_SK.STT, kind="final",
+                payload={"text": transcript}, turn_generation=turn_gen,
+            ))
+        except Exception:
+            _elog = None
         try:
             log.info("stream-brain %s turn=%d heard: %s",
                      self.session_id, turn_gen, transcript)
@@ -985,12 +1249,35 @@ class TwilioActorSession:
                 span.mark("llm_first_token")
             reply = (payload.get("reply") or "").strip()
             self._current_speech_act = _infer_speech_act_from_payload(payload)
+            if _elog is not None:
+                try:
+                    _elog.write(_CE(
+                        call_id=self.session_id, tenant_id=self.tenant_id,
+                        source=_SK.LLM, kind="reply",
+                        payload={
+                            "reply": reply,
+                            "escalated": bool(payload.get("escalated")),
+                            "tool_results": payload.get("tool_results") or [],
+                        },
+                        turn_generation=turn_gen,
+                    ))
+                except Exception:
+                    pass
             if reply:
                 await self._speak(reply)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             log.exception("stream-brain failed: %s", e)
+            if _elog is not None:
+                try:
+                    _elog.write_error(
+                        call_id=self.session_id, tenant_id=self.tenant_id,
+                        message=str(e), exc_type=type(e).__name__,
+                        turn_generation=turn_gen,
+                    )
+                except Exception:
+                    pass
 
     async def _on_turn_event_backchannel(self, actor: CallActor, event: CallEvent) -> bool:
         """Caller said 'yeah'/'mm-hm' during agent speech — unduck
@@ -1088,17 +1375,28 @@ class TwilioActorSession:
             self._end_duck("false_trigger")
         return True
 
-    async def _send_mulaw_frames(self, mulaw: bytes) -> None:
-        """Stream µ-law audio out in 20ms frames.
+    async def _send_audio_frames(self, audio_bytes: bytes, mime: str) -> None:
+        """Stream audio out to the transport.
 
-        Sprint 9f: while `self._ducked` is True, skip sending frames
-        (but still consume time via sleep so we don't spin).  When the
-        duck ends (backchannel/false trigger), remaining frames flow.
-        When it escalates to INTERRUPT, bump_turn cancels our task and
-        the remaining frames never send — Twilio flushes on `clear`.
+        For Twilio-format calls (stream_sid starts with 'MZ' or the ws
+        is a real Twilio Media Streams socket): downsample to µ-law 8kHz
+        and send in 20ms frames.
 
-        Also applies telephony_output_gain_db (2026-08-04 quiet-voice
-        complaint fix) — 0 dB pass-through, positive boosts amplitude."""
+        For browser-format calls (stream_sid starts with 'browser_'):
+        send raw PCM base64 with a rate marker; widget plays at native
+        rate.  Zero encoding loss.
+
+        Sprint 9f duck logic + gain logic preserved for the Twilio path."""
+        is_browser = self.stream_sid.startswith("browser_")
+
+        if is_browser:
+            await self._send_browser_pcm_frames(audio_bytes, mime)
+            return
+
+        # ----- Twilio path: encode PCM → µ-law 8kHz at the wire -----
+        from app.routes.twilio import _tts_bytes_to_mulaw
+        mulaw = _tts_bytes_to_mulaw(audio_bytes, mime)
+
         # Pre-apply gain to the whole buffer once (cheaper than per-frame).
         gain_db = settings.telephony_output_gain_db
         if abs(gain_db) > 0.01:
@@ -1106,12 +1404,9 @@ class TwilioActorSession:
 
         frame_bytes = int(TWILIO_SAMPLE_RATE * (TWILIO_FRAME_MS / 1000))
         for i in range(0, len(mulaw), frame_bytes):
-            # Cancellation surfaces here via asyncio.CancelledError from
-            # the sleep; bump_turn / bump_speech cancels our task.
             chunk = mulaw[i:i + frame_bytes]
             if len(chunk) < frame_bytes:
                 chunk = chunk + b"\xff" * (frame_bytes - len(chunk))
-            # Sprint 9f: mid-stream duck.  Skip send while ducked.
             if not self._ducked:
                 await self.ws.send_text(json.dumps({
                     "event": "media",
@@ -1119,6 +1414,34 @@ class TwilioActorSession:
                     "media": {"payload": base64.b64encode(chunk).decode("ascii")},
                 }))
             await asyncio.sleep(TWILIO_FRAME_MS / 1000)
+
+    async def _send_browser_pcm_frames(self, audio_bytes: bytes, mime: str) -> None:
+        """Browser transport: ship PCM s16le as-is, 40ms per frame,
+        with an explicit `format` field so the widget knows how to
+        play it."""
+        # Extract rate from the MIME (e.g. "audio/pcm;rate=16000").
+        sample_rate = 16000
+        if "rate=" in (mime or ""):
+            try:
+                sample_rate = int(mime.split("rate=", 1)[1].split(";")[0].strip())
+            except (ValueError, IndexError):
+                pass
+        # 40ms frames — bigger than Twilio's 20ms because network
+        # overhead is the cost, not latency budget (browser is local).
+        bytes_per_ms = sample_rate * 2 / 1000  # s16le = 2 bytes/sample
+        frame_bytes = int(bytes_per_ms * 40)
+        for i in range(0, len(audio_bytes), frame_bytes):
+            chunk = audio_bytes[i:i + frame_bytes]
+            if not self._ducked:
+                await self.ws.send_text(json.dumps({
+                    "event": "media",
+                    "streamSid": self.stream_sid,
+                    "media": {
+                        "format": f"pcm_s16le_{sample_rate}",
+                        "payload": base64.b64encode(chunk).decode("ascii"),
+                    },
+                }))
+            await asyncio.sleep(0.04)
 
     async def _send_twilio_mark(self, mark_id: str) -> None:
         """Ask Twilio to fire a mark event when this point in the stream
