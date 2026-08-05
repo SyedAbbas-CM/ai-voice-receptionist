@@ -135,6 +135,13 @@ class TurnManagerConfig:
     # stable partial arrives within this many ms, un-duck.
     false_interruption_deadline_ms: int = 400
 
+    # Fragment buffer flush deadline — how long we hold a fragment
+    # (incomplete-looking final) waiting for a completing final to
+    # arrive.  If nothing joins within this window, flush as-is so
+    # a single-word answer isn't stuck forever.
+    # 2500ms tuned for natural mid-sentence pauses in browser demos.
+    fragment_flush_ms: int = 2500
+
 
 # ── state ──────────────────────────────────────────────────────────
 
@@ -150,6 +157,65 @@ class TurnManagerState:
     speech_start_at_ns: Optional[int] = None
     non_backchannel_partial_count: int = 0
     false_interruption_deadline_task: Optional[asyncio.Task] = None
+    # Buffered incomplete-sentence fragments (Deepgram fires final on
+    # mid-sentence pauses too often; we splice them together until we
+    # get a final that actually looks complete).
+    pending_fragment: str = ""
+    fragment_flush_task: Optional[asyncio.Task] = None
+
+
+# ── semantic completeness heuristic ────────────────────────────────
+
+_INCOMPLETE_TRAILING_WORDS = frozenset({
+    # Conjunctions
+    "and", "but", "or", "so", "because", "since", "although", "though",
+    "while", "if", "unless", "until", "when", "where", "before", "after",
+    # Prepositions
+    "of", "to", "for", "with", "on", "in", "at", "by", "from", "about",
+    # Auxiliaries + modals mid-clause
+    "is", "are", "was", "were", "am", "be", "been", "being",
+    "do", "does", "did", "have", "has", "had",
+    "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+    # Articles + determiners (definitely mid-noun-phrase)
+    "the", "a", "an", "my", "your", "his", "her", "their", "our",
+    "this", "that", "these", "those",
+    # Personal + object pronouns — "can you", "with me", "for us" etc.
+    # almost always continue.
+    "you", "me", "us", "him", "them", "it", "i", "we", "they", "he", "she",
+    # Common trailing fillers
+    "um", "uh", "er", "hmm", "like",
+    # Relative pronouns
+    "which", "who", "whom", "whose", "what",
+})
+
+
+def _ends_on_incomplete_word(text: str) -> bool:
+    """Return True if the transcript is unlikely to be a complete
+    sentence — Deepgram probably endpointed on a mid-sentence pause
+    rather than a real turn boundary.
+
+    We use TWO signals:
+      1. Smart-format didn't append terminating punctuation
+         (`.` / `?` / `!` / `…`).  Deepgram's smart-format normally
+         punctuates a real sentence end; a bare fragment ending on a
+         letter is a strong tell that the caller trailed off.
+      2. The last word is a conjunction / preposition / article /
+         auxiliary / filler.  Belt-and-suspenders even when Deepgram
+         did add a period after a fragment.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # Signal 1: no terminating punctuation → almost always incomplete
+    if stripped[-1] not in ".?!…":
+        return True
+    # Signal 2: even with punctuation, catch trailing conjunctions
+    import re as _re
+    tail = _re.sub(r"[^\w]+$", "", stripped).lower()
+    if not tail:
+        return False
+    last = tail.rsplit(None, 1)[-1] if " " in tail else tail
+    return last in _INCOMPLETE_TRAILING_WORDS
 
 
 # ── main class ─────────────────────────────────────────────────────
@@ -182,9 +248,14 @@ class TurnManager:
 
     async def on_stt_event(
         self, kind: str, text: str = "", is_final: bool = False,
+        speech_final: bool = False,
     ) -> None:
         """Route one STT event through the state machine.  kind ∈
-        {speech_start, speech_end, partial, final}."""
+        {speech_start, speech_end, partial, final}.
+
+        `speech_final` (Deepgram) distinguishes VAD-confirmed
+        end-of-utterance from mere endpoint-hit.  Only speech_final
+        promotes to END_OF_TURN; is_final-only fragments get buffered."""
         if kind == "speech_start":
             await self._on_speech_start()
             return
@@ -195,7 +266,7 @@ class TurnManager:
             await self._on_partial(text)
             return
         if kind == "final":
-            await self._on_final(text)
+            await self._on_final(text, speech_final=speech_final)
             return
         # stream_failed, unknown — ignore
         return
@@ -273,18 +344,45 @@ class TurnManager:
                 await self._emit(TurnEventKind.INTERRUPTION, text=text)
                 self._state.non_backchannel_partial_count = 0
 
-    async def _on_final(self, text: str) -> None:
-        """Final hypothesis.  If agent LISTENING, fire eager end,
-        schedule confirmation deadline for END_OF_TURN.  If agent
-        SPEAKING, this final should have already tripped the
-        interruption path — treat it as a redundant signal."""
+    async def _on_final(self, text: str, speech_final: bool = False) -> None:
+        """Final hypothesis.  Promotion to EAGER_END_OF_TURN requires
+        EITHER Deepgram's `speech_final=True` (VAD confirmed real
+        end-of-utterance) OR a text-completeness check.  Bare
+        `is_final=True` (endpoint hit on a mid-sentence pause) buffers
+        as a fragment waiting for the completing final.
+
+        If agent is SPEAKING, this final should have already tripped
+        the interruption path — treat as a redundant INTERRUPTION."""
         if not text:
             return
         if self._agent_is_speaking():
-            # Already handled in _handle_partial_during_speech; if we
-            # never emitted INTERRUPTION but a final arrived, promote.
             await self._emit(TurnEventKind.INTERRUPTION, text=text, is_final=True)
             return
+
+        # If Deepgram says speech_final=False, it's almost certainly a
+        # mid-sentence endpoint (comma-pause, filler pause, thinking).
+        # Buffer and wait for the real utterance-end final.
+        looks_incomplete = _ends_on_incomplete_word(text)
+        if not speech_final and looks_incomplete:
+            self._state.pending_fragment = (
+                (self._state.pending_fragment + " " if self._state.pending_fragment else "")
+                + text
+            )
+            if self._state.fragment_flush_task and not self._state.fragment_flush_task.done():
+                self._state.fragment_flush_task.cancel()
+            self._state.fragment_flush_task = asyncio.create_task(
+                self._flush_pending_fragment(),
+                name=f"tm-fragflush-{self._actor.call_id}",
+            )
+            return
+        # Cancel any pending fragment flush — we got a complete final.
+        if self._state.fragment_flush_task and not self._state.fragment_flush_task.done():
+            self._state.fragment_flush_task.cancel()
+            self._state.fragment_flush_task = None
+        # Splice buffered fragment (if any) with this complete final.
+        if self._state.pending_fragment:
+            text = (self._state.pending_fragment + " " + text).strip()
+            self._state.pending_fragment = ""
 
         # Cancel any existing confirmation task (new final supersedes)
         if self._state.eager_confirm_task and not self._state.eager_confirm_task.done():
@@ -306,6 +404,33 @@ class TurnManager:
         )
 
     # ── deadlines ──────────────────────────────────────────────────
+
+    async def _flush_pending_fragment(self) -> None:
+        """Safety flush.  If a fragment sits without a completing final
+        arriving within `fragment_flush_ms`, treat it as a real (short)
+        turn so the caller isn't stuck.  Applies to short answers like
+        'yes' / 'okay' where Deepgram's smart-format doesn't add
+        terminating punctuation."""
+        try:
+            await asyncio.sleep(self._config.fragment_flush_ms / 1000.0)
+            frag = self._state.pending_fragment.strip()
+            if not frag:
+                return
+            self._state.pending_fragment = ""
+            self._state.fragment_flush_task = None
+            # Now treat the buffered fragment as a complete final.
+            if self._state.eager_confirm_task and not self._state.eager_confirm_task.done():
+                self._state.eager_confirm_task.cancel()
+                self._state.eager_confirm_task = None
+            await self._emit(TurnEventKind.EAGER_END_OF_TURN, text=frag, is_final=True)
+            self._state.eager_fired_at_ns = self._clock_ns()
+            self._state.saw_speech_start = False
+            self._state.eager_confirm_task = asyncio.create_task(
+                self._confirm_end_of_turn(frag),
+                name=f"tm-confirm-{self._actor.call_id}",
+            )
+        except asyncio.CancelledError:
+            pass
 
     async def _confirm_end_of_turn(self, text: str) -> None:
         """After eager end, wait N ms.  If no TURN_RESUMED happened,
