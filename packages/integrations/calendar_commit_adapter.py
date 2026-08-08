@@ -32,10 +32,14 @@ class FakeCalendarBookingAdapter:
         calendar,
         default_duration_minutes: int = 30,
         service_duration_lookup=None,
+        business=None,
     ) -> None:
         self._calendar = calendar
         self._default_duration = default_duration_minutes
         self._service_duration_lookup = service_duration_lookup
+        # 2026-08-08: business profile passed in so confirmation
+        # SMS/email can reference the real name/address/phone.
+        self._business = business
 
     def _duration_for(self, service: str) -> int:
         if self._service_duration_lookup:
@@ -91,6 +95,15 @@ class FakeCalendarBookingAdapter:
                 "duration_minutes": duration,
                 "notes": event.get("notes"),
             }
+            # 2026-08-08 (task #275/#276): fire SMS + email confirmations.
+            # Fire-and-forget — never block the booking on messaging.
+            # Both handlers gracefully no-op if not configured (missing
+            # SENDGRID_API_KEY, missing phone number, etc).
+            self._fire_confirmations_bg(
+                event=event, duration=duration, business=self._business,
+                caller_email=args.get("email"),
+                confirmation_id=event.get("id"),
+            )
             return CommitResult(
                 outcome=CommitOutcome.SUCCESS,
                 action_id=proposal.action_id,
@@ -109,6 +122,74 @@ class FakeCalendarBookingAdapter:
             error=str(outcome),
         )
 
+    def _fire_confirmations_bg(
+        self, event: dict, duration: int, business,
+        caller_email: Optional[str], confirmation_id: Optional[str],
+    ) -> None:
+        """Fire SMS + email confirmations without blocking the booking.
+
+        Everything is best-effort.  Missing credentials, missing phone,
+        network errors, template failures — all logged + swallowed.
+        The BOOKING is already successful when this runs; messaging is
+        courtesy, not part of the commit transaction."""
+        import asyncio
+        phone = event.get("phone") or ""
+        service = event.get("service") or "appointment"
+        start_str = event.get("start") or ""
+        biz_name = getattr(business, "name", None) if business is not None else "the clinic"
+        biz_address = getattr(business, "address", None) if business is not None else None
+        biz_phone = getattr(business, "phone", None) if business is not None else None
+
+        # Human-friendly "Sat Nov 22 at 2:00 PM" from ISO
+        when_human = start_str
+        try:
+            _start_dt = datetime.fromisoformat(start_str) if start_str else None
+            if _start_dt is not None:
+                when_human = _start_dt.strftime("%a %b %d at %-I:%M %p")
+        except Exception:
+            _start_dt = None
+
+        # SMS
+        if phone and phone.startswith("+"):
+            try:
+                from packages.integrations.sms_sender import (
+                    render_confirmation, send_sms,
+                )
+                body = render_confirmation(
+                    business_name=biz_name, service=service,
+                    when_human=when_human, confirmation_id=confirmation_id,
+                )
+                asyncio.create_task(
+                    send_sms(phone, body),
+                    name=f"sms-conf-{confirmation_id or 'x'}",
+                )
+            except Exception as e:
+                log.warning("SMS confirmation dispatch failed: %s", e)
+
+        # Email
+        if caller_email and "@" in caller_email:
+            try:
+                from packages.integrations.email_sender import (
+                    _build_ics, render_confirmation_html, send_confirmation_email,
+                )
+                subject, html = render_confirmation_html(
+                    business_name=biz_name, service=service,
+                    when_human=when_human, address=biz_address,
+                    phone=biz_phone, confirmation_id=confirmation_id,
+                )
+                ics = None
+                if _start_dt is not None:
+                    ics = _build_ics(
+                        biz_name, service, _start_dt, duration,
+                        location=biz_address,
+                    )
+                asyncio.create_task(
+                    send_confirmation_email(caller_email, subject, html, ics),
+                    name=f"email-conf-{confirmation_id or 'x'}",
+                )
+            except Exception as e:
+                log.warning("Email confirmation dispatch failed: %s", e)
+
 
 def build_default_adapters(calendar, business=None) -> dict:
     """Convenience: build the full adapter map the coordinator needs.
@@ -125,5 +206,6 @@ def build_default_adapters(calendar, business=None) -> dict:
         ActionKind.BOOK_APPOINTMENT: FakeCalendarBookingAdapter(
             calendar=calendar,
             service_duration_lookup=duration_lookup,
+            business=business,
         ),
     }

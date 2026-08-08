@@ -1636,6 +1636,64 @@ class TwilioActorSession:
                     )
                     # Fall through to committed path below.
 
+            # 2026-08-08 (task #272): response cache — check BEFORE brain
+            # fires.  If the caller asked a repeat-question ("do you take
+            # Blue Cross", "what are your hours"), we already have the
+            # answer + µ-law bytes on disk.  Skip brain + TTS entirely,
+            # play cached audio in <150ms.  Only checks when NOT holding
+            # a pending K1 hint (mid-completion turns get real brain).
+            business_id = getattr(getattr(state, "business", None), "id", None) \
+                or getattr(state, "business_id", None) or "unknown"
+            _cache_hit = None
+            if not self._pending_k1_hint:
+                try:
+                    from packages.response_cache import get_shared_response_cache
+                    _rcache = get_shared_response_cache()
+                    _cache_hit = _rcache.get(business_id, self.tenant_id, transcript)
+                except Exception as _ce:
+                    log.debug("response-cache lookup failed: %s", _ce)
+            if _cache_hit is not None:
+                log.info(
+                    "RESPONSE_CACHE HIT call=%s biz=%s hits=%d input=%r → reply=%r",
+                    self.call_id, business_id, _cache_hit.hits,
+                    transcript[:60], _cache_hit.reply_text[:60],
+                )
+                # Emit brain_completed directly with cached reply — skips
+                # LLM + kernel + tool loop entirely.  actor's normal
+                # speech_job will TTS the reply (and hit the TTS cache).
+                reply = _cache_hit.reply_text
+                escalated = False
+                tool_results = []
+                speech_act = "info"
+                if _elog is not None:
+                    try:
+                        _elog.write(_CE(
+                            call_id=self.session_id, tenant_id=self.tenant_id,
+                            source=_SK.LLM, kind="reply",
+                            payload={
+                                "reply": reply, "escalated": False,
+                                "tool_results": [], "cache_hit": True,
+                            },
+                            turn_generation=turn_gen,
+                        ))
+                    except Exception:
+                        pass
+                if self.actor is not None:
+                    self.actor.emit_local(CallEvent.new(
+                        call_id=self.call_id, tenant_id=self.tenant_id,
+                        source=EventSource.CONTROL,
+                        turn_generation=turn_gen,
+                        speech_generation=self.actor.speech_generation,
+                        kind="brain_completed",
+                        payload={
+                            "reply": reply, "escalated": False,
+                            "tool_results": [], "speech_act": speech_act,
+                            "turn_gen": turn_gen, "cache_hit": True,
+                        },
+                        source_epoch=turn_gen,
+                    ))
+                return
+
             # 2026-08-08 (task #271): if the brain takes >1200ms, play a
             # cached filler ("one sec", "let me check") so the caller
             # doesn't panic + Twilio doesn't drop the WS for idle.
@@ -1651,6 +1709,21 @@ class TwilioActorSession:
                 if not _filler_task.done():
                     _filler_task.cancel()
             reply = (payload.get("reply") or "").strip()
+
+            # 2026-08-08 (task #272): cache-write the (input → reply) mapping
+            # so future callers with the same question skip brain entirely.
+            # Only cache when there were NO tool calls (tool-dependent replies
+            # are dynamic — bookings, availability checks — never cache those).
+            # Uncacheable inputs (dates, times, PII, names) auto-rejected by
+            # normalize_input inside the cache.
+            if reply and not tool_results and not escalated:
+                try:
+                    from packages.response_cache import get_shared_response_cache
+                    get_shared_response_cache().put(
+                        business_id, self.tenant_id, transcript, reply,
+                    )
+                except Exception as _ce:
+                    log.debug("response-cache put failed: %s", _ce)
             escalated = bool(payload.get("escalated"))
             tool_results = payload.get("tool_results") or []
             speech_act = _infer_speech_act_from_payload(payload)

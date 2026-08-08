@@ -3,6 +3,10 @@
   "name": "Smile Dental Clinic",
   "vertical": "clinic",
   "timezone": "America/Chicago",
+  "phone": "+1-972-555-0192",
+  "email": "reception@smiledental.example",
+  "website": "https://smiledental.example",
+  "address": "2847 Maple Avenue, Plano TX 75093",
   "hours": {
     "monday": "07:30-17:00",
     "tuesday": "07:30-17:00",

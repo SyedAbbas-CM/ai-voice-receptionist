@@ -167,7 +167,15 @@ FAQs (answer verbatim when applicable):
 {faqs}
 
 Escalation phone: {escalation_phone}
-Address: {address}
+
+CONTACT INFO (use EXACTLY these values verbatim; NEVER invent):
+- Address: {address}
+- Phone: {phone}
+- Email: {email}
+- Website: {website}
+
+If a caller asks for any contact info NOT listed above, say
+"Let me get that for you" and escalate — do NOT make one up.
 """
 
 
@@ -215,4 +223,7 @@ def build_system_prompt(business: BusinessProfile) -> str:
         faqs=_format_faqs(business.faqs),
         escalation_phone=business.escalation_phone or "(not configured)",
         address=business.address or "(not configured)",
+        phone=business.phone or "(not configured)",
+        email=business.email or "(not configured)",
+        website=business.website or "(not configured)",
     )

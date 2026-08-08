@@ -43,6 +43,13 @@ class BusinessProfile(BaseModel):
     faqs: dict[str, str] = Field(default_factory=dict)
     escalation_phone: Optional[str] = None
     address: Optional[str] = None
+    # 2026-08-08 (task #278): explicit business-facts fields so the LLM
+    # never has to invent contact info.  The system prompt tells it to
+    # ALWAYS use these values verbatim; if unset, say "let me get that
+    # for you" and escalate rather than hallucinate a number.
+    phone: Optional[str] = None      # Public phone (what callers see)
+    email: Optional[str] = None      # Reception email for confirmations
+    website: Optional[str] = None
     voice_persona: str = "warm, professional, concise"
 
     # Legal / compliance greeting toggles. Default ON — safer to disclose
