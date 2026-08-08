@@ -49,7 +49,10 @@ async def extract_fields(llm: "LLMProvider", transcript: list[dict]) -> Extracte
         {"role": "system", "content": EXTRACTION_PROMPT},
         {"role": "user", "content": f"Transcript:\n{convo}\n\nReturn the JSON now."},
     ]
-    resp = await llm.complete(messages, tools=None, temperature=0.0, max_tokens=512)
+    resp = await llm.complete(
+        messages, tools=None, temperature=0.0, max_tokens=512,
+        site="extractor",
+    )
     text = resp.text.strip()
 
     if text.startswith("```"):

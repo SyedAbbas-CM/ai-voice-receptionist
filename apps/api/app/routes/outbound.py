@@ -329,3 +329,88 @@ async def start_batch(req: BatchRequest) -> BatchResult:
         skipped=skipped,
         total=len(dispatched) + len(skipped),
     )
+
+
+# ── /outbound/dial — single Twilio direct dial (skips Vapi) ────────
+# Added 2026-08-07 so we can trigger the agent to CALL a user directly
+# from our stack, using the Twilio number that now points at our own
+# /twilio/voice webhook.  No Vapi mediation, no batch/CSV, just one
+# phone number in → one phone rings out → agent takes over.
+
+class DialRequest(BaseModel):
+    to: str = Field(
+        ..., description="E.164 phone number to call, e.g. +923318774222",
+    )
+    from_number: Optional[str] = Field(
+        default=None,
+        description="Caller ID.  Defaults to settings.twilio_phone_number.",
+    )
+    business_id: Optional[str] = Field(
+        default=None,
+        description="Which business profile the agent uses.  Optional.",
+    )
+
+
+class DialResponse(BaseModel):
+    ok: bool
+    call_sid: Optional[str] = None
+    status: Optional[str] = None
+    to: str
+    from_number: str
+    voice_url: str
+    error: Optional[str] = None
+
+
+@router.post("/dial", response_model=DialResponse)
+async def dial(req: DialRequest) -> DialResponse:
+    """Fire ONE outbound Twilio call.  The agent takes over as soon as
+    the callee picks up (Twilio hits our /twilio/voice webhook)."""
+    import base64
+    import httpx
+
+    if not settings.twilio_account_sid or not settings.twilio_auth_token:
+        raise HTTPException(500, "Twilio credentials not configured")
+
+    from_num = req.from_number or settings.twilio_phone_number
+    if not from_num:
+        raise HTTPException(400, "no from_number and TWILIO_PHONE_NUMBER unset")
+
+    if not settings.twilio_public_url:
+        raise HTTPException(500, "TWILIO_PUBLIC_URL not configured — agent voice_url unknown")
+
+    voice_url = f"{settings.twilio_public_url.rstrip('/')}/twilio/voice"
+    status_url = f"{settings.twilio_public_url.rstrip('/')}/twilio/status"
+
+    auth = base64.b64encode(
+        f"{settings.twilio_account_sid}:{settings.twilio_auth_token}".encode(),
+    ).decode()
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/"
+            f"{settings.twilio_account_sid}/Calls.json",
+            headers={"Authorization": f"Basic {auth}"},
+            data={
+                "To": req.to,
+                "From": from_num,
+                "Url": voice_url,
+                "Method": "POST",
+                "StatusCallback": status_url,
+                "StatusCallbackMethod": "POST",
+                "StatusCallbackEvent": "initiated ringing answered completed",
+            },
+        )
+        if resp.status_code >= 400:
+            log.warning("outbound/dial Twilio %s: %s", resp.status_code, resp.text[:200])
+            return DialResponse(
+                ok=False, to=req.to, from_number=from_num, voice_url=voice_url,
+                error=f"Twilio HTTP {resp.status_code}: {resp.text[:200]}",
+            )
+        data = resp.json()
+
+    log.info("outbound/dial fired call_sid=%s to=%s from=%s",
+             data.get("sid"), req.to, from_num)
+    return DialResponse(
+        ok=True, call_sid=data.get("sid"), status=data.get("status"),
+        to=req.to, from_number=from_num, voice_url=voice_url,
+    )

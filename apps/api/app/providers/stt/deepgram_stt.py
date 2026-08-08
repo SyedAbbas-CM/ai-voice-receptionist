@@ -16,6 +16,32 @@ from ..base import STTEvent, STTProvider
 log = logging.getLogger(__name__)
 
 
+# S13-B: keyterm boost list for Deepgram Nova-3.  Boost weights make
+# Deepgram prefer these tokens when acoustic evidence is ambiguous.
+# Add specialty vocabulary here; move to per-tenant config once we
+# have multiple verticals in production.
+_DENTAL_KEYTERMS: tuple[str, ...] = (
+    # Dental services
+    "implant", "implants", "tooth implant", "dental implant",
+    "cleaning", "prophy", "prophylaxis",
+    "crown", "crowns", "bridge", "veneer", "veneers",
+    "root canal", "endodontic", "endo",
+    "extraction", "wisdom tooth", "wisdom teeth",
+    "filling", "cavity", "cavities",
+    "orthodontics", "braces", "invisalign",
+    "periodontal", "gum disease", "gingivitis",
+    "whitening", "bleaching",
+    "denture", "dentures",
+    "x-ray", "x-rays", "panoramic",
+    # Business terms
+    "consultation", "checkup", "exam", "hygienist",
+    "appointment", "reschedule", "cancel",
+    "insurance", "copay", "deductible",
+    # Sample business names
+    "Smile Dental", "Cedar Ridge",
+)
+
+
 class DeepgramSTT(STTProvider):
     name = "deepgram"
     supports_streaming = True
@@ -75,18 +101,42 @@ class DeepgramSTT(STTProvider):
                 "Deepgram streaming needs `pip install websockets`."
             ) from e
 
-        params = {
-            "model": self.model,
-            "encoding": encoding,       # linear16 | mulaw | opus | ...
-            "sample_rate": str(sample_rate),
-            "channels": "1",
-            "smart_format": "true",
-            "punctuate": "true",
-            "interim_results": "true",
-            "endpointing": "300",       # ms of silence before is_final=True
-            "vad_events": "true",
-            "language": "en-US",
-        }
+        params = [
+            ("model", self.model),
+            ("encoding", encoding),
+            ("sample_rate", str(sample_rate)),
+            ("channels", "1"),
+            ("smart_format", "true"),
+            ("punctuate", "true"),
+            ("interim_results", "true"),
+            # 150 ms — dropped 2026-08-08 from 800ms per latency
+            # research (docs/rnd-2026-08/51-latency-deep-dive.md).
+            # Smart-turn-v3 handles prosodic mid-sentence pauses AND
+            # our continuation-merge splices back-to-back finals into
+            # one turn if Deepgram commits too eagerly.  Every ms of
+            # endpointing = dead air on turn commit.  If cut-offs
+            # spike, first try 300ms; only revert to 800ms if the
+            # smart-turn hold-below threshold (0.30) is failing.
+            ("endpointing", "150"),
+            # 2026-08-08: added utterance_end_ms. Per Deepgram docs
+            # (https://developers.deepgram.com/docs/utterance-end) +
+            # docs/rnd-2026-08/53-fast-stt-alternatives.md root-cause
+            # analysis: without this, if the FIRST audio bytes don't
+            # get recognized as speech (format drift, silent front, or
+            # WS-handshake timing), only silence-based endpointing
+            # fires — and if silence isn't ever detected we sit for
+            # 20-40s waiting.  1000ms UtteranceEnd = "if I haven't
+            # seen a speech_final in 1s of continuous audio, force one."
+            ("utterance_end_ms", "1000"),
+            ("vad_events", "true"),
+            ("language", "en-US"),
+        ]
+        # S13-B: keyterm boosting for dental / medical vocabulary.
+        # Nova-3 supports repeated `keyterm` params — kills mishearings
+        # like "student plans" for "tooth implants".  See
+        # https://developers.deepgram.com/docs/keyterm
+        for keyterm in _DENTAL_KEYTERMS:
+            params.append(("keyterm", keyterm))
         url = f"{self._WS_URL}?{urlencode(params)}"
         headers = {"Authorization": f"Token {self.api_key}"}
 
@@ -103,23 +153,62 @@ class DeepgramSTT(STTProvider):
 
         ws = await _ws_ctx.__aenter__()
 
+        # Sprint 12: track whether we're shutting down cleanly (audio_chunks
+        # ran out because caller closed the stream) vs Deepgram abnormally
+        # closed on us (idle timeout, remote error, network drop).  The
+        # bridge's reconnect ladder only fires when this function RAISES,
+        # so an abnormal close must propagate — a normal one must not.
+        abnormal_close: dict[str, str | None] = {"reason": None}
+
         try:
 
             async def _producer():
                 """Push caller audio chunks into the WS. On end-of-iteration,
                 send CloseStream so Deepgram flushes remaining transcripts."""
+                # 2026-08-08: count frames sent so we can see if audio flow
+                # actually reaches Deepgram.  Log every 500 frames = every
+                # ~10 sec at 20ms Twilio cadence.
+                _frames = 0
                 try:
                     async for chunk in audio_chunks:
                         if not chunk:
                             continue
                         await ws.send(chunk)
+                        _frames += 1
+                        if _frames % 500 == 0:
+                            log.info("DG_PRODUCER sent %d frames (%d bytes total)",
+                                     _frames, _frames * len(chunk))
+                except websockets.ConnectionClosed as e:
+                    # Provider closed the socket on us — force reconnect.
+                    abnormal_close["reason"] = f"producer.send: {e}"
                 except Exception as e:
                     log.warning("deepgram producer failed: %s", e)
+                    abnormal_close["reason"] = f"producer: {e}"
                 finally:
                     try:
                         await ws.send(json.dumps({"type": "CloseStream"}))
                     except Exception:
                         pass
+
+            async def _keepalive():
+                """2026-08-07: Deepgram closes the WS with 1011 after ~10s
+                of no audio.  During agent TTS playback (when we mute the
+                mic to avoid echo) this fires every call.  Send a KeepAlive
+                every 5s — official Deepgram protocol message that resets
+                their idle timer without adding audio.
+                See https://developers.deepgram.com/docs/audio-keep-alive
+                """
+                try:
+                    while True:
+                        await asyncio.sleep(5.0)
+                        try:
+                            await ws.send(json.dumps({"type": "KeepAlive"}))
+                        except websockets.ConnectionClosed:
+                            return
+                        except Exception:
+                            pass
+                except asyncio.CancelledError:
+                    return
 
             async def _consumer():
                 """Read WS messages, translate to STTEvent, push to queue.
@@ -132,31 +221,65 @@ class DeepgramSTT(STTProvider):
                     while True:
                         try:
                             raw = await ws.recv()
-                        except websockets.ConnectionClosed:
+                        except websockets.ConnectionClosed as e:
+                            # Distinguish clean close (code 1000, we sent
+                            # CloseStream) from abnormal (1011 idle timeout,
+                            # 1006 network drop, etc.).  Abnormal → reconnect.
+                            code = getattr(e, "code", None)
+                            if code not in (None, 1000, 1001):
+                                abnormal_close["reason"] = (
+                                    f"consumer.recv: code={code} {e}"
+                                )
                             break
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
                             continue
                         mtype = msg.get("type")
+                        # 2026-08-08: LOUD Deepgram observability so we
+                        # can see EVERY message the WS sends us.  Silent
+                        # STT hangs used to be invisible — now every event
+                        # prints so we know if DG is dropping audio, hearing
+                        # empty, or just not responding.
                         if mtype == "SpeechStarted":
+                            log.info("DG_EVT SpeechStarted")
                             await event_queue.put(STTEvent(kind="speech_start"))
                         elif mtype == "UtteranceEnd":
+                            log.info("DG_EVT UtteranceEnd last_word_end=%s",
+                                     msg.get("last_word_end"))
                             await event_queue.put(STTEvent(kind="speech_end"))
                         elif mtype == "Results":
                             try:
                                 alt = msg["channel"]["alternatives"][0]
                                 text = alt.get("transcript", "").strip()
+                                confidence = alt.get("confidence", 0.0)
                                 is_final = bool(msg.get("is_final"))
+                                speech_final = bool(msg.get("speech_final"))
                             except (KeyError, IndexError):
                                 continue
+                            # Log even empty Results — tells us DG is
+                            # processing audio but hearing silence.
+                            if text or is_final:
+                                log.info(
+                                    "DG_EVT Results text=%r is_final=%s speech_final=%s conf=%.2f",
+                                    text[:60], is_final, speech_final, confidence,
+                                )
                             if text:
                                 await event_queue.put(STTEvent(
                                     kind="final" if is_final else "partial",
                                     text=text, is_final=is_final,
+                                    speech_final=speech_final,
                                 ))
                         elif mtype == "Metadata":
-                            continue  # opening handshake — ignore
+                            log.info("DG_EVT Metadata sha256=%s duration=%s channels=%s",
+                                     (msg.get("sha256") or "")[:12],
+                                     msg.get("duration"), msg.get("channels"))
+                            continue  # opening handshake
+                        else:
+                            # Any other message type — log so we don't miss
+                            # a new Deepgram protocol message silently.
+                            log.info("DG_EVT other type=%s keys=%s",
+                                     mtype, list(msg.keys())[:5])
                 except Exception as e:
                     log.warning("deepgram consumer failed: %s", e)
                 finally:
@@ -164,6 +287,7 @@ class DeepgramSTT(STTProvider):
 
             producer = asyncio.create_task(_producer())
             consumer = asyncio.create_task(_consumer())
+            keepalive = asyncio.create_task(_keepalive())
             try:
                 while True:
                     ev = await event_queue.get()
@@ -173,5 +297,12 @@ class DeepgramSTT(STTProvider):
             finally:
                 producer.cancel()
                 consumer.cancel()
+                keepalive.cancel()
         finally:
             await _ws_ctx.__aexit__(None, None, None)
+
+        # Sprint 12: outside the ws context, if the close was abnormal,
+        # raise so the bridge's reconnect ladder can fire.  A clean
+        # close (caller stopped audio_chunks) exits normally.
+        if abnormal_close["reason"] is not None:
+            raise RuntimeError(f"deepgram stream closed abnormally: {abnormal_close['reason']}")

@@ -21,9 +21,21 @@ class GroqLLM(LLMProvider):
 
     name = "groq"
 
-    def __init__(self, raise_on_rate_limit: bool = False) -> None:
+    def __init__(
+        self,
+        raise_on_rate_limit: bool = False,
+        model: Optional[str] = None,
+    ) -> None:
+        """Args:
+            raise_on_rate_limit: when constructed by the router, disable
+                the class's own fallback ladder so the router owns it.
+            model: explicit model override.  Audit-3 fix (2026-08-04):
+                previously the perf planner mutated settings.groq_model
+                before constructing GroqLLM — a race under concurrent
+                calls.  Passing model directly avoids the global write.
+        """
         self.api_key = settings.groq_api_key
-        self.model = settings.groq_model or "llama-3.3-70b-versatile"
+        self.model = model or settings.groq_model or "llama-3.3-70b-versatile"
         self.base_url = "https://api.groq.com/openai/v1"
         self.raise_on_rate_limit = raise_on_rate_limit
 
@@ -33,6 +45,7 @@ class GroqLLM(LLMProvider):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
     ) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("GROQ_API_KEY not set")
@@ -46,6 +59,17 @@ class GroqLLM(LLMProvider):
         if tools:
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
+
+        # 2026-08-07: structured output.  Groq supports OpenAI's
+        # response_format kwarg; strict json_schema on gpt-oss-*
+        # and the openai/ prefixed models, loose json_object on
+        # most llama-* variants.  Try strict first, fall back to
+        # loose on schema-related 400s.
+        if response_schema is not None:
+            from .structured_output import openai_response_format
+            payload["response_format"] = openai_response_format(
+                response_schema, strict=True,
+            )
 
         # Retry on 429 rate-limit with backoff. Real production concern —
         # any burst (multi-concurrent call, adversarial test suite, chatty

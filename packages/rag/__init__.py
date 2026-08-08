@@ -19,6 +19,9 @@ from .types import Chunk, RetrievalHit, ChunkKind
 from .retriever import Retriever, build_retriever
 from .embedder import Embedder, build_embedder
 from .voice_shaper import shape_for_voice, is_speakable
+from .evidence import (
+    Answerability, EvidenceClaim, EvidenceBundle, build_bundle_from_hits,
+)
 
 __all__ = [
     "Chunk",
@@ -30,4 +33,8 @@ __all__ = [
     "build_embedder",
     "shape_for_voice",
     "is_speakable",
+    "Answerability",
+    "EvidenceClaim",
+    "EvidenceBundle",
+    "build_bundle_from_hits",
 ]

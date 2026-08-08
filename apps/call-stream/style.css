@@ -4,16 +4,16 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: #0b0e13;
   color: #dfe4ec;
-  height: 100vh;
-  overflow: hidden;
+  min-height: 100vh;
 }
 
 #app {
   display: grid;
   grid-template-columns: 1fr 480px;
   gap: 0;
-  height: 100vh;
+  min-height: 100vh;
 }
+#debug-panel { max-height: 100vh; }
 
 /* Left column: call surface */
 #call-surface {

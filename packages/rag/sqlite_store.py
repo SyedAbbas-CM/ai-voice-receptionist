@@ -152,31 +152,41 @@ class SqliteVecRetriever(Retriever):
         vecs = await self.embedder.embed([query_prefix + query])
         query_vec = self._pack_vector(vecs[0])
 
-        # Step 1: vector kNN — returns rowids + distances
+        # Step 1: vector kNN.  sqlite-vec's MATCH doesn't support WHERE
+        # joins on the parent table, so we can't push the tenant filter
+        # into the vector query directly.  Instead, over-fetch and keep
+        # pulling batches until we've collected top_k * 4 tenant-scoped
+        # results OR exhausted candidates.
+        #
+        # Audit-3 fix (2026-08-04): the previous version fetched exactly
+        # top_k * 4 rows globally then post-filtered.  Under multi-tenant
+        # load, another tenant's popular chunks could occupy the entire
+        # kNN window, starving the requested business of any hits.
+        target = top_k * 4
+        max_scan = max(target * 16, 128)  # cap so a pathological query doesn't scan the whole table
         knn = conn.execute(
             "SELECT rowid, distance FROM chunks_vec WHERE embedding MATCH ? AND k = ?",
-            (query_vec, top_k * 4),
+            (query_vec, max_scan),
         ).fetchall()
 
         # Step 2: build a rowid->chunk_id map for THIS batch of rowids only.
-        # rowid = _hash_id(chunk_id); we already stored that mapping in the
-        # `rowid_to_chunk_id` metadata column but for now recompute via the
-        # small `chunks` table.
         rowid_set = {r["rowid"] for r in knn}
         rowid_to_chunk_id = self._build_rowid_map(conn, rowid_set)
 
-        # Step 3: fetch chunk rows, filter by business_id
+        # Step 3: fetch chunk rows, filter by business_id, stop at target
         vector_hits: dict[str, tuple[Chunk, float]] = {}
         for row in knn:
+            if len(vector_hits) >= target:
+                break
             cid = rowid_to_chunk_id.get(row["rowid"])
             if not cid:
                 continue
             chunk_row = conn.execute(
                 "SELECT chunk_id, business_id, source, kind, text, metadata "
-                "FROM chunks WHERE chunk_id = ?",
-                (cid,),
+                "FROM chunks WHERE chunk_id = ? AND business_id = ?",
+                (cid, business_id),
             ).fetchone()
-            if not chunk_row or chunk_row["business_id"] != business_id:
+            if not chunk_row:
                 continue
             vector_hits[cid] = (self._row_to_chunk(chunk_row), float(row["distance"]))
 

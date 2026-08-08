@@ -15,11 +15,20 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.db.session import init_db
-from app.routes import admin, channels, chat, debug, elevenlabs_compat, outbound, sessions, twilio, vapi, voice
+from app.routes import admin, channels, chat, debug, elevenlabs_compat, outbound, plivo, sessions, signalwire, telnyx, twilio, vapi, voice
 from packages.observability.structured_log import maybe_install as maybe_install_json_logs
 
 
 def create_app() -> FastAPI:
+    # Force INFO log level for app loggers so debug traces show in
+    # /tmp/uvicorn.log — uvicorn's --log-level flag only sets its own
+    # loggers, not ours.
+    import logging as _logging
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
     # Sprint 10 obs: install JSON log formatter if STRUCTURED_LOGS=true.
     # Called BEFORE init_db so init logs go through the new formatter.
     maybe_install_json_logs()
@@ -87,6 +96,9 @@ def create_app() -> FastAPI:
     app.include_router(elevenlabs_compat.router)
     app.include_router(channels.router)
     app.include_router(twilio.router)
+    app.include_router(signalwire.router)
+    app.include_router(telnyx.router)
+    app.include_router(plivo.router)
     app.include_router(outbound.router)
     app.include_router(debug.router)
     app.include_router(admin.router)
@@ -147,10 +159,150 @@ def create_app() -> FastAPI:
                     parts.append("This call may be recorded for quality.")
                 parts.append("How can I help you today?")
                 text = " ".join(parts)
-            ok = await warm_greeting_cache(text, get_tts())
-            print(f"[startup] greeting cache: {'warmed' if ok else 'FAILED (will cold-synth first call)'}")
+            # 2026-08-08 FIX v2: greeting_cache uses ONE shared in-memory
+            # dict keyed by sha256(text) — so calling warm_greeting_cache
+            # TWICE with different providers is a no-op the second time.
+            # And the Twilio path uses a SEPARATE µ-law singleton that had
+            # no disk cache wrapper — so every real phone call cold-synthed
+            # the greeting (~800-1000ms of dead air).
+            # Proper fix: wrap the telephony singleton in the shared disk
+            # cache, then call its synthesize() directly to populate that
+            # disk cache with the ulaw bytes.  Skips the greeting_cache
+            # module entirely for the phone path since it's not the layer
+            # the actor's _stream_tts reads from.
+            ok_browser = await warm_greeting_cache(text, get_tts())
+            ok_phone = False
+            try:
+                from app.routes.twilio import _get_telephony_tts
+                from packages.tts_cache import TTSCacheWrapper
+                from packages.tts_cache.cache import get_shared_cache
+                telephony = _get_telephony_tts()
+                if not isinstance(telephony, TTSCacheWrapper):
+                    telephony = TTSCacheWrapper(telephony, cache=get_shared_cache())
+                    import app.routes.twilio as _tw
+                    _tw._telephony_tts_singleton = telephony
+                # Direct synthesize call — bypasses greeting_cache dedup.
+                # This populates the disk-backed TTSCacheWrapper cache in
+                # ulaw_8000 format so the actor's cache lookup HITS.
+                import time as _t
+                _tstart = _t.perf_counter()
+                _audio, _mime = await telephony.synthesize(text)
+                _took_ms = (_t.perf_counter() - _tstart) * 1000
+                ok_phone = True
+                print(f"[startup] greeting cache: browser={ok_browser} phone=True (ulaw {len(_audio)}B in {_took_ms:.0f}ms)")
+            except Exception as _e:
+                print(f"[startup] greeting cache: browser={ok_browser} phone-warm FAILED: {_e}")
         except Exception as e:
             print(f"[startup] greeting cache skipped: {e}")
+
+    @app.on_event("startup")
+    async def _warm_smart_turn() -> None:
+        """S13-A: pre-warm the smart-turn ONNX model + prime the
+        inference cache.  Cold first-call is ~450ms which was
+        blocking the async event loop on turn 1 of each call,
+        starving the Deepgram audio consumer (observed 2026-08-07:
+        1000+ frames dropped, greeting delayed 31s, Deepgram closed
+        with 1011 no-audio timeout).  Warming here shifts that cost
+        to boot."""
+        if not getattr(settings, "smart_turn_enabled", False):
+            return
+        try:
+            import numpy as np
+            from packages.runtime.smart_turn import SmartTurnDetector
+            det = SmartTurnDetector.get()
+            # 1 sec of silence — fastest possible warm inference
+            silence = np.zeros(16000, dtype=np.int16).tobytes()
+            _ = det.predict(silence)
+            print("[startup] smart-turn-v3: warmed")
+        except Exception as e:
+            print(f"[startup] smart-turn warmup skipped: {e}")
+
+    @app.on_event("startup")
+    async def _warm_tts_cache() -> None:
+        """Task A: pre-cache common backchannels/fillers so runtime
+        cache-hit rate starts at ~15% instead of 0%.  Non-fatal."""
+        if not getattr(settings, "tts_cache_enabled", False):
+            return
+        if not getattr(settings, "tts_cache_warm_on_boot", True):
+            return
+        try:
+            from app.providers import get_tts
+            from packages.tts_cache import warm_common_utterances, TTSCacheWrapper
+            tts = get_tts()
+            if not isinstance(tts, TTSCacheWrapper):
+                print("[startup] tts_cache warmup skipped (provider not wrapped)")
+                return
+            results = await warm_common_utterances(tts)
+            warmed = sum(1 for v in results.values() if v == "warmed")
+            cached = sum(1 for v in results.values() if v == "cached")
+            errors = sum(1 for v in results.values() if v.startswith("error"))
+            print(
+                f"[startup] tts_cache warmup: {cached} already cached, "
+                f"{warmed} newly warmed, {errors} errors"
+            )
+        except Exception as e:
+            print(f"[startup] tts_cache warmup skipped: {e}")
+
+    @app.on_event("startup")
+    async def _warm_llm_router() -> None:
+        """2026-08-08: pre-warm the LLM router's HTTP clients + do a
+        3-token echo to hot the TLS session on the primary provider.
+        Kills first-call TCP + TLS + Mistral first-byte lag (~1-2s)
+        on turn 1 of every call.  Per docs/rnd-2026-08/51-latency-deep-dive.md."""
+        try:
+            from app.providers.llm.router_llm import RouterLLM
+            router = RouterLLM()
+            # Hot the primary provider only — one cheap call.
+            resp = await router.complete(
+                messages=[
+                    {"role": "system", "content": "Reply with only the word ok."},
+                    {"role": "user", "content": "hi"},
+                ],
+                temperature=0.0,
+                max_tokens=5,
+            )
+            print(f"[startup] llm router warmed: primary served, reply={resp.text[:20]!r}")
+        except Exception as e:
+            print(f"[startup] llm router warmup skipped: {e}")
+
+    @app.on_event("startup")
+    async def _warm_deepgram_dns() -> None:
+        """2026-08-08: do a lightweight HEAD to Deepgram's API to warm
+        DNS + TCP + TLS to the region.  When the first real call comes
+        in, websockets.connect() then skips DNS lookup (~100-500ms
+        savings on cold start).  Per latency deep-dive research."""
+        try:
+            import httpx
+            key = getattr(settings, "deepgram_api_key", None)
+            if not key:
+                return
+            async with httpx.AsyncClient(timeout=5.0) as c:
+                r = await c.get(
+                    "https://api.deepgram.com/v1/projects",
+                    headers={"Authorization": f"Token {key}"},
+                )
+            print(f"[startup] deepgram DNS+TLS warmed: HTTP {r.status_code}")
+        except Exception as e:
+            print(f"[startup] deepgram warmup skipped: {e}")
+
+    @app.get("/debug/tts-cache")
+    def tts_cache_stats() -> dict:
+        """Task A: observability for the TTS synth cache."""
+        try:
+            from packages.tts_cache.cache import get_shared_cache
+            c = get_shared_cache()
+            entries = list(c._index.values())
+            return {
+                "enabled": bool(getattr(settings, "tts_cache_enabled", False)),
+                "entries": len(entries),
+                "total_bytes": c._total_bytes,
+                "max_bytes": c._max_bytes,
+                "utilization_pct": round(100 * c._total_bytes / max(c._max_bytes, 1), 1),
+                "cache_dir": c._base,
+                "sample_keys": [e.key for e in entries[:20]],
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
     @app.get("/health")
     def health() -> dict:

@@ -1,0 +1,93 @@
+"""Mistral La Plateforme — OpenAI-compatible.
+
+Docs: https://docs.mistral.ai/api/
+Notable: 8 working models incl. mistral-large-latest, mistral-small-latest,
+ministral-3b/8b, codestral, pixtral (multimodal), open-mistral-nemo (12B).
+EU-hosted — adds geographic redundancy to a US-provider-heavy router.
+
+Added 2026-08-04 to expand router coverage beyond the original
+Groq/Gemini/NVIDIA/OpenRouter set.
+"""
+from __future__ import annotations
+
+import json
+from typing import Optional
+
+import httpx
+
+from app.core.config import settings
+from packages.schemas import ToolCall, ToolDefinition
+
+from ..base import LLMProvider, LLMResponse
+
+
+class MistralLLM(LLMProvider):
+    name = "mistral"
+
+    def __init__(self, model=None) -> None:
+        self.api_key = settings.mistral_api_key
+        self.model = model or settings.mistral_model or "mistral-large-latest"
+        self.base_url = "https://api.mistral.ai/v1"
+
+    async def complete(
+        self,
+        messages: list[dict],
+        tools: Optional[list[ToolDefinition]] = None,
+        temperature: float = 0.3,
+        max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
+    ) -> LLMResponse:
+        if not self.api_key:
+            raise RuntimeError("MISTRAL_API_KEY not set")
+
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = [t.to_openai_format() for t in tools]
+            payload["tool_choice"] = "auto"
+
+        if response_schema is not None:
+            from .structured_output import openai_response_format
+            payload["response_format"] = openai_response_format(
+                response_schema, strict=True,
+            )
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+            )
+            if resp.status_code >= 400:
+                # 2026-08-08: log the actual Mistral error body so we can
+                # see WHY they 400.  raise_for_status only says "400 Bad
+                # Request" with no context, and router treats it as generic
+                # failure and cascades — wasting 5-10 sec per call.
+                import logging as _l
+                _l.getLogger(__name__).warning(
+                    "MISTRAL_ERR status=%d model=%s body=%r payload_msgs=%d payload_tools=%s",
+                    resp.status_code, self.model, resp.text[:500],
+                    len(payload.get("messages", [])),
+                    bool(payload.get("tools")),
+                )
+            resp.raise_for_status()
+            data = resp.json()
+
+        choice = data["choices"][0]
+        msg = choice["message"]
+        tool_calls = []
+        for tc in msg.get("tool_calls") or []:
+            args_raw = tc["function"]["arguments"]
+            args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            tool_calls.append(ToolCall(id=tc["id"], name=tc["function"]["name"], arguments=args))
+
+        return LLMResponse(
+            text=msg.get("content") or "",
+            tool_calls=tool_calls,
+            finish_reason=choice.get("finish_reason", "stop"),
+            raw=data,
+        )

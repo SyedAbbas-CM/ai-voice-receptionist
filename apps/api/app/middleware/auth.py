@@ -44,7 +44,25 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/redoc",
     "/openapi.json",
     "/metrics",            # Sprint 9b: Prometheus scrape endpoint (no tenant data)
-    "/twilio/",            # Twilio path validates X-Twilio-Signature separately
+    # 2026-08-08 SEC FIX: narrow to ONLY the webhook + streaming endpoints
+    # each provider actually hits.  The /dial endpoints are outbound-call
+    # triggers that MUST require API auth (unauthenticated toll fraud
+    # otherwise — anyone hitting /outbound/dial or /*/dial could burn
+    # provider credit dialing arbitrary numbers).  Provider signature
+    # verifiers cover /voice + /stream, not /dial.
+    "/twilio/voice",       # Twilio inbound webhook — X-Twilio-Signature
+    "/twilio/stream",      # Twilio Media Streams WS
+    "/twilio/status",      # Twilio status callbacks
+    "/twilio/twiml",       # TwiML endpoints
+    "/signalwire/voice",   # SignalWire inbound webhook — X-SignalWire-Signature
+    "/signalwire/stream",  # SignalWire Media Streams WS
+    "/signalwire/status",  # SignalWire status callbacks
+    "/telnyx/voice",       # Telnyx TeXML webhook — telnyx-signature-ed25519
+    "/telnyx/stream",      # Telnyx Media Streaming WS
+    "/telnyx/status",      # Telnyx status callbacks
+    "/plivo/voice",        # Plivo webhook — X-Plivo-Signature-V2
+    "/plivo/stream",       # Plivo Audio Stream WS
+    "/plivo/status",       # Plivo status callbacks
     "/vapi/",              # Vapi path validates its own bearer separately
     "/channels/",          # WhatsApp/Telegram signature-verify separately
     "/admin/",             # Admin routes have their own ADMIN_TOKEN guard

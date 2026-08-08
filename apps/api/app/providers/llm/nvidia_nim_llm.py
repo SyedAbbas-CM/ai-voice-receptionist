@@ -24,9 +24,9 @@ from ..base import LLMProvider, LLMResponse
 class NvidiaNimLLM(LLMProvider):
     name = "nvidia"
 
-    def __init__(self) -> None:
+    def __init__(self, model=None) -> None:
         self.api_key = settings.nvidia_api_key
-        self.model = settings.nvidia_model or "meta/llama-3.3-70b-instruct"
+        self.model = model or settings.nvidia_model or "meta/llama-3.3-70b-instruct"
         self.base_url = settings.nvidia_base_url or "https://integrate.api.nvidia.com/v1"
 
     async def complete(
@@ -35,6 +35,7 @@ class NvidiaNimLLM(LLMProvider):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
     ) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("NVIDIA_API_KEY not set")
@@ -48,6 +49,12 @@ class NvidiaNimLLM(LLMProvider):
         if tools:
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
+
+        if response_schema is not None:
+            from .structured_output import openai_response_format
+            payload["response_format"] = openai_response_format(
+                response_schema, strict=True,
+            )
 
         # NIM free tier does GPU cold-start on the first request (~30-90s).
         # Set a generous timeout so the first call doesn't die.

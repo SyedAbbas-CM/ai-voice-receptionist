@@ -103,9 +103,18 @@ def _score_lead(intent: str, budget: int, timeline: str, financing: str) -> int:
 
 
 class RealEstateToolHandler:
+    # Audit-3 fix (2026-08-04): explicit tool-name set for ComposeHandler.
+    TOOL_NAMES = frozenset({
+        "check_viewing_availability", "book_viewing", "qualify_lead",
+        "lookup_faq", "escalate_to_human",
+    })
+
     def __init__(self, business: BusinessProfile, calendar: FakeCalendar) -> None:
         self.business = business
         self.calendar = calendar
+
+    def can_handle(self, tool_name: str) -> bool:
+        return tool_name in self.TOOL_NAMES
 
     def _viewing_duration(self) -> int:
         for s in self.business.services:

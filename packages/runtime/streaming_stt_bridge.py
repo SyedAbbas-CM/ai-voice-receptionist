@@ -83,6 +83,17 @@ class StreamingSTTBridge:
         self._reconnect_count = 0
         self._started_at_monotonic_ns: Optional[int] = None
 
+        # S13-A smart-turn: rolling 16kHz PCM buffer of the last ~8 sec
+        # of caller audio.  Fed on every frame; consulted when we need
+        # a prosodic end-of-turn probability.  Twilio is 8kHz µ-law
+        # coming IN; feed() converts to 16-bit LIN 8kHz.  We upsample
+        # to 16kHz here (naive linear) because smart-turn was trained
+        # on 16kHz.  Browser widget path is already PCM but currently
+        # also 8kHz mulaw-emulated — same handling either way.
+        # Byte budget: 16000 samples/sec * 2 bytes * 8 sec = 256KB max.
+        self._pcm16k_buffer: bytearray = bytearray()
+        self._pcm16k_max_bytes: int = 16000 * 2 * 8  # 8 sec of 16 kHz mono
+
     async def start(self) -> None:
         """Kick off the consumer coroutine.  Idempotent."""
         if self._consumer_task is not None and not self._consumer_task.done():
@@ -114,25 +125,58 @@ class StreamingSTTBridge:
         drops on backpressure (with a rate-limited log)."""
         if not frame or self._stop_event.is_set():
             return
-        # Convert mulaw → linear16 if needed (Deepgram wants linear16
-        # for the encoding=linear16 param).  We keep the option to
-        # skip conversion + set encoding=mulaw on the STT side, but
-        # linear16 is more portable across providers.
+        # 2026-08-08: send mulaw DIRECTLY to Deepgram.  Previously we
+        # ulaw2lin here + declared encoding=linear16, which triggered
+        # Deepgram's "silent discard" format-drift bug (see
+        # docs/rnd-2026-08/53-fast-stt-alternatives.md).  Now the
+        # transcribe_stream call declares encoding=mulaw and we pass
+        # the raw Twilio bytes through unchanged.  Zero conversion,
+        # zero drift.
         payload = frame
-        if self._mulaw_input:
-            try:
-                payload = audioop.ulaw2lin(frame, 2)
-            except Exception:
-                return
         try:
             self._audio_queue.put_nowait(payload)
         except asyncio.QueueFull:
-            # Drop.  Rate-limited log so we don't flood.
-            if self._audio_queue.qsize() % 100 == 0:
+            # 2026-08-07: drop OLDEST, not newest.  Old policy discarded
+            # incoming frames while stale audio sat queued — Deepgram
+            # then saw a 30s gap of "no fresh audio" and closed the WS
+            # with 1011 timeout (observed 2026-08-07 PK call).  New:
+            # pop the oldest, enqueue the new one so Deepgram gets the
+            # freshest 8s of audio even under backpressure.
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self._audio_queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
+            if self._audio_queue.qsize() % 200 == 0:
                 log.warning(
-                    "STT bridge queue full call_id=%s; dropping frame",
+                    "STT bridge queue full call_id=%s; dropping oldest",
                     self._actor.call_id,
                 )
+
+        # S13-A smart-turn: keep a rolling 16kHz PCM buffer.  Inbound
+        # is 8kHz LIN after mulaw conversion; upsample x2 to 16kHz
+        # by simple sample repeat (adequate for prosody classifier;
+        # the model was trained mostly on 16kHz phone-recorded audio
+        # of similar quality).
+        try:
+            pcm16k = audioop.ratecv(payload, 2, 1, 8000, 16000, None)[0]
+        except Exception:
+            pcm16k = payload  # give up, feed as-is
+        self._pcm16k_buffer.extend(pcm16k)
+        if len(self._pcm16k_buffer) > self._pcm16k_max_bytes:
+            # Trim to last 8 sec.
+            drop = len(self._pcm16k_buffer) - self._pcm16k_max_bytes
+            del self._pcm16k_buffer[:drop]
+
+    def get_recent_pcm16k(self, seconds: float = 8.0) -> bytes:
+        """S13-A: return the last `seconds` of buffered 16 kHz PCM
+        for smart-turn inference.  Snapshot — safe to hand off."""
+        max_bytes = int(16000 * 2 * seconds)
+        buf = bytes(self._pcm16k_buffer[-max_bytes:])
+        return buf
 
     # ── internal run loop ──────────────────────────────────────────
 
@@ -191,10 +235,20 @@ class StreamingSTTBridge:
 
         # transcribe_stream(audio_iter) → yields STTEvent objects.
         # We remap each to a CallEvent and emit to the actor.
-        # The linear16 sample rate is 8000 for Twilio, 16000 for browser.
-        # Bridge doesn't know; caller sets via `mulaw_input`.
-        sample_rate = 8000 if self._mulaw_input else 16000
-        encoding = "linear16"
+        # 2026-08-08: send mulaw DIRECTLY to Deepgram when the input
+        # is Twilio (mulaw_input=True).  Old code converted mulaw→
+        # linear16 on our side, which was creating format-drift bugs
+        # per docs/rnd-2026-08/53-fast-stt-alternatives.md — Deepgram
+        # discards audio when declared encoding doesn't match binary
+        # framing, producing 20-40s "silent discard" first-turn hangs.
+        # Native mulaw = zero conversion, Deepgram handles it fine.
+        # Browser path stays linear16 (already 16kHz PCM).
+        if self._mulaw_input:
+            sample_rate = 8000
+            encoding = "mulaw"
+        else:
+            sample_rate = 16000
+            encoding = "linear16"
 
         async for stt_ev in self._stt.transcribe_stream(
             _audio_iter(),
@@ -206,6 +260,7 @@ class StreamingSTTBridge:
             kind = stt_ev.kind
             text = getattr(stt_ev, "text", "") or ""
             is_final = getattr(stt_ev, "is_final", False)
+            speech_final = getattr(stt_ev, "speech_final", False)
             # Map STT-provider event kinds to actor event kinds.
             # Everything gets stamped with current generation so late
             # events after a bump_turn get dropped.
@@ -216,5 +271,5 @@ class StreamingSTTBridge:
                 turn_generation=self._actor.turn_generation,
                 speech_generation=self._actor.speech_generation,
                 kind=kind,
-                payload={"text": text, "is_final": is_final},
+                payload={"text": text, "is_final": is_final, "speech_final": speech_final},
             ))

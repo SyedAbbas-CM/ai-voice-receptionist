@@ -26,9 +26,9 @@ class AnthropicLLM(LLMProvider):
 
     name = "anthropic"
 
-    def __init__(self) -> None:
+    def __init__(self, model=None) -> None:
         self.api_key = settings.anthropic_api_key
-        self.model = settings.anthropic_model or "claude-sonnet-4-6"
+        self.model = model or settings.anthropic_model or "claude-sonnet-4-6"
         self.base_url = "https://api.anthropic.com/v1"
         # Enable prompt caching by default; env override for A/B tests
         self.enable_prompt_caching = getattr(
@@ -88,6 +88,7 @@ class AnthropicLLM(LLMProvider):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
     ) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("ANTHROPIC_API_KEY not set")
@@ -114,8 +115,25 @@ class AnthropicLLM(LLMProvider):
 
         # Tool defs: mark the LAST tool with cache_control so the whole tool
         # array + system + any earlier turns all sit in one cache prefix.
+        tool_defs: list = []
         if tools:
             tool_defs = [t.to_anthropic_format() for t in tools]
+
+        # 2026-08-07: structured output.  Anthropic doesn't have
+        # response_format; the idiomatic way is to define a single
+        # tool whose input_schema IS the desired schema, then force
+        # tool_choice to that tool.  100% JSON compliance.
+        if response_schema is not None:
+            from .structured_output import (
+                anthropic_tool_for_schema,
+                anthropic_tool_choice_for_schema,
+            )
+            schema_tool = anthropic_tool_for_schema(response_schema)
+            if schema_tool is not None:
+                tool_defs.append(schema_tool)
+                payload["tool_choice"] = anthropic_tool_choice_for_schema(response_schema)
+
+        if tool_defs:
             if self.enable_prompt_caching and tool_defs:
                 tool_defs[-1] = {
                     **tool_defs[-1],

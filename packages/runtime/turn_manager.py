@@ -139,8 +139,28 @@ class TurnManagerConfig:
     # (incomplete-looking final) waiting for a completing final to
     # arrive.  If nothing joins within this window, flush as-is so
     # a single-word answer isn't stuck forever.
-    # 2500ms tuned for natural mid-sentence pauses in browser demos.
-    fragment_flush_ms: int = 2500
+    # 2026-08-08: DROPPED 2500 → 400 ms.  With smart-turn-v3 confirming
+    # EOT + utterance_end_ms=1000 on Deepgram, fragments arrive within
+    # 200-300ms of the first final.  2500ms was adding a full 2 sec of
+    # dead air after EVERY caller utterance while the manager waited
+    # for a merge-fragment that rarely comes.  Real-call data
+    # (CA58790517) confirmed this was the entire remaining response-time
+    # gap after we fixed the actor-side merge window.
+    fragment_flush_ms: int = 400
+
+    # S13-B: minimum words in a final before it can promote to
+    # INTERRUPTION during agent speech.  Kills "hello hello" and
+    # single-word barges that are usually backchannels or echo.
+    # Pipecat's MinWordsUserTurnStartStrategy default is 2.
+    interruption_min_words: int = 2
+
+    # S13-A: prosodic end-of-turn threshold from smart-turn-v3.
+    # A final with P(EOT) < eot_hold_below is FORCED into the fragment
+    # buffer (do not commit yet).  A final with P(EOT) > eot_confirm_above
+    # skips the text-completeness check and commits immediately.
+    # Between the two we fall back to the existing text heuristic.
+    eot_hold_below: float = 0.30
+    eot_confirm_above: float = 0.75
 
 
 # ── state ──────────────────────────────────────────────────────────
@@ -326,21 +346,25 @@ class TurnManager:
         """Backchannel / pause / interruption logic during agent speech."""
         cls = classify_short_utterance(text)
         if cls == TurnEventKind.BACKCHANNEL:
-            # Reset false-interruption deadline; don't count as
-            # non-backchannel; emit BACKCHANNEL so barge-in unducks.
+            log.info("tm: BACKCHANNEL partial suppressed text=%r", text[:60])
             self._cancel_false_interruption_deadline()
             self._state.non_backchannel_partial_count = 0
             await self._emit(TurnEventKind.BACKCHANNEL, text=text)
             return
         if cls == TurnEventKind.USER_REQUESTED_PAUSE:
+            log.info("tm: PAUSE requested text=%r", text[:60])
             self._cancel_false_interruption_deadline()
             await self._emit(TurnEventKind.USER_REQUESTED_PAUSE, text=text)
             return
         # Neither backchannel nor pause — count toward interruption
         if len(text) >= self._config.interruption_min_chars:
             self._state.non_backchannel_partial_count += 1
+            log.info("tm: interruption-candidate partial (%d/%d) text=%r",
+                     self._state.non_backchannel_partial_count,
+                     self._config.interruption_confirm_partials, text[:60])
             if self._state.non_backchannel_partial_count >= self._config.interruption_confirm_partials:
                 self._cancel_false_interruption_deadline()
+                log.info("tm: INTERRUPTION confirmed text=%r", text[:60])
                 await self._emit(TurnEventKind.INTERRUPTION, text=text)
                 self._state.non_backchannel_partial_count = 0
 
@@ -351,18 +375,68 @@ class TurnManager:
         `is_final=True` (endpoint hit on a mid-sentence pause) buffers
         as a fragment waiting for the completing final.
 
-        If agent is SPEAKING, this final should have already tripped
-        the interruption path — treat as a redundant INTERRUPTION."""
+        If agent is SPEAKING: apply backchannel + min-words gates
+        BEFORE promoting to INTERRUPTION.  Otherwise "yeah" or a
+        one-word echo lands as a full final and instantly barges the
+        agent (the 2026-08-05 "hello hello cut me off" bug)."""
         if not text:
             return
         if self._agent_is_speaking():
+            # S13-B: backchannel classifier applies to finals too.
+            cls = classify_short_utterance(text)
+            if cls == TurnEventKind.BACKCHANNEL:
+                log.info("tm: final=BACKCHANNEL suppressed text=%r", text[:60])
+                await self._emit(TurnEventKind.BACKCHANNEL, text=text)
+                return
+            if cls == TurnEventKind.USER_REQUESTED_PAUSE:
+                log.info("tm: final=PAUSE text=%r", text[:60])
+                await self._emit(TurnEventKind.USER_REQUESTED_PAUSE, text=text)
+                return
+            # S13-B: min-words gate — single-word finals during agent
+            # speech are almost always echo or "yeah/ok/hi" that the
+            # backchannel set missed.  Drop them silently.
+            word_count = len(text.strip().split())
+            if word_count < self._config.interruption_min_words:
+                log.info("tm: final DROPPED (min-words gate %d<%d) text=%r",
+                         word_count, self._config.interruption_min_words, text[:60])
+                return
+            log.info("tm: final=INTERRUPTION (during agent speech) text=%r", text[:80])
             await self._emit(TurnEventKind.INTERRUPTION, text=text, is_final=True)
             return
+
+        # S13-A: consult smart-turn if the actor supplied a probability
+        # via the eot_probability_provider hook.  The hook is set by
+        # twilio_actor.py right after constructing the TurnManager so
+        # this module stays audio-buffer-agnostic.
+        p_eot: Optional[float] = None
+        provider = getattr(self, "_eot_probability_provider", None)
+        if provider is not None:
+            try:
+                p_eot = provider()
+            except Exception as e:
+                log.debug("tm: eot provider raised %s", e)
 
         # If Deepgram says speech_final=False, it's almost certainly a
         # mid-sentence endpoint (comma-pause, filler pause, thinking).
         # Buffer and wait for the real utterance-end final.
         looks_incomplete = _ends_on_incomplete_word(text)
+
+        # S13-A: prosodic vetoes.  If the model says caller is clearly
+        # NOT done (low P), force fragment-buffer regardless of what
+        # Deepgram claims.  If it says clearly DONE (high P), commit
+        # even if text ends on a preposition.
+        if p_eot is not None:
+            if p_eot < self._config.eot_hold_below:
+                log.info("tm: HOLD via smart-turn P(EOT)=%.2f text=%r",
+                         p_eot, text[:60])
+                looks_incomplete = True
+                speech_final = False
+            elif p_eot > self._config.eot_confirm_above:
+                log.info("tm: CONFIRM via smart-turn P(EOT)=%.2f text=%r",
+                         p_eot, text[:60])
+                looks_incomplete = False
+                speech_final = True
+
         if not speech_final and looks_incomplete:
             self._state.pending_fragment = (
                 (self._state.pending_fragment + " " if self._state.pending_fragment else "")

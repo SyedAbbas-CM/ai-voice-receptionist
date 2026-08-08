@@ -37,6 +37,7 @@ class _FakeProvider(LLMProvider):
 def _build_router_with(providers, cooldown_s=1.0, timeout_s=0.5):
     """Bypass env-parsing + factory — construct the router with hand-picked fakes."""
     from app.providers.llm.router_llm import RouterLLM
+    import app.providers.llm.router_llm as _rl
     with patch.object(RouterLLM, "__init__", lambda self: None):
         r = RouterLLM()
     r.providers = [(p.name, p) for p in providers]
@@ -44,6 +45,11 @@ def _build_router_with(providers, cooldown_s=1.0, timeout_s=0.5):
     r.timeout_s = timeout_s
     r._cool_until = {}
     r.model = f"router({providers[0].name})"
+    # 2026-08-08: stub _PROVIDER_ALTERNATES so router doesn't try to build
+    # real alt-model providers when the fake gives empty/error.  Without
+    # this the router hits real Mistral/Groq (now that .env auto-loads).
+    for name, _ in r.providers:
+        _rl._PROVIDER_ALTERNATES.pop(name, None)
     return r
 
 

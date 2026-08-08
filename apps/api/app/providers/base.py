@@ -16,7 +16,20 @@ class LLMResponse(BaseModel):
 
 
 class LLMProvider(ABC):
-    """Cloud or local LLM. Must support tool calling for the receptionist brain."""
+    """Cloud or local LLM. Must support tool calling for the receptionist brain.
+
+    Structured output contract (2026-08-07):
+        Any provider MAY accept a `response_schema` kwarg (pydantic
+        model class OR JSON Schema dict).  Adapters translate to the
+        native mode of their family:
+          - OpenAI-compat: response_format={"type":"json_schema", "strict":true}
+          - Anthropic:      forced tool_use with the schema as the tool
+          - Gemini:         generation_config.response_schema
+        Adapters that don't support strict schema fall back to loose
+        json_object mode.  Adapters that don't support even that raise
+        NotImplementedError; the router capability gate should never
+        route a response_schema request to such a model.
+    """
 
     name: str = "base"
 
@@ -27,6 +40,7 @@ class LLMProvider(ABC):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
     ) -> LLMResponse:
         ...
 
@@ -47,14 +61,18 @@ class STTEvent(BaseModel):
     - kind="partial" — current hypothesis for the utterance in progress.
       Text updates rapidly. Use to trigger barge-in the moment the caller
       starts speaking; DO NOT commit to the brain yet.
-    - kind="final" — endpointing fired. The utterance is complete. Text is
-      stable. Commit to the brain.
+    - kind="final" — text is stable and won't be revised.  This may be a
+      mid-sentence endpoint (Deepgram is_final=True but speech_final=False)
+      OR a real utterance end (speech_final=True).  Turn manager should
+      distinguish: speech_final=True is safe to promote to END_OF_TURN;
+      is_final-only should be buffered until speech_final arrives.
     - kind="speech_start" — VAD detected voice; text will be empty.
     - kind="speech_end" — VAD detected end of voice.
     """
     kind: str  # partial | final | speech_start | speech_end
     text: str = ""
     is_final: bool = False
+    speech_final: bool = False   # True when VAD confirmed real end-of-utterance
 
 
 class STTProvider(ABC):

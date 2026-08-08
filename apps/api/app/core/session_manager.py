@@ -39,7 +39,11 @@ def load_business() -> BusinessProfile:
 def get_calendar():
     global _calendar_cache
     if _calendar_cache is None:
-        _calendar_cache = build_calendar(settings.calendar_backend, settings)
+        # Audit-3 fix: pass the business so FakeCalendar honours
+        # BusinessProfile.hours instead of hardcoded 9-5.
+        _calendar_cache = build_calendar(
+            settings.calendar_backend, settings, business=load_business(),
+        )
     return _calendar_cache
 
 
@@ -99,7 +103,12 @@ def _new_brain(business: BusinessProfile) -> ReceptionistBrain:
         shaper_llm=llm if retriever is not None else None,
         confidence_threshold=getattr(settings, "rag_confidence_threshold", 0.7),
     )
-    return ReceptionistBrain(llm=llm, business=business, tools=tools, tool_handler=handler)
+    # Sprint 10 WIRING: pass calendar so kernel_wiring can build a
+    # CommitAdapter.  Ignored unless settings.dialogue_kernel_enabled.
+    return ReceptionistBrain(
+        llm=llm, business=business, tools=tools, tool_handler=handler,
+        calendar=get_calendar(),
+    )
 
 
 def start_session(tenant_id: str = "default") -> tuple[CallState, ReceptionistBrain]:
@@ -195,12 +204,30 @@ async def end_session_async(session_id: str, tenant_id: str = "default") -> None
 
 
 def _persist_session(state: CallState, flush_transcript: bool = True) -> None:
+    # AUDIT FIX 2026-08-04 (dial-test crash): wrap the whole DB scope
+    # in the tenant contextvar.  Fixes two related failures:
+    #   (a) auto-filter listener needs current_tenant to inject
+    #       WHERE tenant_id = ? on ORM queries
+    #   (b) tenant_guard needs to see that filter in the compiled SQL
+    # Without this, calls to _persist_session from the Twilio actor
+    # path crashed the whole call with CrossTenantLeakError.
+    from app.db.session import set_current_tenant, reset_current_tenant
+    _tenant_token = set_current_tenant(state.tenant_id)
     db = SessionLocal()
     try:
-        row = db.get(SessionRow, state.session_id)
+        # Explicit tenant_id filter so the tenant_guard doesn't reject
+        # this lookup even if the auto-filter listener misfires.  Belt-
+        # and-suspenders: contextvar + explicit filter both present.
+        row = (
+            db.query(SessionRow)
+            .filter(SessionRow.id == state.session_id)
+            .filter(SessionRow.tenant_id == state.tenant_id)
+            .first()
+        )
         if row is None:
             row = SessionRow(
                 id=state.session_id,
+                tenant_id=state.tenant_id,
                 business_id=state.business_id,
                 status=state.status.value if hasattr(state.status, "value") else state.status,
                 started_at=state.started_at,
@@ -213,7 +240,12 @@ def _persist_session(state: CallState, flush_transcript: bool = True) -> None:
 
         if flush_transcript:
             redactor = _get_pii_redactor()
-            existing = db.query(TranscriptRow).filter_by(session_id=state.session_id).count()
+            existing = (
+                db.query(TranscriptRow)
+                .filter(TranscriptRow.session_id == state.session_id)
+                .filter(TranscriptRow.tenant_id == state.tenant_id)
+                .count()
+            )
             for turn in state.transcript[existing:]:
                 # PII redaction on text + structured tool args/results before
                 # they hit SQLite. Never persist raw phone/card/SSN.
@@ -226,6 +258,7 @@ def _persist_session(state: CallState, flush_transcript: bool = True) -> None:
                     redacted_result, _ = redactor.redact_dict(turn.tool_result)
                 db.add(TranscriptRow(
                     session_id=state.session_id,
+                    tenant_id=state.tenant_id,
                     role=turn.role.value,
                     text=redacted_text,
                     timestamp=turn.timestamp,
@@ -236,6 +269,7 @@ def _persist_session(state: CallState, flush_transcript: bool = True) -> None:
         db.commit()
     finally:
         db.close()
+        reset_current_tenant(_tenant_token)
 
 
 BOOKING_TOOL_NAMES = {"book_appointment", "book_reservation", "book_viewing"}
@@ -251,10 +285,13 @@ def persist_booking_from_tool(state: CallState, tool_payload: dict) -> None:
     event = result.get("event") or {}
     args = tool_payload.get("arguments") or {}
     from datetime import datetime as _dt
+    from app.db.session import set_current_tenant, reset_current_tenant
+    _tenant_token = set_current_tenant(state.tenant_id)
     db = SessionLocal()
     try:
         db.add(BookingRow(
             id=event.get("id") or f"bkg_{uuid.uuid4().hex[:12]}",
+            tenant_id=state.tenant_id,
             session_id=state.session_id,
             business_id=state.business_id,
             caller_name=args.get("caller_name", ""),
@@ -268,6 +305,7 @@ def persist_booking_from_tool(state: CallState, tool_payload: dict) -> None:
         db.commit()
     finally:
         db.close()
+        reset_current_tenant(_tenant_token)
 
 
 async def run_greeting(state: CallState, brain: ReceptionistBrain) -> str:

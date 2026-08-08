@@ -65,7 +65,10 @@ def _query_references_tenant(clauseelement) -> bool:
     Cheap and works across every dialect we care about (SQLite + Postgres)."""
     try:
         compiled = clauseelement.compile(compile_kwargs={"literal_binds": True})
-        sql = str(compiled).lower()
+        # SQLAlchemy formats compiled SQL with newlines around keywords
+        # ("...\nwhere ..."), which broke a previous `" where "` substring
+        # check.  Normalize all whitespace to single spaces before we grep.
+        sql = " ".join(str(compiled).lower().split())
         # Any of these patterns counts as "tenant filter present":
         return (
             "tenant_id" in sql

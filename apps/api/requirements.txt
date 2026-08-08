@@ -29,3 +29,19 @@ asyncpg>=0.30
 psycopg[binary]>=3.2
 # Alembic (already implicitly installed by SQLAlchemy contrib but pin it)
 alembic>=1.13
+
+# Sprint 9b: observability plane.  prometheus_client is the /metrics
+# scrape endpoint.  OpenTelemetry is optional at import-time — the
+# telemetry module no-ops if OTLP endpoint is unset.
+prometheus-client>=0.20
+opentelemetry-api>=1.27
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-otlp>=1.27
+
+# --- audit fixes 2026-08-04 (audit 3) ---
+# RAG stack — was undeclared, caused 30+ test failures in fresh envs
+sqlite-vec>=0.1.1
+# Local embedder for RAG (optional; NOOP retriever works without it)
+# sentence-transformers>=3.0
+# Deepgram streaming SDK (planned Sprint 10a)
+# deepgram-sdk>=3.7

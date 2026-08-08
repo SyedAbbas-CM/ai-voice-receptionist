@@ -210,9 +210,21 @@ def _match_menu_item(name: str) -> tuple[str, str, float, list[str]] | None:
 
 
 class RestaurantToolHandler:
+    # Audit-3 fix (2026-08-04): explicit tool-name set for ComposeHandler
+    # routing.  Prevents the RAG-dispatcher-style silent drop.
+    TOOL_NAMES = frozenset({
+        "check_availability", "book_reservation", "get_menu",
+        "check_allergen", "build_order", "quote_delivery_eta",
+        "capture_deposit_link", "apply_loyalty",
+        "lookup_faq", "escalate_to_human",
+    })
+
     def __init__(self, business: BusinessProfile, calendar: FakeCalendar) -> None:
         self.business = business
         self.calendar = calendar
+
+    def can_handle(self, tool_name: str) -> bool:
+        return tool_name in self.TOOL_NAMES
 
     def _duration_for_party(self, party_size: int) -> int:
         service_name = _service_for_party(party_size, self.business)

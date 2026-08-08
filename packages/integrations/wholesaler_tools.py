@@ -80,11 +80,20 @@ class WholesalerToolHandler:
     """One instance per call. Buffers the disposition + rent update so the
     session manager can write them back to the source sheet on call end."""
 
+    # Audit-3 fix (2026-08-04): explicit tool-name set for ComposeHandler.
+    TOOL_NAMES = frozenset({
+        "capture_disposition", "record_rent_update",
+        "lookup_faq", "escalate_to_human",
+    })
+
     def __init__(self, business: BusinessProfile, calendar: FakeCalendar) -> None:
         self.business = business
         self.calendar = calendar  # unused; kept for interface parity
         self.captured_disposition: dict | None = None
         self.rent_update: dict | None = None
+
+    def can_handle(self, tool_name: str) -> bool:
+        return tool_name in self.TOOL_NAMES
 
     async def __call__(self, call: ToolCall) -> ToolResult:
         try:

@@ -80,6 +80,7 @@ UpworkJobs.txt
 
 # Private R&D docs — strategy, competitor analysis, personal decision logs
 docs/rnd-2026-07/
+docs/rnd-2026-08/
 
 # temp backups from sed -i
 .env.bak

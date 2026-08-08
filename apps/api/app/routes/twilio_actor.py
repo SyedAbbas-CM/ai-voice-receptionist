@@ -121,7 +121,7 @@ log = logging.getLogger(__name__)
 def _looks_like_agent_echo(transcript: str, recent_agent: list[str]) -> bool:
     """Sprint 12 Track B: return True if `transcript` is almost certainly
     the mic picking up the agent's own speaker output rather than a
-    real caller utterance.
+    real caller utterance.  Kept for full-drop cases.
 
     Heuristic: normalize both to lowercase word bags and check that
     the transcript's meaningful-word set is a subset of any recent
@@ -145,6 +145,57 @@ def _looks_like_agent_echo(transcript: str, recent_agent: list[str]) -> bool:
         if overlap / max(len(trans_set), 1) >= 0.6:
             return True
     return False
+
+
+def _strip_agent_echo_prefix(transcript: str, recent_agent: list[str]) -> str:
+    """S13-B extension: when the mic captured the tail of the agent's
+    speaker output AND the caller then spoke, Deepgram delivers a
+    concatenated transcript like "hear you just fine. Can you hear me
+    okay? Yeah. I can hear you too. Am I talking to Smile?"
+
+    Full-drop is wrong (caller's real content lives in the tail).
+    Instead, find the LONGEST agent-utterance-word-run at the start
+    of the transcript and slice it off.  Return the tail; if no
+    significant prefix match, return the original transcript.
+
+    Rule of thumb: require ≥4 consecutive matching words at the start
+    to declare a prefix echo — protects short valid caller openers
+    that happen to share a word with the agent."""
+    import re as _re
+    if not recent_agent:
+        return transcript
+    trans_words = _re.findall(r"\S+", transcript)
+    if len(trans_words) < 6:
+        return transcript
+
+    def _norm(w: str) -> str:
+        return _re.sub(r"[^a-z']", "", w.lower())
+
+    trans_norm = [_norm(w) for w in trans_words]
+    best_prefix_len = 0
+    for agent_utt in recent_agent:
+        agent_norm = [_norm(w) for w in _re.findall(r"\S+", agent_utt) if _norm(w)]
+        if len(agent_norm) < 4:
+            continue
+        # Try to find any run of agent words that appears as a prefix
+        # of the transcript (possibly starting mid-agent-utterance,
+        # because the mic caught the tail of what the agent was saying).
+        for start in range(len(agent_norm)):
+            i = 0
+            while (
+                start + i < len(agent_norm)
+                and i < len(trans_norm)
+                and agent_norm[start + i] == trans_norm[i]
+            ):
+                i += 1
+            if i >= 4 and i > best_prefix_len:
+                best_prefix_len = i
+
+    if best_prefix_len >= 4:
+        # Slice off the prefix, strip leading punctuation.
+        tail = " ".join(trans_words[best_prefix_len:]).lstrip(" .,!?;:")
+        return tail
+    return transcript
 
 
 TWILIO_SAMPLE_RATE = 8000
@@ -233,6 +284,18 @@ class TwilioActorSession:
         # the session so start()/stop() lifecycle mirrors the call.
         self._stt_bridge: Optional[StreamingSTTBridge] = None
         self._turn_manager: Optional[TurnManager] = None
+        # 2026-08-08: Deepgram VAD warmer.  While the agent is speaking
+        # (greeting, replies) the caller side of Twilio Media Streams
+        # goes silent — no inbound frames arrive.  Deepgram's WS then
+        # sits idle; when the first real speech frame lands, Deepgram's
+        # server-side VAD hasn't been seeded and SpeechStarted often
+        # doesn't fire, which means utterance_end_ms can't trigger.
+        # Result: first-turn STT hangs 40s until the WS idle-timeout.
+        # Fix: pump µ-law silence (0xFF bytes) at 20ms cadence during
+        # SPEAKING/GREETING so Deepgram sees a continuous audio stream
+        # and its VAD stays warm.  See docs/rnd-2026-08/53-fast-stt-
+        # alternatives.md § "Cold-start hang" for the analysis.
+        self._silence_pump_task: Optional[asyncio.Task] = None
         # Rolling text buffer captured from streaming STT so END_OF_TURN
         # has a final utterance to feed the brain.
         self._streaming_utterance_text = ""
@@ -249,6 +312,30 @@ class TwilioActorSession:
         # speaker.  Only reject finals that overlap significantly with
         # something the agent JUST said.
         self._recent_agent_utterances: list[str] = []
+
+        # Fragment-merge window: Deepgram sometimes emits two speech_final
+        # events within ~500ms when the caller pauses mid-sentence.
+        # Instead of spawning two parallel brain jobs (which race and
+        # produce the "skipped audio" symptom), we hold the first
+        # end-of-turn for FRAGMENT_MERGE_WINDOW_MS and merge any
+        # follow-on final into it.
+        self._pending_turn_text: str = ""
+        self._pending_turn_task: Optional[asyncio.Task] = None
+        # Continuation-merge state: remember the last transcript we
+        # actually committed to a brain call + when its final arrived,
+        # so a follow-on fragment (arriving after the merge window
+        # expired but before the previous reply finished) can be
+        # merged into a re-planned turn instead of racing.
+        self._last_committed_transcript: str = ""
+        self._last_final_monotonic: float = 0.0
+        # K1: hint for the brain about an incomplete-looking turn.
+        # Populated by _flush_pending_turn_after_window, consumed by
+        # _brain_job.  NEVER goes into the transcript — that broke
+        # continuation-merge earlier.
+        self._pending_k1_hint: str = ""
+        # K1 (2026-08-06): tracks when we started holding an incomplete
+        # turn.  Bounded so we don't hold forever.
+        self._incomplete_hold_started_at: Optional[float] = None
 
         self.actor: Optional[CallActor] = None
 
@@ -282,10 +369,83 @@ class TwilioActorSession:
                 self._turn_manager = TurnManager(
                     actor=self.actor, config=TurnManagerConfig(),
                 )
+                # S13-A: install prosodic EOT probability provider.  On
+                # every final, TurnManager will call this to consult
+                # smart-turn-v3 with the last ~4 sec of caller PCM.  We
+                # feed 4 sec (not 8) because the classifier's signal is
+                # dominated by the trailing 1-3 sec of prosody — shorter
+                # window is cheaper and just as accurate for phone audio.
+                if settings.smart_turn_enabled and self._stt_bridge is not None:
+                    try:
+                        from packages.runtime.smart_turn import SmartTurnDetector
+                        det = SmartTurnDetector.get()
+                        bridge = self._stt_bridge
+
+                        # 2026-08-07: smart-turn inference is synchronous
+                        # ONNX (~17ms warm, ~450ms cold on first call).
+                        # Calling it from the async event loop as a plain
+                        # function BLOCKED the loop long enough for the
+                        # Deepgram audio consumer to starve → 1000+ frames
+                        # dropped, greeting delayed 31s, Deepgram closed
+                        # its WS with "no audio received."
+                        # Wrapping in a lightweight in-process cache with
+                        # a 200ms TTL so back-to-back calls (turn manager
+                        # can hit us on every partial) don't re-infer.
+                        _cache: dict = {"ts": 0.0, "val": 0.5, "failures": 0}
+
+                        def _predict_eot() -> float:
+                            # 2026-08-07: hard 25ms budget.  If smart-turn
+                            # ever runs slow (ONNX warmup, GC pause, etc)
+                            # we return neutral 0.5 rather than block the
+                            # event loop and starve Deepgram's audio consumer.
+                            # After 3 consecutive failures we disable for
+                            # this call entirely.
+                            import time as _t
+                            if _cache["failures"] >= 3:
+                                return 0.5
+                            now = _t.monotonic()
+                            if now - _cache["ts"] < 0.25:
+                                return _cache["val"]
+                            pcm = bridge.get_recent_pcm16k(seconds=4.0)
+                            if len(pcm) < 16000:
+                                return 0.5
+                            try:
+                                t0 = _t.perf_counter()
+                                v = det.predict(pcm)
+                                dur_ms = (_t.perf_counter() - t0) * 1000
+                                if dur_ms > 60:
+                                    _cache["failures"] += 1
+                                    log.warning(
+                                        "smart-turn slow: %.0fms (failure %d/3)",
+                                        dur_ms, _cache["failures"],
+                                    )
+                                else:
+                                    _cache["failures"] = 0
+                            except Exception as _e:
+                                _cache["failures"] += 1
+                                log.debug("smart-turn predict failed: %s", _e)
+                                return 0.5
+                            _cache["ts"] = now
+                            _cache["val"] = v
+                            return v
+                        self._turn_manager._eot_probability_provider = _predict_eot
+                        log.info("smart-turn-v3 EOT provider installed call=%s", self.call_id)
+                    except Exception as e:
+                        log.warning("smart-turn init failed (falling back to text-only EOT): %s", e)
                 log.info("turn manager attached for call=%s", self.call_id)
             except Exception as e:
                 log.warning("turn manager disabled: %s", e)
                 self._turn_manager = None
+
+        # 2026-08-08: kick off the silence pump so Deepgram sees a
+        # continuous audio stream from t=0.  Cancelled when the real
+        # caller frames start flowing (Twilio media event) or on stop().
+        # See _silence_pump docstring for the root cause.
+        if self._stt_bridge is not None:
+            self._silence_pump_task = asyncio.create_task(
+                self._silence_pump(),
+                name=f"silence-pump-{self.call_id}",
+            )
 
         # Kick greeting through the same code path as normal replies so
         # ledger + generation tracking apply from turn 0.
@@ -300,10 +460,19 @@ class TwilioActorSession:
         self._close_turn_span()
         # Don't leak the idle-followup timer past the call
         self._cancel_idle_followup()
+        # Kill any pending fragment-merge window
+        if self._pending_turn_task and not self._pending_turn_task.done():
+            self._pending_turn_task.cancel()
+        self._pending_turn_task = None
+        self._pending_turn_text = ""
         # Sprint 9f: don't leak the stage-2 deadline task on hangup
         if self._stage2_deadline_task and not self._stage2_deadline_task.done():
             self._stage2_deadline_task.cancel()
             self._stage2_deadline_task = None
+        # 2026-08-08: kill silence pump if still running
+        if self._silence_pump_task is not None and not self._silence_pump_task.done():
+            self._silence_pump_task.cancel()
+            self._silence_pump_task = None
         # Sprint 10 STREAMING WIRING: shut the STT bridge cleanly
         if self._stt_bridge is not None:
             try:
@@ -356,6 +525,48 @@ class TwilioActorSession:
         actor.handlers[(EventSource.CONTROL, "brain_failed")] = self._on_brain_failed
         actor.handlers[(EventSource.CONTROL, "speech_completed")] = self._on_speech_completed
 
+    async def _silence_pump(self) -> None:
+        """2026-08-08: feed µ-law silence (0xFF) into the STT bridge at
+        Twilio's 20ms cadence until real caller frames arrive.
+
+        Root cause this fixes: Deepgram Nova-3's server-side VAD needs
+        a continuous audio stream to seed its endpointer.  When the WS
+        opens but no bytes flow for 5-10 sec (we're playing a greeting,
+        caller is silent), the first real speech bytes are missed —
+        SpeechStarted never fires, so utterance_end_ms can't trigger,
+        and we hit the ~40s WS idle-timeout.
+
+        0xFF is the µ-law encoding of near-silence (technically the
+        smallest-magnitude positive value).  Continuous silence keeps
+        the VAD alive without producing spurious transcripts.
+
+        Cancelled by on_media() on the first real frame, or stop()."""
+        # 2026-08-08 v3: back to 0xFF (µ-law digital silence).
+        # v2 used 0x7F "comfort noise" but Deepgram interpreted that as
+        # low-level speech and fired multiple false SpeechStarted events
+        # during the greeting, wasting VAD cycles.  Real-call data
+        # (CA58790517) showed 8.5 sec gap between real speech starting
+        # and DG's first transcript because VAD was confused by our own
+        # comfort noise.  0xFF = the reference silence value in µ-law
+        # (biased zero).  DG's KeepAlive JSON keeps the WS alive; we
+        # only need the audio stream to be non-empty, not "speech-like".
+        pattern = bytes([0xFF]) * 160  # 160 bytes = 20ms @ 8kHz mulaw silence
+        log.info(
+            "silence-pump started call=%s (comfort-noise µ-law, 20ms cadence)",
+            self.call_id,
+        )
+        frames_sent = 0
+        try:
+            while True:
+                if self._stt_bridge is not None:
+                    self._stt_bridge.feed(pattern)
+                    frames_sent += 1
+                await asyncio.sleep(0.02)
+        except asyncio.CancelledError:
+            log.info("silence-pump stopped call=%s frames_sent=%d (real audio arrived)",
+                     self.call_id, frames_sent)
+            return
+
     # ── inbound events (called by the /twilio/stream loop) ──────────
 
     async def on_media(self, mulaw_frame: bytes) -> None:
@@ -370,6 +581,12 @@ class TwilioActorSession:
         path entirely."""
         if self.actor is None:
             return
+
+        # 2026-08-08: first real caller frame arrived — cancel the
+        # silence pump.  Real audio now flows into the bridge.
+        if self._silence_pump_task is not None and not self._silence_pump_task.done():
+            self._silence_pump_task.cancel()
+            self._silence_pump_task = None
 
         # Feed bridge on every inbound frame (idempotent, no-op if disabled)
         if self._stt_bridge is not None:
@@ -879,16 +1096,25 @@ class TwilioActorSession:
             log.exception("actor speak failed: %s", e)
             return
 
-        # Ledger entry sized by the PCM bytes going out.  Duration math is
-        # bytes / (rate * bytes_per_sample / 1000) — the outbound sender
-        # knows how to encode to whatever wire format the transport needs.
+        # Ledger entry sized by the audio bytes going out.
+        # 2026-08-07: duration math is format-dependent:
+        #   µ-law 8kHz  = 8  bytes/ms (native Twilio wire format)
+        #   PCM s16 16k = 32 bytes/ms (browser widget, high-quality path)
+        # Getting this wrong makes the ledger think a 5-second µ-law
+        # clip is only 1.25 seconds, which breaks barge-in reconciliation
+        # + heard-vs-generated ratios.
+        _mime_lower = (mime or "").lower()
+        if "mulaw" in _mime_lower or "ulaw" in _mime_lower or "pcmu" in _mime_lower:
+            bytes_per_ms = 8
+        else:
+            bytes_per_ms = 32
         self._mark_counter += 1
         mark_id = f"m{gen}-{self._mark_counter}"
         chunk = AudioChunk(
             generation_id=f"gen-{gen}",
             sequence=0,
             audio_bytes=len(audio_bytes),
-            duration_ms=int(len(audio_bytes) / 32),  # 16kHz s16le = 32 bytes/ms
+            duration_ms=int(len(audio_bytes) / bytes_per_ms),
             text=text,
             text_start=0,
             text_end=len(text),
@@ -1043,9 +1269,17 @@ class TwilioActorSession:
 
     async def _on_stt_speech_signal(self, actor: CallActor, event: CallEvent) -> bool:
         """speech_start / speech_end from Deepgram VAD.  Forward to
-        turn manager for false-interruption + endpoint detection."""
+        turn manager for false-interruption + endpoint detection.
+
+        Cancel the idle-followup the INSTANT the caller opens their
+        mouth.  Otherwise the 15s timer armed after the greeting fires
+        "Anything else?" the moment their first speech_final lands,
+        stepping on the real reply that's still spinning up (observed
+        16:08:32 in the debug feed)."""
         kind = event.kind   # "speech_start" or "speech_end"
         _tel.record_stream_event(self.tenant_id, kind=kind)
+        if kind == "speech_start":
+            self._cancel_idle_followup()
         if self._turn_manager is not None:
             await self._turn_manager.on_stt_event(kind)
         return True
@@ -1071,6 +1305,28 @@ class TwilioActorSession:
         _tel.record_turn_event(self.tenant_id, kind=event.kind)
         return True
 
+    # Fragment-merge tuning (2026-08-05):
+    # Real callers pause 2-4 sec mid-thought.  Deepgram commits each
+    # 1200ms-endpointed segment as its own speech_final.  We hold each
+    # end-of-turn for this window and merge follow-on finals into one
+    # brain call.
+    # 2026-08-08: DROPPED 2500 → 400 ms.  With smart-turn-v3 as the
+    # EOT authority + utterance_end_ms=1000 on Deepgram, fragments
+    # nearly always land within 300 ms of the first speech_final.
+    # 2500 was adding 2+ seconds of dead air to EVERY turn "just in
+    # case" a fragment arrived.  Real-call data (CAb4a31b) showed
+    # brain firing 3 sec after Deepgram's first speech_final — 100%
+    # of that was this window.  400 ms still catches genuine
+    # fragment splits without the wait.
+    _FRAGMENT_MERGE_WINDOW_MS: int = 400
+    # Continuation-merge window: if a new final arrives while the agent
+    # is STILL speaking or thinking on the previous turn AND less than
+    # this many seconds have elapsed since the last final, treat as a
+    # continuation of the same thought — cancel the in-flight work,
+    # merge, and re-plan.  Prevents "the agent cuts itself off" when
+    # the caller adds "...oh and one more thing" mid-agent-reply.
+    _CONTINUATION_MERGE_MAX_S: float = 6.0
+
     async def _on_turn_event_end(self, actor: CallActor, event: CallEvent) -> bool:
         """END_OF_TURN — caller committed their turn.
 
@@ -1079,12 +1335,192 @@ class TwilioActorSession:
         actor when done.  A subsequent INTERRUPTION event won't queue
         behind a 2-second LLM call.
 
+        Fragment-merge: if another END_OF_TURN arrives within
+        _FRAGMENT_MERGE_WINDOW_MS we concat the text and re-arm the
+        window instead of spawning a second brain job (which would
+        race the first and produce the "skipped audio" symptom the
+        user reported 2026-08-05).
+
+        Continuation-merge: if the previous turn's brain/speech is
+        still in flight AND less than _CONTINUATION_MERGE_MAX_S
+        elapsed since the last stt.final, treat as a continuation:
+        cancel in-flight work, merge with the previous transcript,
+        re-plan as one turn.  This is the fix for "I said a whole
+        sentence and it cut me up and said something new".
+
         Legacy inline behavior available under
         settings.actor_nonblocking_handlers=False for rollback."""
         _tel.record_turn_event(self.tenant_id, kind=event.kind)
         text = event.payload.get("text") or self._streaming_utterance_text
         if not text or not text.strip():
             return True
+
+        # Reset the streaming buffer — text is now captured in
+        # self._pending_turn_text below.
+        self._streaming_utterance_text = ""
+        addition = text.strip()
+
+        # Case 1: merge-window still open → append and re-arm.
+        if self._pending_turn_task and not self._pending_turn_task.done():
+            existing = self._pending_turn_text.rstrip()
+            merged = f"{existing} {addition}" if existing else addition
+            self._pending_turn_text = merged
+            log.info("merged pending fragment call=%s: %r + %r -> %r",
+                     self.call_id, existing, addition, merged)
+            self._pending_turn_task.cancel()
+            self._pending_turn_task = asyncio.create_task(
+                self._flush_pending_turn_after_window(),
+                name=f"merge-window-{self.call_id}",
+            )
+            return True
+
+        # Case 2: previous turn already committed but the caller kept
+        # talking — treat as continuation.  We used to require actor
+        # state SPEAKING/PROCESSING but that's too narrow: the reply
+        # can finish before the caller resumes, and the caller can
+        # still be continuing the same thought.  Gap alone is the
+        # right signal.
+        now = time.monotonic()
+        gap = now - self._last_final_monotonic if self._last_final_monotonic else 999.0
+        prev_transcript = self._last_committed_transcript
+        # Safety net: never merge a synthetic system-note into a
+        # transcript (guards against any lingering pre-fix corruption).
+        if prev_transcript.startswith("[SYSTEM"):
+            self._last_committed_transcript = ""
+            prev_transcript = ""
+
+        # Dedup: Deepgram sometimes redelivers old text prepended to
+        # new text.  If the addition contains the previous transcript
+        # or the previous transcript is a prefix of the addition,
+        # strip the overlap.
+        norm_prev = prev_transcript.strip().lower()
+        norm_add = addition.lower()
+        if norm_prev and norm_prev in norm_add:
+            addition = addition[norm_add.index(norm_prev) + len(norm_prev):].lstrip(" ,.-")
+            log.info("stripped duplicated prefix call=%s: keeping %r",
+                     self.call_id, addition)
+            if not addition:
+                # Entire "new" final was just the old transcript replayed.
+                return True
+
+        if (
+            prev_transcript
+            and gap <= self._CONTINUATION_MERGE_MAX_S
+        ):
+            merged = f"{prev_transcript.rstrip()} {addition}"
+            log.info(
+                "continuation-merge call=%s gap=%.2fs state=%s: %r + %r -> %r",
+                self.call_id, gap, actor.state, prev_transcript, addition, merged,
+            )
+            # bump_turn cancels in-flight brain + speech; then we
+            # re-arm with the merged text through the normal flush path
+            # (which also gates via the merge-window in case a third
+            # fragment arrives).
+            self._pending_turn_text = merged
+            self._last_committed_transcript = ""
+            self._pending_turn_task = asyncio.create_task(
+                self._flush_pending_turn_after_window(),
+                name=f"merge-window-{self.call_id}",
+            )
+            return True
+
+        # Case 3: fresh turn.  Arm the merge window.
+        self._pending_turn_text = addition
+        self._pending_turn_task = asyncio.create_task(
+            self._flush_pending_turn_after_window(),
+            name=f"merge-window-{self.call_id}",
+        )
+        return True
+
+    async def _flush_pending_turn_after_window(self) -> None:
+        """Sleep FRAGMENT_MERGE_WINDOW_MS, then commit the pending turn
+        to the brain.  Cancelled + re-armed each time a new END_OF_TURN
+        arrives inside the window."""
+        try:
+            await asyncio.sleep(self._FRAGMENT_MERGE_WINDOW_MS / 1000.0)
+        except asyncio.CancelledError:
+            # Another fragment arrived — the new task will handle it.
+            return
+
+        text = self._pending_turn_text
+        self._pending_turn_text = ""
+        self._pending_turn_task = None
+
+        actor = self.actor
+        if actor is None or not text.strip():
+            return
+
+        # S13-B: strip agent-speech that leaked into the mic before
+        # committing.  Handles "hear you just fine. Can you hear me
+        # okay? Yeah. I can hear you too. Am I talking to..." where
+        # the first half is the agent's own greeting picked up by
+        # the mic and the tail is the actual caller turn.
+        stripped = _strip_agent_echo_prefix(text, self._recent_agent_utterances)
+        if stripped != text:
+            log.info("echo-prefix stripped call=%s: %r -> %r",
+                     self.call_id, text, stripped)
+            text = stripped
+            if not text.strip():
+                # Entire commit was echo — abort.
+                return
+
+        # K1 (2026-08-06, hardened): if transcript ends on an incomplete
+        # trailing word AND we haven't held past the max deadline,
+        # DON'T fire brain — extend the merge window and wait.  This
+        # kills the "brain fires, gets cancelled by next merge, agent
+        # speech cut mid-word" cascade observed 22:26:38-22:27:00.
+        self._pending_k1_hint = ""
+        try:
+            from packages.runtime.turn_manager import _INCOMPLETE_TRAILING_WORDS
+            stripped = text.strip()
+            # 2026-08-07: skip K1 entirely if the sentence has terminal
+            # punctuation (? . !).  Deepgram's smart-format only adds
+            # these when it's confident the utterance ended — so
+            # "who am I speaking with?" should commit immediately, not
+            # wait 2 seconds because the last word (before "?") is "with".
+            has_terminal_punct = stripped and stripped[-1] in "?.!"
+            last_word = stripped.rstrip(".,!?;:").split()[-1].lower() if stripped else ""
+            if not has_terminal_punct and last_word in _INCOMPLETE_TRAILING_WORDS:
+                # Track how long we've been holding.  Hard cap = 5 sec
+                # so a truly incomplete final still gets answered
+                # rather than dead-air forever.
+                now = time.monotonic()
+                if not hasattr(self, "_incomplete_hold_started_at") or \
+                        self._incomplete_hold_started_at is None:
+                    self._incomplete_hold_started_at = now
+                held_s = now - self._incomplete_hold_started_at
+                # 2026-08-06: shortened from 5s → 2s.  5s felt like
+                # dead air when caller genuinely stopped after "and".
+                # 2s still catches natural Deepgram micro-pauses.
+                if held_s < 2.0:
+                    log.info("K1: HOLD (ends on %r, held %.1fs) call=%s: %r",
+                             last_word, held_s, self.call_id, text[:80])
+                    # Re-buffer the text and re-arm the merge window.
+                    self._pending_turn_text = text
+                    self._pending_turn_task = asyncio.create_task(
+                        self._flush_pending_turn_after_window(),
+                        name=f"merge-window-{self.call_id}",
+                    )
+                    return
+                else:
+                    log.info("K1: incomplete word %r but held %.1fs — committing",
+                             last_word, held_s)
+                self._pending_k1_hint = (
+                    f"The caller's turn ended on '{last_word}' — the sentence "
+                    f"looks incomplete.  Prefer a short targeted follow-up "
+                    f"(like 'for the what?' or 'to which?') over guessing."
+                )
+        except Exception as e:
+            log.debug("K1 completeness check failed: %s", e)
+
+        # K1 hold-timer resets on commit — next turn starts fresh.
+        self._incomplete_hold_started_at = None
+
+        # Record the transcript + timestamp so a follow-on fragment
+        # arriving after this point (during brain/speech) can be
+        # continuation-merged rather than starting a competing turn.
+        self._last_committed_transcript = text
+        self._last_final_monotonic = time.monotonic()
 
         await actor.bump_turn(reason="end-of-turn")
         self._open_turn_span(actor.turn_generation)
@@ -1093,8 +1529,6 @@ class TwilioActorSession:
             self._current_turn_span.mark("stt_final")
 
         turn_gen = actor.turn_generation
-        # Reset the utterance buffer for next turn
-        self._streaming_utterance_text = ""
 
         if settings.actor_nonblocking_handlers:
             # New path: spawn brain job, return immediately.  Job emits
@@ -1104,7 +1538,7 @@ class TwilioActorSession:
                 generation=turn_gen,
                 name=f"brain-{self.call_id}-{turn_gen}",
             )
-            return True
+            return
 
         # Legacy path: inline await for rollback safety.
         brain_task = asyncio.create_task(
@@ -1124,6 +1558,14 @@ class TwilioActorSession:
         mailbox).  On success, emits control.brain_completed with the
         reply.  On failure, emits control.brain_failed.  Handler
         _on_brain_completed then spawns _speech_job."""
+        # 2026-08-07: cancel any in-flight idle-followup the moment we
+        # start thinking.  Otherwise a slow brain (LLM rate-limited,
+        # tool loop, provider retry) crosses the 15s idle threshold
+        # and "Anything else I can help you with?" fires in the
+        # middle of a real response (observed on the just-finished
+        # PK call at t+117s).
+        self._cancel_idle_followup()
+
         # Sprint 12 Track B addendum: filter echo before spending an
         # LLM turn on it.  If the transcript matches recent agent
         # utterances closely, it's the mic picking up our own speaker.
@@ -1159,7 +1601,55 @@ class TwilioActorSession:
             else:
                 state, brain = handle
 
-            payload = await session_manager.run_user_turn(state, brain, transcript)
+            # K1: if a hint was stashed for this turn, wrap it as a
+            # synthetic turn-intent so the brain gets it as a fresh
+            # system message (never touching transcript state).
+            if self._pending_k1_hint:
+                from types import SimpleNamespace
+                state.last_turn_intent = SimpleNamespace(
+                    intent="incomplete_turn",
+                    confidence=0.9,
+                    matched="",
+                    system_note=self._pending_k1_hint,
+                )
+                self._pending_k1_hint = ""
+
+            # Task B-wire (2026-08-08): reactive brain shadow path.
+            # Feature-flagged OFF by default.  When ON, the reactive
+            # brain returns structured JSON {should_speak, backchannel,
+            # committed_reply, internal_thoughts} and we route:
+            #   silent → append notepad + arm idle, no audio
+            #   backchannel → play cached "mm-hm" (~10ms)
+            #   commit → normal speech job path
+            # Full plan: docs/rnd-2026-08/52-reactive-brain-wireup-plan.md
+            if getattr(settings, "reactive_brain_enabled", False):
+                try:
+                    await self._brain_job_reactive(
+                        state, brain, transcript, turn_gen, _elog,
+                    )
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.warning(
+                        "reactive brain failed, falling back to committed: %s", e,
+                    )
+                    # Fall through to committed path below.
+
+            # 2026-08-08 (task #271): if the brain takes >1200ms, play a
+            # cached filler ("one sec", "let me check") so the caller
+            # doesn't panic + Twilio doesn't drop the WS for idle.
+            # Fires as a background task, cancelled the instant the brain
+            # returns.  Uses the pre-warmed TTS cache — zero synth cost.
+            _filler_task = asyncio.create_task(
+                self._play_filler_on_slow_brain(turn_gen),
+                name=f"filler-{self.call_id}-{turn_gen}",
+            )
+            try:
+                payload = await session_manager.run_user_turn(state, brain, transcript)
+            finally:
+                if not _filler_task.done():
+                    _filler_task.cancel()
             reply = (payload.get("reply") or "").strip()
             escalated = bool(payload.get("escalated"))
             tool_results = payload.get("tool_results") or []
@@ -1253,6 +1743,191 @@ class TwilioActorSession:
         self._arm_idle_followup()
         return True
 
+    # ── Task B-wire: reactive brain (2026-08-08) ────────────────────
+
+    async def _brain_job_reactive(
+        self, state, brain, transcript: str, turn_gen: int, _elog,
+    ) -> None:
+        """Reactive brain path.  Returns structured JSON with 3 lanes:
+        silent (understand, no audio), backchannel (cheap ack), commit
+        (normal full reply).  See docs/rnd-2026-08/52-reactive-brain-wireup-plan.md."""
+        from packages.core_agent.reactive_brain import reactive_turn
+        from packages.schemas import TranscriptTurn, TurnRole
+        from packages.observability.call_event_log import (
+            CallEvent as _CE, EventSourceKind as _SK,
+        )
+
+        # 1. Append user turn (committed brain does this internally).
+        state.add_turn(TranscriptTurn(role=TurnRole.USER, text=transcript))
+
+        # 2. Build inputs.
+        system_prompt = brain.system_prompt
+        transcript_messages = state.to_llm_messages()
+        notes = list(getattr(state, "_reactive_notes", []) or [])
+
+        # 3. Call reactive brain.
+        reply = await reactive_turn(
+            llm_provider=brain.llm,
+            system_prompt=system_prompt,
+            transcript_messages=transcript_messages,
+            running_notes=notes,
+            tools=None,
+            tenant_id=self.tenant_id,
+            temperature=0.2,
+        )
+
+        # 4. Update notepad (bounded).
+        if reply.internal_thoughts:
+            notes.append(reply.internal_thoughts[:200])
+            state._reactive_notes = notes[-10:]
+
+        # 5. Consecutive-silent streak guard (5+ → force commit).
+        streak = getattr(state, "_reactive_silent_streak", 0)
+        if reply.lane == "silent":
+            state._reactive_silent_streak = streak + 1
+        else:
+            state._reactive_silent_streak = 0
+
+        log.info(
+            "reactive lane=%s bc=%r commit_len=%d thoughts=%r streak=%d",
+            reply.lane, reply.backchannel,
+            len(reply.committed_reply or ""), reply.internal_thoughts[:80],
+            getattr(state, "_reactive_silent_streak", 0),
+        )
+
+        # ── silent lane ────────────────────────────────────────────
+        if reply.lane == "silent":
+            if state._reactive_silent_streak >= 5:
+                log.warning("reactive silent streak >=5, escalating to commit")
+                # Fall through to committed brain by raising — outer
+                # _brain_job's except catches and runs the committed path.
+                raise RuntimeError("reactive_silent_streak_cap")
+            self._arm_idle_followup()
+            return
+
+        # ── backchannel lane ───────────────────────────────────────
+        if reply.lane == "backchannel":
+            import time as _t
+            # Rate-limit: only allow one backchannel per 4 sec.
+            last_bc = getattr(self, "_last_backchannel_at", 0.0)
+            if _t.monotonic() - last_bc < 4.0:
+                log.info("reactive backchannel rate-limited → silent")
+                self._arm_idle_followup()
+                return
+            # Only play backchannels while LISTENING (don't talk over
+            # our own committed reply).
+            if self.actor is not None and self.actor.state != CallState.LISTENING:
+                log.info("reactive backchannel skipped (actor state=%s)",
+                         self.actor.state)
+                self._arm_idle_followup()
+                return
+            ok = await self._play_cached_backchannel(reply.backchannel, turn_gen)
+            if ok:
+                self._last_backchannel_at = _t.monotonic()
+                # Track in agent-utterances buffer so caller repeating
+                # "mm-hm" gets echo-suppressed.
+                self._recent_agent_utterances.append(reply.backchannel)
+                if len(self._recent_agent_utterances) > 3:
+                    self._recent_agent_utterances.pop(0)
+            self._arm_idle_followup()
+            return
+
+        # ── commit lane ────────────────────────────────────────────
+        reply_text = (reply.committed_reply or "").strip()
+        if not reply_text:
+            log.warning("reactive commit lane returned empty reply, treating as silent")
+            self._arm_idle_followup()
+            return
+
+        state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=reply_text))
+
+        # Log to durable event log same as committed path.
+        if _elog is not None:
+            try:
+                _elog.write(_CE(
+                    call_id=self.session_id, tenant_id=self.tenant_id,
+                    source=_SK.LLM, kind="reply",
+                    payload={"reply": reply_text, "escalated": False,
+                             "tool_results": [], "lane": "commit_reactive"},
+                    turn_generation=turn_gen,
+                ))
+            except Exception:
+                pass
+
+        # Emit brain_completed so the normal speech-job chain fires.
+        if self.actor is not None:
+            self.actor.emit_local(CallEvent.new(
+                call_id=self.call_id, tenant_id=self.tenant_id,
+                source=EventSource.CONTROL,
+                turn_generation=turn_gen,
+                speech_generation=self.actor.speech_generation,
+                kind="brain_completed",
+                payload={
+                    "reply": reply_text,
+                    "escalated": False,
+                    "tool_results": [],
+                    "speech_act": "inform",  # reactive doesn't infer speech acts yet
+                    "turn_gen": turn_gen,
+                },
+                source_epoch=turn_gen,
+            ))
+
+    async def _play_cached_backchannel(self, phrase: str, turn_gen: int) -> bool:
+        """Task B-wire: look up a backchannel phrase in the shared TTS
+        cache and play the bytes directly.  Cache MISS = degrade to
+        silent lane (never synthesise fresh — defeats latency point)."""
+        from packages.tts_cache.cache import get_shared_cache, _hash_key
+        from app.routes.twilio import _get_telephony_tts
+
+        tts = _get_telephony_tts()
+        voice = getattr(tts, "default_voice", "default")
+        fmt = getattr(tts, "output_format", "unknown")
+        provider = getattr(tts, "name", "tts")
+
+        key = _hash_key(voice, phrase, fmt, provider)
+        cache = get_shared_cache()
+        hit = await cache.get(key)
+        if hit is None:
+            log.warning("reactive backchannel cache MISS for %r (voice=%s fmt=%s) — degrading to silent",
+                        phrase, voice, fmt)
+            return False
+        audio, mime = hit
+        log.info("reactive backchannel HIT: %r (%d bytes)", phrase, len(audio))
+        await self._send_audio_frames(audio, mime)
+        return True
+
+    async def _play_filler_on_slow_brain(self, turn_gen: int) -> None:
+        """2026-08-08 task #271: play a cached filler ('one sec', 'let me check')
+        if the brain hasn't returned within FILLER_DELAY_MS.  Fires as
+        a background task; the caller cancels it when the brain returns.
+
+        Uses the pre-warmed filler pool (packages/voice/filler.py) so the
+        audio is instant off disk — no synth latency + no additional LLM
+        cost.  Only plays ONCE per turn (not looped) to avoid stepping
+        on the real reply."""
+        FILLER_DELAY_MS = 1200
+        try:
+            await asyncio.sleep(FILLER_DELAY_MS / 1000.0)
+        except asyncio.CancelledError:
+            return  # brain returned in time — no filler needed
+        if self.actor is None or self.actor.turn_generation != turn_gen:
+            return  # turn moved on
+        # Pick a random cached filler line.  Pool warmed at boot.
+        try:
+            from packages.voice.filler import DEFAULT_FILLERS
+            import random as _rand
+            phrase = _rand.choice(DEFAULT_FILLERS)
+        except Exception:
+            phrase = "One sec."
+        log.info("filler firing on slow brain call=%s turn=%d phrase=%r",
+                 self.call_id, turn_gen, phrase)
+        try:
+            await self._play_cached_backchannel(phrase, turn_gen)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning("filler play failed: %s", e)
+
     async def _speech_job(self, text: str, turn_gen: int) -> None:
         """Sprint 12 Track A: TTS+playback runs as a supervised job.
         On completion emits control.speech_completed."""
@@ -1275,7 +1950,11 @@ class TwilioActorSession:
 
     async def _on_speech_completed(self, actor: CallActor, event: CallEvent) -> bool:
         """Speech job finished — arm idle followup so we prompt if the
-        caller stays silent."""
+        caller stays silent, and clear the continuation-merge anchor
+        (the reply landed cleanly; the next caller turn is a fresh
+        thought, not a continuation of the previous one)."""
+        self._last_committed_transcript = ""
+        self._last_final_monotonic = 0.0
         self._arm_idle_followup()
         return True
 
@@ -1468,18 +2147,58 @@ class TwilioActorSession:
         if abs(gain_db) > 0.01:
             mulaw = _apply_mulaw_gain(mulaw, gain_db)
 
+        # 2026-08-08 VOICE-BREAKUP FIX (task #270).  Root cause per
+        # docs/rnd-2026-08 research: asyncio.sleep(0.02) cumulative
+        # drift on a busy event loop = Twilio receives frames in bursts
+        # instead of steady 50Hz inflow, its jitter buffer compensates
+        # with skip/repeat = audible choppy voice.  Fix pattern is
+        # Pipecat-verified + Twilio-endorsed: pre-buffer the whole
+        # utterance, blast all frames without pacing, send one mark
+        # at the end.  Twilio's playback engine paces to the caller
+        # itself — it just needs the bytes promptly.  See:
+        # https://github.com/pipecat-ai/pipecat/issues/826
+        # https://elevenlabs.io/docs/cookbooks/text-to-speech/twilio
         frame_bytes = int(TWILIO_SAMPLE_RATE * (TWILIO_FRAME_MS / 1000))
-        for i in range(0, len(mulaw), frame_bytes):
-            chunk = mulaw[i:i + frame_bytes]
-            if len(chunk) < frame_bytes:
-                chunk = chunk + b"\xff" * (frame_bytes - len(chunk))
-            if not self._ducked:
+        # Pad the trailing partial frame ONCE so every send is exactly
+        # 20 ms of audio (Twilio drops or mis-times non-standard sizes).
+        pad = (-len(mulaw)) % frame_bytes
+        if pad:
+            mulaw = mulaw + b"\xff" * pad
+        if not self._ducked:
+            # 2026-08-08 FIX v2: v1 blasted all frames with no sleep,
+            # BUT that broke actor state — _stream_tts returned in 4ms
+            # while Twilio was still playing the audio.  Actor flipped
+            # SPEAKING → LISTENING immediately → mic un-ducked while
+            # greeting still playing → speaker bleed hit the mic →
+            # Deepgram VAD fired on our own audio → conversation broke.
+            # New approach: burst frames in ~200ms batches (10 frames),
+            # then sleep for that batch's real audio duration.  This
+            # gives Twilio a steady inflow (no per-frame drift) AND
+            # keeps _stream_tts's wall-clock aligned with actual
+            # playback so state transitions are honest.
+            BATCH_FRAMES = 10   # 10 * 20ms = 200ms batches
+            batch_duration_s = BATCH_FRAMES * TWILIO_FRAME_MS / 1000.0
+            frames_in_batch = 0
+            batch_start = time.monotonic()
+            for i in range(0, len(mulaw), frame_bytes):
+                chunk = mulaw[i:i + frame_bytes]
                 await self.ws.send_text(json.dumps({
                     "event": "media",
                     "streamSid": self.stream_sid,
                     "media": {"payload": base64.b64encode(chunk).decode("ascii")},
                 }))
-            await asyncio.sleep(TWILIO_FRAME_MS / 1000)
+                frames_in_batch += 1
+                if frames_in_batch >= BATCH_FRAMES:
+                    # Pace to real audio duration.  Uses monotonic wall
+                    # clock so drift can't accumulate — if we've been
+                    # slow, we sleep less; if we've been fast, we sleep
+                    # the full batch duration.
+                    elapsed = time.monotonic() - batch_start
+                    to_sleep = batch_duration_s - elapsed
+                    if to_sleep > 0:
+                        await asyncio.sleep(to_sleep)
+                    frames_in_batch = 0
+                    batch_start = time.monotonic()
 
     async def _send_browser_pcm_frames(self, audio_bytes: bytes, mime: str) -> None:
         """Browser transport: ship PCM s16le as-is, 40ms per frame,

@@ -40,8 +40,9 @@ export class AudioPipe {
     this._ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (this._ctx.state === 'suspended') await this._ctx.resume();
 
-    // Downstream playback timing anchor: give ourselves 50ms of pad.
-    this._nextStartAt = this._ctx.currentTime + 0.05;
+    // Downstream playback timing anchor: 150ms lead so PCM 16k chunks
+    // from a jittery WebSocket don't crackle at boundaries.
+    this._nextStartAt = this._ctx.currentTime + 0.15;
 
     // Upstream mic → worklet.
     this._micStream = await navigator.mediaDevices.getUserMedia({
@@ -73,30 +74,40 @@ export class AudioPipe {
     if (!this._ctx) return;
     const nSamples = mulawBytes.length;
     // Decode µ-law → Float32 at 8kHz.
-    const pcm = new Float32Array(nSamples);
+    const pcmFloat = new Float32Array(nSamples);
     for (let i = 0; i < nSamples; i++) {
-      pcm[i] = ulaw2linear(mulawBytes[i]) / 32768;
+      pcmFloat[i] = ulaw2linear(mulawBytes[i]) / 32768;
     }
-    // Upsample from 8kHz to context sample rate using linear interpolation.
-    // Safari (and older browsers) can silently fail on createBuffer at
-    // non-native rates; plus per-frame 20ms buffers scheduled back-to-back
-    // at a foreign rate glitches badly.  Do it ourselves.
-    const targetSr = this._ctx.sampleRate;
-    const ratio = targetSr / TARGET_RATE;
-    const outLen = Math.floor(nSamples * ratio);
-    const buf = this._ctx.createBuffer(1, outLen, targetSr);
-    const chan = buf.getChannelData(0);
-    for (let i = 0; i < outLen; i++) {
-      const srcIdx = i / ratio;
-      const i0 = Math.floor(srcIdx);
-      const i1 = Math.min(i0 + 1, nSamples - 1);
-      const frac = srcIdx - i0;
-      chan[i] = pcm[i0] * (1 - frac) + pcm[i1] * frac;
+    this._playFloat32(pcmFloat, TARGET_RATE);
+  }
+
+  playPcmFrame(pcmBytes, sampleRate) {
+    // pcmBytes is Uint8Array containing s16le samples.
+    if (!this._ctx) return;
+    const nSamples = Math.floor(pcmBytes.length / 2);
+    const pcmFloat = new Float32Array(nSamples);
+    // Little-endian int16 → Float32.
+    const dv = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
+    for (let i = 0; i < nSamples; i++) {
+      pcmFloat[i] = dv.getInt16(i * 2, true) / 32768;
     }
+    this._playFloat32(pcmFloat, sampleRate);
+  }
+
+  _playFloat32(pcmFloat, sampleRate) {
+    // Create the buffer at the source's native rate — the browser's
+    // AudioContext handles resampling to its output rate cleanly.
+    // Avoids the crunchy hand-rolled linear-interp upsample we used for
+    // µ-law; for 16kHz PCM this yields near-original quality.
+    const buf = this._ctx.createBuffer(1, pcmFloat.length, sampleRate);
+    buf.copyToChannel(pcmFloat, 0);
     const src = this._ctx.createBufferSource();
     src.buffer = buf;
     src.connect(this._ctx.destination);
-    const startAt = Math.max(this._ctx.currentTime + 0.02, this._nextStartAt);
+    // If we've fallen behind (queue drained + WS gap), rewind to
+    // now-plus-lead so we don't try to start in the past.
+    const now = this._ctx.currentTime;
+    const startAt = this._nextStartAt > now ? this._nextStartAt : (now + 0.05);
     src.start(startAt);
     this._nextStartAt = startAt + buf.duration;
     this._pendingSources.push({ src, endsAt: this._nextStartAt });

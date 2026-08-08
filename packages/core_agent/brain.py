@@ -31,6 +31,12 @@ class BrainTurnResult(BaseModel):
     state: CallState
     tool_results: list[dict] = []
     escalated: bool = False
+    # Sprint 9e: speech_act tag for the two-planner path.  Defaults to
+    # NEUTRAL so callers that don't opt into VPL get sensible fallback
+    # delivery.  Only the semantic planner wrapper sets a non-default;
+    # the raw brain currently returns NEUTRAL for everything until the
+    # brain prompt is extended to emit it directly (planned in 9e).
+    speech_act: str = "neutral"
 
 
 class ReceptionistBrain:
@@ -44,7 +50,13 @@ class ReceptionistBrain:
       5. Run a small extraction call to refresh structured fields.
     """
 
-    MAX_TOOL_ITERATIONS = 4
+    # 2026-08-07: dropped 4 → 2 for voice latency.  Each iteration
+    # is a full LLM roundtrip (~1-2s on Mistral, longer under load).
+    # 4 iterations × 2 sec = 8s dead air where the caller thinks the
+    # agent hung up.  Voice UX prioritizes speed over RAG depth: 2
+    # iterations = one tool_call + one synthesis pass, still gets the
+    # right answer for the vast majority of turns.
+    MAX_TOOL_ITERATIONS = 2
 
     def __init__(
         self,
@@ -53,6 +65,7 @@ class ReceptionistBrain:
         tools: list[ToolDefinition],
         tool_handler: ToolHandler,
         extractor_llm: Optional["LLMProvider"] = None,
+        calendar=None,
     ) -> None:
         self.llm = llm
         self.business = business
@@ -60,6 +73,14 @@ class ReceptionistBrain:
         self.tool_handler = tool_handler
         self.extractor_llm = extractor_llm or llm
         self.system_prompt = build_system_prompt(business)
+        # Sprint 10 WIRING: optional handle so kernel_wiring can build
+        # a CommitAdapter for booking.  Passed in from session_manager
+        # (which owns the calendar cache).  None-safe: kernel_wiring
+        # itself is gated by settings.dialogue_kernel_enabled.
+        self.calendar = calendar
+        # Lazy per-session KernelWiring — constructed on first turn so
+        # tests can override before use.
+        self._kernel = None
 
     async def greet(self, state: CallState) -> BrainTurnResult:
         # Compliance-safe greeting: AI-disclosure + optional recording consent.
@@ -87,8 +108,69 @@ class ReceptionistBrain:
         state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=greeting))
         return BrainTurnResult(reply=greeting, state=state)
 
+    def _ensure_kernel(self, state: CallState):
+        """Sprint 10 WIRING: lazily build a KernelWiring for this call.
+        Returns None if the kernel is disabled or wiring construction
+        fails — brain works without it either way."""
+        if self._kernel is not None:
+            return self._kernel
+        try:
+            from .kernel_wiring import KernelWiring
+            from packages.integrations.calendar_commit_adapter import (
+                build_default_adapters,
+            )
+            adapters = build_default_adapters(
+                self.calendar, business=self.business,
+            ) if self.calendar is not None else {}
+            self._kernel = KernelWiring(
+                call_state=state,
+                business_id=state.business_id,
+                tenant_id=state.tenant_id,
+                business_timezone=self.business.timezone,
+                business_hours=self.business.hours,
+                commit_adapters=adapters,
+            )
+        except Exception as e:
+            import logging as _l
+            _l.getLogger(__name__).warning("kernel wiring init failed: %s", e)
+            self._kernel = None
+        return self._kernel
+
     async def handle_user_turn(self, state: CallState, user_text: str) -> BrainTurnResult:
         state.add_turn(TranscriptTurn(role=TurnRole.USER, text=user_text))
+
+        # K3+K4 (2026-08-05): classify turn intent BEFORE brain fires so
+        # the persona prompt has explicit branches for correction /
+        # commitment / clarification / rejection / chitchat.  Regex-only,
+        # ~5µs.  Stashed on state so the prompt builder can read it.
+        try:
+            from .classifiers.turn_intent import classify_turn_intent
+            intent = classify_turn_intent(user_text)
+            state.last_turn_intent = intent
+            if intent.system_note:
+                import logging as _l
+                _l.getLogger(__name__).info(
+                    "turn intent=%s conf=%.2f matched=%r",
+                    intent.intent.value, intent.confidence, intent.matched[:40],
+                )
+        except Exception as e:
+            import logging as _l
+            _l.getLogger(__name__).warning("turn intent classify failed: %s", e)
+
+        # Sprint 10 WIRING: kernel gets first look at the caller text.
+        # Discovers tasks; downstream reducer + coordinator work off
+        # the state it builds.  No-ops when settings.dialogue_kernel_enabled
+        # is False.
+        kernel = self._ensure_kernel(state)
+        if kernel is not None and kernel.is_enabled():
+            try:
+                turn_id = f"turn_{len(state.transcript)}"
+                kernel.on_user_turn(user_text, turn_id)
+            except Exception as e:
+                import logging as _l
+                _l.getLogger(__name__).warning(
+                    "kernel.on_user_turn failed: %s", e,
+                )
 
         # EMERGENCY INTERCEPT — highest priority, runs BEFORE anything else.
         # Missing a real emergency is the top-cited liability failure in 2026
@@ -102,7 +184,7 @@ class ReceptionistBrain:
             state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=escalation_msg))
             state.status = CallStatus.ESCALATED
             state.escalation_reason = emergency.reason
-            await self._refresh_extraction(state)
+            self._refresh_extraction_bg(state)
             return BrainTurnResult(
                 reply=escalation_msg,
                 state=state,
@@ -124,7 +206,7 @@ class ReceptionistBrain:
             kind = classify_injection(user_text)
             safe_reply = safe_reply_for(self.business.name, kind)
             state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=safe_reply))
-            await self._refresh_extraction(state)
+            self._refresh_extraction_bg(state)
             return BrainTurnResult(reply=safe_reply, state=state)
 
         tool_results_payload: list[dict] = []
@@ -134,7 +216,14 @@ class ReceptionistBrain:
         tracer = get_tracer()
 
         for _ in range(self.MAX_TOOL_ITERATIONS):
-            messages = [{"role": "system", "content": self.system_prompt}] + state.to_llm_messages()
+            messages = [{"role": "system", "content": self.system_prompt}]
+            # K3+K4: inject the turn-intent hint as a fresh system note
+            # ONLY for this turn (not persisted to state.transcript so
+            # it doesn't pollute future turns).
+            intent = getattr(state, "last_turn_intent", None)
+            if intent is not None and getattr(intent, "system_note", ""):
+                messages.append({"role": "system", "content": intent.system_note})
+            messages.extend(state.to_llm_messages())
             with tracer.span(
                 "gen_ai.chat_completion",
                 **{
@@ -158,6 +247,7 @@ class ReceptionistBrain:
                     response = await self.llm.complete(
                         messages, tools=self.tools,
                         temperature=0.3, max_tokens=300,
+                        site="brain.reply",
                     )
                 except Exception as e:
                     # LLM crashed — most common cause is a Groq 400 when the
@@ -174,7 +264,7 @@ class ReceptionistBrain:
                         "Sorry, I had a moment there. Could you say that again?"
                     )
                     state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=fallback_text))
-                    await self._refresh_extraction(state)
+                    self._refresh_extraction_bg(state)
                     return BrainTurnResult(
                         reply=fallback_text,
                         state=state,
@@ -198,7 +288,7 @@ class ReceptionistBrain:
                 # suspenders for prompt rules the LLM sometimes ignores.
                 reply_text = sanitize_for_speech(response.text)
                 state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=reply_text))
-                await self._refresh_extraction(state)
+                self._refresh_extraction_bg(state)
                 return BrainTurnResult(
                     reply=reply_text,
                     state=state,
@@ -216,6 +306,23 @@ class ReceptionistBrain:
                 text=response.text.strip() if response.text else "",
                 tool_calls=list(response.tool_calls),
             ))
+
+            # Sprint 10 WIRING: kernel observes tool_call arguments and
+            # records them as slot evidence.  Runs BEFORE tool_handler
+            # fires so we capture even calls that later fail.
+            if kernel is not None and kernel.is_enabled():
+                for tc in response.tool_calls:
+                    try:
+                        kernel.record_slots_from_tool_call(
+                            tool_name=tc.name,
+                            arguments=tc.arguments or {},
+                            turn_id=f"turn_{len(state.transcript)}",
+                        )
+                    except Exception as _e:
+                        import logging as _l
+                        _l.getLogger(__name__).debug(
+                            "kernel.record_slots_from_tool_call failed: %s", _e,
+                        )
 
             for tc in response.tool_calls:
                 # Write-guard: validate booking tool calls against the transcript
@@ -249,7 +356,7 @@ class ReceptionistBrain:
                         })
                         # Return early — ask the caller to reconfirm rather than
                         # continuing the tool loop with the same bad args.
-                        await self._refresh_extraction(state)
+                        self._refresh_extraction_bg(state)
                         return BrainTurnResult(
                             reply=verdict.detail,
                             state=state,
@@ -288,11 +395,12 @@ class ReceptionistBrain:
                 tools=None,           # force text-only
                 temperature=0.3,
                 max_tokens=300,
+                site="brain.forced_final",
             )
             if forced.text and forced.text.strip():
                 reply_text = sanitize_for_speech(forced.text)
                 state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=reply_text))
-                await self._refresh_extraction(state)
+                self._refresh_extraction_bg(state)
                 return BrainTurnResult(
                     reply=reply_text,
                     state=state,
@@ -307,7 +415,7 @@ class ReceptionistBrain:
 
         fallback = "Let me have a teammate call you back to sort this out."
         state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=fallback))
-        await self._refresh_extraction(state)
+        self._refresh_extraction_bg(state)
         return BrainTurnResult(
             reply=fallback,
             state=state,
@@ -315,8 +423,24 @@ class ReceptionistBrain:
             escalated=escalated,
         )
 
-    async def _refresh_extraction(self, state: CallState) -> None:
+    def _refresh_extraction_bg(self, state: CallState) -> None:
+        """2026-08-08: fire-and-forget the extractor.  Previously we awaited
+        it on the reply-return path, which added a full 2nd LLM call
+        (~800-2000ms + retry cascade under rate limits) to every turn's
+        end-to-end latency.  The extracted fields are only used for
+        post-call analytics + summary; the LIVE reply never reads them.
+        Kicking it into the background lets the reply return immediately
+        and the extractor finishes whenever it finishes."""
+        import asyncio as _asyncio
+        async def _run():
+            try:
+                state.extracted = await extract_fields(
+                    self.extractor_llm, state.to_llm_messages(),
+                )
+            except Exception:
+                pass
         try:
-            state.extracted = await extract_fields(self.extractor_llm, state.to_llm_messages())
-        except Exception:
+            _asyncio.create_task(_run(), name="brain-extractor-bg")
+        except RuntimeError:
+            # No running loop (should not happen in the actor path); swallow.
             pass

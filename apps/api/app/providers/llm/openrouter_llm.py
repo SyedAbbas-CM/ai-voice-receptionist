@@ -23,9 +23,9 @@ from ..base import LLMProvider, LLMResponse
 class OpenRouterLLM(LLMProvider):
     name = "openrouter"
 
-    def __init__(self) -> None:
+    def __init__(self, model=None) -> None:
         self.api_key = settings.openrouter_api_key
-        self.model = settings.openrouter_model or "meta-llama/llama-3.3-70b-instruct"
+        self.model = model or settings.openrouter_model or "meta-llama/llama-3.3-70b-instruct"
         self.base_url = "https://openrouter.ai/api/v1"
         # Optional attribution headers OpenRouter uses for rankings
         self.site_url = settings.openrouter_site_url
@@ -37,6 +37,7 @@ class OpenRouterLLM(LLMProvider):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
     ) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY not set")
@@ -50,6 +51,12 @@ class OpenRouterLLM(LLMProvider):
         if tools:
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
+
+        if response_schema is not None:
+            from .structured_output import openai_response_format
+            payload["response_format"] = openai_response_format(
+                response_schema, strict=True,
+            )
 
         headers = {"Authorization": f"Bearer {self.api_key}"}
         if self.site_url:

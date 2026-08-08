@@ -8,6 +8,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
+# 2026-08-08: pydantic-settings only populates DECLARED fields from .env,
+# not os.environ generally.  But several subsystems (router_llm.py, etc.)
+# read env vars directly via os.environ.get() — e.g. LLM_ROUTER_ORDER —
+# and those were seeing the SHELL env, not our .env, so silently used
+# DEFAULT_ORDER.  Load .env into os.environ here so both paths see the
+# same values.  override=False → real shell env still wins if set.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(REPO_ROOT / ".env", override=False)
+except Exception:
+    pass
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -65,6 +77,28 @@ class Settings(BaseSettings):
 
     ollama_base_url: Optional[str] = "http://localhost:11434"
     ollama_model: Optional[str] = "qwen2.5:7b"
+
+    # SambaNova Cloud — added 2026-08-06.  Free-tier 10 RPM on
+    # Meta-Llama-3.1-405B (only free source of a 405B model).
+    # Signup: https://cloud.sambanova.ai/apis
+    sambanova_api_key: Optional[str] = None
+    sambanova_model: Optional[str] = "Meta-Llama-3.3-70B-Instruct"
+
+    # Cloudflare Workers AI — added 2026-08-06.  Free-tier 10k Neurons/day
+    # (~1300 replies).  Edge-hosted, orthogonal bucket.
+    # Signup: https://dash.cloudflare.com/sign-up
+    cloudflare_api_token: Optional[str] = None
+    cloudflare_account_id: Optional[str] = None
+    cloudflare_model: Optional[str] = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+    # Together AI — added 2026-08-06.  Signup gives $1 credit + :free
+    # suffix models with zero cost.
+    together_api_key: Optional[str] = None
+    together_model: Optional[str] = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+
+    # DeepSeek — added 2026-08-06.  Strong reasoning tier.
+    deepseek_api_key: Optional[str] = None
+    deepseek_model: Optional[str] = "deepseek-chat"
 
     # Voice-activity detection: "silero" (2MB ONNX, best), "rms" (zero-dep
     # energy fallback), or "auto" (silero if deps present, else rms).
@@ -186,6 +220,23 @@ class Settings(BaseSettings):
     twilio_auth_token: Optional[str] = None
     twilio_public_url: Optional[str] = None
 
+    signalwire_space_url: Optional[str] = None
+    signalwire_project_id: Optional[str] = None
+    signalwire_token: Optional[str] = None
+    signalwire_phone_number: Optional[str] = None
+
+    telnyx_api_key: Optional[str] = None
+    telnyx_phone_number: Optional[str] = None
+    telnyx_app_id: Optional[str] = None
+    telnyx_public_url: Optional[str] = None
+    telnyx_public_key: Optional[str] = None
+
+    plivo_auth_id: Optional[str] = None
+    plivo_auth_token: Optional[str] = None
+    plivo_phone_number: Optional[str] = None
+    plivo_app_id: Optional[str] = None
+    plivo_public_url: Optional[str] = None
+
     # Sprint 9a: gate CallActor-backed Twilio path.  Default false so the
     # legacy TwilioStreamSession keeps running until we've soaked the
     # new path.  Flip to true to route inbound calls through the
@@ -241,6 +292,27 @@ class Settings(BaseSettings):
     # behind the operation they're meant to interrupt.
     # Flip false to restore pre-Sprint-12 inline-await behavior.
     actor_nonblocking_handlers: bool = True
+
+    # S13-A: prosodic end-of-turn model (pipecat-ai/smart-turn-v3).
+    # Runs locally on CPU, ~12ms per inference.  When on, the TurnManager
+    # consults the model on every STT final: P<0.30 forces fragment buffer,
+    # P>0.75 forces commit.  Kills "cut me off mid-sentence" at the root
+    # instead of patching with merge windows.
+    smart_turn_enabled: bool = True
+
+    # Task A (2026-08-06): TTS synth cache.  Wraps every TTSProvider
+    # call with a hash-keyed disk cache.  Miss = original behavior.
+    # Hit = ~10ms disk read, skips ElevenLabs entirely.  Cost saver
+    # + latency win for common phrases.
+    tts_cache_enabled: bool = True
+    tts_cache_max_mb: int = 30
+    tts_cache_warm_on_boot: bool = True
+
+    # Task B (2026-08-06): reactive+committed brain.  Shadow build,
+    # OFF by default.  When on, brain returns structured JSON with
+    # should_speak/backchannel/committed_reply and can decide to
+    # listen silently across multiple partials.
+    reactive_brain_enabled: bool = False
 
     database_url: Optional[str] = None
     business_profile_path: Optional[str] = None

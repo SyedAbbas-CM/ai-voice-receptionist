@@ -58,3 +58,44 @@ class ElevenLabsTTS(TTSProvider):
             )
             resp.raise_for_status()
             return resp.content, self.mime
+
+    async def synthesize_from_plan(
+        self, plan, voice: Optional[str] = None,
+    ) -> tuple[bytes, str]:
+        """Sprint 9e: send a VPL-compiled request payload.
+
+        `plan` is a packages.voice.vpl.CompiledSpeechPlan whose
+        request_payload is already ElevenLabs-shaped by
+        packages.voice.vpl.compilers.compile_elevenlabs.  We only need
+        to (1) resolve the voice binding, (2) map the plan's output
+        format to the URL query param, (3) post it.
+
+        Kept as a separate method — the old synthesize(text) path stays
+        untouched for callers that haven't adopted VPL yet (browser
+        widget, greeting cache, non-actor path)."""
+        if not self.api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY not set")
+        voice_id = voice or self.default_voice
+        fmt_code = plan.output_format
+        if fmt_code not in _ELEVEN_FORMATS:
+            raise ValueError(
+                f"CompiledSpeechPlan output_format={fmt_code!r} not supported; "
+                f"choose from {list(_ELEVEN_FORMATS)}"
+            )
+        eleven_fmt, mime = _ELEVEN_FORMATS[fmt_code]
+        url = (
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+            f"?output_format={eleven_fmt}"
+        )
+        payload = dict(plan.request_payload)
+        # Fill model if the compiler produced a mismatched one (compilers
+        # default to eleven_turbo_v2_5; provider default may differ per tenant).
+        payload.setdefault("model_id", self.model)
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                url,
+                headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.content, mime

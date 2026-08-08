@@ -118,6 +118,22 @@ class CallState(BaseModel):
     transcript: list[TranscriptTurn] = Field(default_factory=list)
     extracted: ExtractedFields = Field(default_factory=ExtractedFields)
     escalation_reason: Optional[str] = None
+    # Sprint 10 WIRING (2026-08-04): dialogue kernel state lives
+    # alongside the legacy fields during migration.  Optional so pre-
+    # kernel callers still work.  When the kernel is enabled, the
+    # brain writes StatePatches; consumers migrate to reading from
+    # here one at a time.  Type is `dict` in the schema so we don't
+    # circular-import packages/dialogue; runtime type is DialogueState.
+    dialogue: Optional[dict] = None
+
+    # K3+K4 (2026-08-05): last classified turn intent.  Populated by
+    # brain.handle_user_turn from classifiers/turn_intent.py.  Not
+    # persisted to LLM history — used inline for the next system-note
+    # injection, then overwritten on the following turn.
+    # Typed as `object` so pydantic doesn't try to serialize the enum.
+    last_turn_intent: Optional[object] = None
+
+    model_config = {"arbitrary_types_allowed": True}
 
     def add_turn(self, turn: TranscriptTurn) -> None:
         self.transcript.append(turn)

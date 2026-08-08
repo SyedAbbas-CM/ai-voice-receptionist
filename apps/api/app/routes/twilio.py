@@ -78,6 +78,14 @@ def _get_telephony_tts():
     provider = (settings.tts_provider or "").lower()
     if provider == "elevenlabs":
         from app.providers.tts.elevenlabs_tts import ElevenLabsTTS
+        # 2026-08-07: switched from pcm_16000 → ulaw_8000.  Twilio Media
+        # Streams accepts µ-law 8kHz natively — asking ElevenLabs to
+        # deliver it in exactly that format cuts out the
+        # 16kHz → 8kHz downsample + linear → µ-law encode pipeline that
+        # was (a) adding per-frame latency and (b) causing audible
+        # artifacts + cut-offs (user report 2026-08-07 PK call).
+        # Browser widget uses a SEPARATE TTS singleton (get_tts()) which
+        # keeps its pcm_16000 quality — this only affects the phone path.
         _telephony_tts_singleton = ElevenLabsTTS(output_format="ulaw_8000")
     elif provider == "cartesia":
         # Cartesia already emits raw PCM 16k which the converter handles.
@@ -504,6 +512,20 @@ class TwilioStreamSession:
 @router.websocket("/twilio/stream")
 async def twilio_stream(ws: WebSocket) -> None:
     await ws.accept()
+
+    # Sprint 9a: feature-gated CallActor path.  When on, all downstream
+    # logic runs through packages/runtime kernel (per-call actor,
+    # generation-tagged events, playback ledger).  Legacy path below
+    # stays as the fallback until we've soaked the new one.
+    if settings.twilio_use_actor:
+        from app.routes.twilio_actor import handle_twilio_stream_via_actor
+        # Tenant resolution from Twilio callSid is CRITICAL-12 territory
+        # — for now the call inherits the default tenant.  Once the
+        # tenant resolver lands, we look up (twilio_number → tenant_id)
+        # off the "start" event's `to` field.
+        await handle_twilio_stream_via_actor(ws, tenant_id="default")
+        return
+
     session: Optional[TwilioStreamSession] = None
     try:
         while True:

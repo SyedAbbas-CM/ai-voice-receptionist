@@ -63,6 +63,25 @@ def get_stt() -> STTProvider:
 
 @lru_cache(maxsize=1)
 def get_tts() -> TTSProvider:
+    inner = _make_raw_tts()
+    # Task A: wrap with disk cache when enabled.  Cache is transparent —
+    # same interface, cache misses fall through unchanged.
+    if getattr(settings, "tts_cache_enabled", False):
+        try:
+            from packages.tts_cache import TTSCacheWrapper, TTSCache
+            cache = TTSCache(
+                max_bytes=int(getattr(settings, "tts_cache_max_mb", 30)) * 1024 * 1024,
+            )
+            return TTSCacheWrapper(inner, cache=cache)
+        except Exception as e:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "tts_cache disabled — wrapper init failed: %s", e,
+            )
+    return inner
+
+
+def _make_raw_tts() -> TTSProvider:
     provider = settings.tts_provider.lower()
     if provider == "elevenlabs":
         from .tts.elevenlabs_tts import ElevenLabsTTS

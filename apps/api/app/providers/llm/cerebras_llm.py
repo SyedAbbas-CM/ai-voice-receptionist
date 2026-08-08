@@ -22,9 +22,9 @@ from ..base import LLMProvider, LLMResponse
 class CerebrasLLM(LLMProvider):
     name = "cerebras"
 
-    def __init__(self) -> None:
+    def __init__(self, model=None) -> None:
         self.api_key = settings.cerebras_api_key
-        self.model = settings.cerebras_model or "llama-3.3-70b"
+        self.model = model or settings.cerebras_model or "llama-3.3-70b"
         self.base_url = "https://api.cerebras.ai/v1"
 
     async def complete(
@@ -33,6 +33,7 @@ class CerebrasLLM(LLMProvider):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
     ) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("CEREBRAS_API_KEY not set")
@@ -46,6 +47,12 @@ class CerebrasLLM(LLMProvider):
         if tools:
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
+
+        if response_schema is not None:
+            from .structured_output import openai_response_format
+            payload["response_format"] = openai_response_format(
+                response_schema, strict=True,
+            )
 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(

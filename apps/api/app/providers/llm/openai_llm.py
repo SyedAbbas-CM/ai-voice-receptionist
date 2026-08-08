@@ -25,9 +25,9 @@ class OpenAILLM(LLMProvider):
 
     name = "openai"
 
-    def __init__(self) -> None:
+    def __init__(self, model=None) -> None:
         self.api_key = settings.openai_api_key
-        self.model = settings.openai_model or "gpt-4o-mini"
+        self.model = model or settings.openai_model or "gpt-4o-mini"
         self.base_url = "https://api.openai.com/v1"
 
     async def complete(
@@ -36,6 +36,7 @@ class OpenAILLM(LLMProvider):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
     ) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY not set")
@@ -49,6 +50,12 @@ class OpenAILLM(LLMProvider):
         if tools:
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
+
+        if response_schema is not None:
+            from .structured_output import openai_response_format
+            payload["response_format"] = openai_response_format(
+                response_schema, strict=True,
+            )
 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(

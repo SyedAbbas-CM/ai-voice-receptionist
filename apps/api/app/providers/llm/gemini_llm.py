@@ -14,9 +14,9 @@ from ..base import LLMProvider, LLMResponse
 class GeminiLLM(LLMProvider):
     name = "gemini"
 
-    def __init__(self) -> None:
+    def __init__(self, model=None) -> None:
         self.api_key = settings.gemini_api_key
-        self.model = settings.gemini_model or "gemini-2.5-flash"
+        self.model = model or settings.gemini_model or "gemini-2.5-flash"
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
 
     def _to_gemini_messages(self, messages: list[dict]) -> tuple[list[dict], Optional[str]]:
@@ -43,14 +43,22 @@ class GeminiLLM(LLMProvider):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_schema: Optional[object] = None,
     ) -> LLMResponse:
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY not set")
 
         contents, system_text = self._to_gemini_messages(messages)
+        gen_config: dict = {"temperature": temperature, "maxOutputTokens": max_tokens}
+        # 2026-08-07: structured output — Gemini native.  Sets
+        # responseMimeType=application/json + responseSchema on
+        # generationConfig.  Strong enforcement on 1.5+ models.
+        if response_schema is not None:
+            from .structured_output import gemini_generation_config
+            gen_config = gemini_generation_config(response_schema, base=gen_config)
         payload: dict = {
             "contents": contents,
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+            "generationConfig": gen_config,
         }
         if system_text:
             payload["systemInstruction"] = {"parts": [{"text": system_text}]}

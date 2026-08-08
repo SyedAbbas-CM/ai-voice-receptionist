@@ -94,8 +94,10 @@ async def test_end_of_turn_handler_returns_fast_when_brain_slow(monkeypatch):
         kind="end_of_turn",
         payload={"text": "book me an appointment", "is_final": True},
     ))
+    # 2026-08-05: brain spawn now gated by fragment-merge window
+    # (_FRAGMENT_MERGE_WINDOW_MS = 2500ms).  Give it 4s to fire.
     try:
-        await asyncio.wait_for(slow_brain_started.wait(), timeout=1.0)
+        await asyncio.wait_for(slow_brain_started.wait(), timeout=4.0)
     except asyncio.TimeoutError:
         pytest.fail("brain never started")
 
