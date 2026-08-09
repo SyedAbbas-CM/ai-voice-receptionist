@@ -508,12 +508,23 @@ class TurnManager:
 
     async def _confirm_end_of_turn(self, text: str) -> None:
         """After eager end, wait N ms.  If no TURN_RESUMED happened,
-        promote to END_OF_TURN.  If speech_start fires in the window,
-        we treat that as caller resuming and emit TURN_RESUMED
-        instead."""
+        promote to END_OF_TURN.
+
+        2026-08-09 FIX: was checking saw_speech_start alone, which
+        Deepgram continuous VAD flips true on echo/breath/ambient in
+        the 400ms window.  Result: END_OF_TURN never fired → brain
+        never fired → every real call dead.  Now require CONTENT: a
+        new partial arrived during the window with real words, OR a
+        new final arrived (which would have cancelled us via a
+        new _on_final call anyway).  Bare VAD signal isn't enough."""
         try:
+            partial_at_eager = self._state.last_partial_text
             await asyncio.sleep(self._config.eager_confirm_ms / 1000.0)
-            if self._state.saw_speech_start:
+            new_partial = (
+                self._state.last_partial_text != partial_at_eager
+                and len(self._state.last_partial_text.strip().split()) >= 2
+            )
+            if new_partial:
                 await self._emit(TurnEventKind.TURN_RESUMED, text=text)
             else:
                 await self._emit(TurnEventKind.END_OF_TURN, text=text, is_final=True)
