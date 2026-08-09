@@ -1074,6 +1074,22 @@ class TwilioActorSession:
                 span.mark("tts_request")
             tts = _get_telephony_tts()
 
+            # 2026-08-09 SPEED SPRINT (task #281): use streaming TTS when
+            # the provider supports it AND we're on the Twilio path (µ-law
+            # is chunk-safe).  First audio chunk arrives ~150-200ms after
+            # request instead of ~1000-2000ms for the batch endpoint —
+            # saves 800-1500ms end-to-end per turn.  Falls back to batch
+            # synthesize() when: provider lacks stream_synthesize, we're
+            # in VPL two-planner mode, or we're on the browser path.
+            can_stream = (
+                not settings.two_planner_enabled
+                and not self.stream_sid.startswith("browser_")
+                and hasattr(tts, "stream_synthesize")
+            )
+            if can_stream:
+                await self._stream_tts_incremental(tts, text, gen, span)
+                return
+
             audio_bytes: bytes
             mime: str
             if settings.two_planner_enabled and self._provider_supports_vpl(tts):
@@ -1125,6 +1141,58 @@ class TwilioActorSession:
             self.actor.ledger.queue_chunk(gen, chunk)
 
         await self._send_audio_frames(audio_bytes, mime)
+        await self._send_twilio_mark(mark_id)
+
+    async def _stream_tts_incremental(self, tts, text: str, gen: int, span) -> None:
+        """2026-08-09: stream TTS chunks from ElevenLabs directly to Twilio.
+
+        Each chunk that arrives from ElevenLabs is immediately dispatched
+        to the µ-law outbound path — no waiting for the full utterance.
+        Caller hears the first ~150-200ms of audio while the rest is
+        still being synthesized upstream.
+
+        Trade-off: no full audio_bytes buffer → no ledger sizing at the
+        top (ledger entry is written when the stream completes with the
+        cumulative byte count).  Cancellation on bump_speech still works
+        because we're inside a Task registered with the actor."""
+        first_chunk = True
+        cumulative_bytes = 0
+        mime = getattr(tts, "mime", "audio/x-mulaw;rate=8000")
+        try:
+            async for chunk, chunk_mime in tts.stream_synthesize(text):
+                if not chunk:
+                    continue
+                if first_chunk:
+                    first_chunk = False
+                    if span is not None:
+                        span.mark("tts_first_byte")
+                        self._close_turn_span()
+                    mime = chunk_mime
+                cumulative_bytes += len(chunk)
+                await self._send_audio_frames(chunk, mime)
+        except asyncio.CancelledError:
+            log.info("stream TTS cancelled call=%s gen=%d bytes_sent=%d",
+                     self.call_id, gen, cumulative_bytes)
+            raise
+        except Exception as e:
+            log.exception("stream TTS failed: %s", e)
+            return
+
+        # Ledger entry (approximate — we know the cumulative bytes now).
+        _mime_lower = (mime or "").lower()
+        bytes_per_ms = 8 if ("mulaw" in _mime_lower or "ulaw" in _mime_lower
+                             or "pcmu" in _mime_lower) else 32
+        self._mark_counter += 1
+        mark_id = f"m{gen}-{self._mark_counter}"
+        chunk_ledger = AudioChunk(
+            generation_id=f"gen-{gen}", sequence=0,
+            audio_bytes=cumulative_bytes,
+            duration_ms=int(cumulative_bytes / bytes_per_ms),
+            text=text, text_start=0, text_end=len(text),
+            mark_id=mark_id, is_final=True,
+        )
+        if self.actor is not None:
+            self.actor.ledger.queue_chunk(gen, chunk_ledger)
         await self._send_twilio_mark(mark_id)
 
     # ── Sprint 9e: two-planner + VPL compilation path ──────────────

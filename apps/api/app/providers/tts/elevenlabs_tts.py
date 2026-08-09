@@ -59,6 +59,40 @@ class ElevenLabsTTS(TTSProvider):
             resp.raise_for_status()
             return resp.content, self.mime
 
+    async def stream_synthesize(self, text: str, voice: Optional[str] = None):
+        """2026-08-09 speed sprint: yield audio chunks as ElevenLabs streams
+        them, instead of waiting for the whole synthesis.  First chunk
+        arrives in ~150-200ms vs ~1000-2000ms for the batch endpoint.
+
+        Uses the /stream suffix on the same endpoint.  Same auth, same
+        payload, same output_format — only difference is the response
+        arrives as an HTTP chunked stream we iterate.
+
+        Yields (chunk_bytes, mime) tuples.  Caller is responsible for
+        pushing each chunk into the outbound audio path immediately."""
+        if not self.api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY not set")
+        voice_id = voice or self.default_voice
+        url = (
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
+            f"?output_format={self._eleven_fmt}"
+        )
+        payload = {
+            "text": text,
+            "model_id": self.model,
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream(
+                "POST", url,
+                headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
+                json=payload,
+            ) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes(chunk_size=1600):
+                    if chunk:
+                        yield chunk, self.mime
+
     async def synthesize_from_plan(
         self, plan, voice: Optional[str] = None,
     ) -> tuple[bytes, str]:
