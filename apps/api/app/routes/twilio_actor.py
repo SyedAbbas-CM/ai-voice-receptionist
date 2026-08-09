@@ -119,30 +119,42 @@ log = logging.getLogger(__name__)
 
 
 def _looks_like_agent_echo(transcript: str, recent_agent: list[str]) -> bool:
-    """Sprint 12 Track B: return True if `transcript` is almost certainly
-    the mic picking up the agent's own speaker output rather than a
-    real caller utterance.  Kept for full-drop cases.
+    """Return True only if the transcript is a near-exact CONTIGUOUS
+    subsequence of a recent agent utterance — i.e. Deepgram literally
+    caught the speaker feed.
 
-    Heuristic: normalize both to lowercase word bags and check that
-    the transcript's meaningful-word set is a subset of any recent
-    agent utterance with a high overlap ratio.  We only reject if:
-      - transcript is at least 3 words long (avoid nuking short real
-        answers like "yes" / "cleaning" / "tomorrow")
-      - AND ≥60% of the transcript's words appeared in a recent agent
-        utterance
-    Short caller turns pass through even if they happen to match a
-    common word in the agent's speech."""
+    2026-08-09 FIX: previous version used set-overlap ≥ 60%.  That
+    killed real callers who mirror greeting words ("Hello. Is this
+    Smile Dental?" vs the agent's "Hello! You've reached Smile
+    Dental...").  A caller's opener SHARES words with the greeting
+    by design — bag-of-words is the wrong signal.
+
+    Real speaker-echo has: (a) high contiguous word-run match AND
+    (b) not much extra content the agent didn't say.  A caller adding
+    a question of their own breaks the contiguous run OR adds too
+    many novel words."""
     import re as _re
     words = _re.findall(r"[a-z']+", transcript.lower())
     if len(words) < 3:
         return False
-    trans_set = set(words)
     for agent_utt in recent_agent:
-        agent_words = set(_re.findall(r"[a-z']+", agent_utt.lower()))
+        agent_words = _re.findall(r"[a-z']+", agent_utt.lower())
         if not agent_words:
             continue
-        overlap = len(trans_set & agent_words)
-        if overlap / max(len(trans_set), 1) >= 0.6:
+        # Longest contiguous word-run of transcript found inside agent utterance
+        best_run = 0
+        for i in range(len(words)):
+            for j in range(len(agent_words)):
+                k = 0
+                while (i + k < len(words) and j + k < len(agent_words)
+                       and words[i + k] == agent_words[j + k]):
+                    k += 1
+                if k > best_run:
+                    best_run = k
+        # Echo if the run covers ≥ 80% of the transcript AND transcript
+        # has almost no novel words vs the agent utterance.
+        novel = sum(1 for w in words if w not in set(agent_words))
+        if best_run / len(words) >= 0.8 and novel <= 1:
             return True
     return False
 
