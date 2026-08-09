@@ -1789,6 +1789,12 @@ class TwilioActorSession:
                 if not _filler_task.done():
                     _filler_task.cancel()
             reply = (payload.get("reply") or "").strip()
+            # 2026-08-10 FIX: escalated/tool_results were referenced BEFORE
+            # being assigned (UnboundLocalError on live calls when the
+            # cache-hit branch was skipped).  Assign upfront from payload.
+            escalated = bool(payload.get("escalated"))
+            tool_results = payload.get("tool_results") or []
+            speech_act = _infer_speech_act_from_payload(payload)
 
             # 2026-08-08 (task #272): cache-write the (input → reply) mapping
             # so future callers with the same question skip brain entirely.
@@ -1804,9 +1810,6 @@ class TwilioActorSession:
                     )
                 except Exception as _ce:
                     log.debug("response-cache put failed: %s", _ce)
-            escalated = bool(payload.get("escalated"))
-            tool_results = payload.get("tool_results") or []
-            speech_act = _infer_speech_act_from_payload(payload)
 
             if _elog is not None:
                 try:
