@@ -150,14 +150,15 @@ def create_app() -> FastAPI:
             if override:
                 text = override
             else:
-                include_disclosure = getattr(business, "ai_disclosure_enabled", True)
-                include_recording = getattr(business, "recording_notice_enabled", True)
-                parts = [f"Hi, thanks for calling {business.name}."]
+                # 2026-08-10: MUST stay in sync with ReceptionistBrain.greet().
+                # Kept short — 3-sentence greetings burn 7-15 sec of µ-law audio.
+                include_disclosure = getattr(business, "ai_disclosure_enabled", False)
+                include_recording = getattr(business, "recording_notice_enabled", False)
+                parts = [f"Thanks for calling {business.name}, how can I help?"]
                 if include_disclosure:
-                    parts.append("I'm an AI assistant here to help.")
+                    parts.append("I'm an AI assistant.")
                 if include_recording:
-                    parts.append("This call may be recorded for quality.")
-                parts.append("How can I help you today?")
+                    parts.append("This call may be recorded.")
                 text = " ".join(parts)
             # 2026-08-08 FIX v2: greeting_cache uses ONE shared in-memory
             # dict keyed by sha256(text) — so calling warm_greeting_cache

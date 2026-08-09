@@ -94,15 +94,26 @@ class ReceptionistBrain:
         if override:
             greeting = override
         else:
-            include_disclosure = getattr(self.business, "ai_disclosure_enabled", True)
-            include_recording = getattr(self.business, "recording_notice_enabled", True)
+            # 2026-08-10: dropped disclosure + recording from DEFAULT.
+            # Cached greeting was 15 sec of µ-law audio — callers were
+            # waiting through 3 sentences of legal boilerplate before
+            # they could speak.  Two tenants have already asked to
+            # strip it because it makes the agent sound robotic.
+            # Business owners who need it back set:
+            #   business.ai_disclosure_enabled=True
+            #   business.recording_notice_enabled=True
+            # (defaults now False — opt-in, not opt-out).  For legal
+            # coverage, restore per-business via profile flags.
+            include_disclosure = getattr(self.business, "ai_disclosure_enabled", False)
+            include_recording = getattr(self.business, "recording_notice_enabled", False)
 
-            parts = [f"Hi, thanks for calling {self.business.name}."]
+            # 2026-08-10: tighter greeting — old one was 3 sentences +
+            # disclosure = 7 sec of audio.  Now single sentence, ~2 sec.
+            parts = [f"Thanks for calling {self.business.name}, how can I help?"]
             if include_disclosure:
-                parts.append("I'm an AI assistant here to help.")
+                parts.append("I'm an AI assistant.")
             if include_recording:
-                parts.append("This call may be recorded for quality.")
-            parts.append("How can I help you today?")
+                parts.append("This call may be recorded.")
             greeting = " ".join(parts)
 
         state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=greeting))

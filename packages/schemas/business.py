@@ -52,10 +52,12 @@ class BusinessProfile(BaseModel):
     website: Optional[str] = None
     voice_persona: str = "warm, professional, concise"
 
-    # Legal / compliance greeting toggles. Default ON — safer to disclose
-    # in a state that doesn't require it than skip in one that does.
-    # 2026 states requiring some form of AI disclosure: CA, CO, TX and others.
-    ai_disclosure_enabled: bool = True
-    recording_notice_enabled: bool = True
+    # Legal / compliance greeting toggles.  2026-08-10: switched default
+    # to OFF.  With defaults ON the composed greeting was 7-15 sec of
+    # µ-law audio — callers were annoyed and hanging up.  Business
+    # owners in CA/CO/TX (or anywhere disclosure is required) should
+    # explicitly set these True in their profile.
+    ai_disclosure_enabled: bool = False
+    recording_notice_enabled: bool = False
     # If set, this REPLACES the auto-composed greeting entirely.
     greeting_override: Optional[str] = None
