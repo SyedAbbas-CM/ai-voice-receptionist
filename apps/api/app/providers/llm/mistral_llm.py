@@ -40,19 +40,14 @@ class MistralLLM(LLMProvider):
         if not self.api_key:
             raise RuntimeError("MISTRAL_API_KEY not set")
 
-        # 2026-08-09 speed (task #285): mark the system message for
-        # Mistral prefix caching.  Same system prompt hits their cache
-        # → ~200ms faster + 90% cheaper on the cached-prefix portion.
-        # Mistral honors cache_control on the system message.
-        cached_messages = []
-        for i, m in enumerate(messages):
-            if i == 0 and m.get("role") == "system":
-                cached_messages.append({**m, "cache_control": {"type": "ephemeral"}})
-            else:
-                cached_messages.append(m)
+        # 2026-08-09 REVERTED prefix caching: Mistral rejects
+        # cache_control with 422 "extra_forbidden".  Their API doesn't
+        # accept the Anthropic/OpenAI-style cache marker.  Every call
+        # 422'd, cascaded to slower providers, killed live calls.
+        # Kept the MISTRAL_ERR logging that caught this.
         payload: dict = {
             "model": self.model,
-            "messages": cached_messages,
+            "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
