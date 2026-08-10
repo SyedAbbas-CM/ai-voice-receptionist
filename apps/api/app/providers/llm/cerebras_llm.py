@@ -45,7 +45,29 @@ class CerebrasLLM(LLMProvider):
             "max_tokens": max_tokens,
         }
         if tools:
-            payload["tools"] = [t.to_openai_format() for t in tools]
+            # 2026-08-11 (task #313): Cerebras gpt-oss-120b REJECTS tool
+            # calls without strict mode enabled → router silently cascades
+            # to gemma-4-31b (12s cold), adds 1-2s to every turn.  Fix:
+            # inject `strict: True` on every function schema AND force
+            # `additionalProperties: false` on the parameters object.
+            # Confirmed via Cerebras docs: this is the documented way to
+            # get reliable tool_calls out of gpt-oss-120b.
+            fmt_tools = []
+            for t in tools:
+                one = t.to_openai_format()
+                fn = one["function"]
+                fn["strict"] = True
+                params = fn.get("parameters") or {}
+                if isinstance(params, dict):
+                    params.setdefault("additionalProperties", False)
+                    # strict mode requires every property named in `required`
+                    # AND requires `required` to list every property.
+                    props = params.get("properties") or {}
+                    if props:
+                        params["required"] = list(props.keys())
+                    fn["parameters"] = params
+                fmt_tools.append(one)
+            payload["tools"] = fmt_tools
             payload["tool_choice"] = "auto"
 
         if response_schema is not None:

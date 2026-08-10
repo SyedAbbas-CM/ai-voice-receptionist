@@ -156,14 +156,13 @@ _PROVIDER_ALTERNATES: dict[str, list[str]] = {
         "gemini-2.0-flash",               # untested, cheap fallback
         "gemini-2.0-flash-lite",          # untested
     ],
-    # Cerebras: bench-verified BROKEN — both alternates have issues.
-    # gemma-4-31b: 12s cold latency (12x too slow for voice)
-    # zai-glm-4.7: 687ms but Q=0/4 (unusable output)
-    # Kept in list only for emergency fallback; router will hit them
-    # only when all four providers ahead have coooled down.
+    # Cerebras: 2026-08-11 (task #313) — gpt-oss-120b now works with
+    # tools once strict mode is enabled (see cerebras_llm.py).  Reordered
+    # so router falls back to gpt-oss-120b FIRST when the env-configured
+    # primary rejects.  gemma-4-31b kept as emergency only (12s cold).
     "cerebras": [
-        "gemma-4-31b",                    # 12077ms cold — AVOID
-        "zai-glm-4.7",                    # 687ms but Q=0/4 — AVOID
+        "gpt-oss-120b",                   # ~500ms w/ strict tools, PRIMARY
+        "gemma-4-31b",                    # 12s cold, emergency only
     ],
     # NVIDIA NIM: 87 chat models — pick the strong general-purpose ones.
     "nvidia": [
