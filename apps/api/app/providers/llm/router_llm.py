@@ -156,14 +156,12 @@ _PROVIDER_ALTERNATES: dict[str, list[str]] = {
         "gemini-2.0-flash",               # untested, cheap fallback
         "gemini-2.0-flash-lite",          # untested
     ],
-    # Cerebras: 2026-08-11 (task #313) — gpt-oss-120b now works with
-    # tools once strict mode is enabled (see cerebras_llm.py).  Reordered
-    # so router falls back to gpt-oss-120b FIRST when the env-configured
-    # primary rejects.  gemma-4-31b kept as emergency only (12s cold).
-    "cerebras": [
-        "gpt-oss-120b",                   # ~500ms w/ strict tools, PRIMARY
-        "gemma-4-31b",                    # 12s cold, emergency only
-    ],
+    # Cerebras: 2026-08-11 — env primary is gpt-oss-120b (works with
+    # strict tools).  NO alternates — Cerebras free-tier rate-limits
+    # ALL models simultaneously, so falling to gemma-4-31b just adds
+    # 1s of dead air chasing a shared quota.  On 429 we cascade to
+    # Mistral instantly instead.
+    "cerebras": [],
     # NVIDIA NIM: 87 chat models — pick the strong general-purpose ones.
     "nvidia": [
         "meta/llama-3.3-70b-instruct",

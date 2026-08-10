@@ -544,14 +544,18 @@ class ReceptionistBrain:
         )
 
     def _refresh_extraction_bg(self, state: CallState) -> None:
-        """2026-08-08: fire-and-forget the extractor.  Previously we awaited
-        it on the reply-return path, which added a full 2nd LLM call
-        (~800-2000ms + retry cascade under rate limits) to every turn's
-        end-to-end latency.  The extracted fields are only used for
-        post-call analytics + summary; the LIVE reply never reads them.
-        Kicking it into the background lets the reply return immediately
-        and the extractor finishes whenever it finishes."""
+        """2026-08-08: fire-and-forget the extractor.  2026-08-11: throttle
+        to every 3rd turn.  Extractor consumes 1 LLM request per turn
+        just for post-call analytics — burns free-tier rate-limit quota
+        that the LIVE reply needs.  Every-3rd-turn keeps the extraction
+        fresh enough for summaries without starving the router.
+        The FINAL turn (call-end) is fired unconditionally by the
+        session_manager so we always have final extraction."""
         import asyncio as _asyncio
+        # Throttle: only every 3rd turn (turn_counter % 3 == 0)
+        turn_count = len([t for t in state.transcript if t.role.value == "user"])
+        if turn_count % 3 != 0:
+            return
         async def _run():
             try:
                 state.extracted = await extract_fields(
