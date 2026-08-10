@@ -271,11 +271,17 @@ class TurnManager:
         speech_final: bool = False,
     ) -> None:
         """Route one STT event through the state machine.  kind ∈
-        {speech_start, speech_end, partial, final}.
+        {speech_start, speech_end, partial, final, eager_end_of_turn,
+        end_of_turn, turn_resumed}.
 
-        `speech_final` (Deepgram) distinguishes VAD-confirmed
-        end-of-utterance from mere endpoint-hit.  Only speech_final
-        promotes to END_OF_TURN; is_final-only fragments get buffered."""
+        `speech_final` (Deepgram Nova-3) distinguishes VAD-confirmed
+        end-of-utterance from mere endpoint-hit.
+
+        2026-08-11 (task #316): eager_end_of_turn / end_of_turn /
+        turn_resumed are emitted natively by Deepgram Flux.  When we
+        get these, we TRUST them and bypass our 400ms confirm window
+        entirely — Flux's model already did the confirmation work.
+        This saves ~400ms per turn on English calls."""
         if kind == "speech_start":
             await self._on_speech_start()
             return
@@ -287,6 +293,38 @@ class TurnManager:
             return
         if kind == "final":
             await self._on_final(text, speech_final=speech_final)
+            return
+        if kind == "eager_end_of_turn":
+            # Flux says caller MIGHT be done.  Fire our EAGER event
+            # immediately — speculative brain will kick off via task
+            # #284 wiring; cancels if turn_resumed follows.
+            log.info("tm: Flux EAGER_END_OF_TURN native text=%r", text[:60])
+            await self._emit(
+                TurnEventKind.EAGER_END_OF_TURN, text=text, is_final=True,
+            )
+            return
+        if kind == "end_of_turn":
+            # Flux says caller IS done.  Bypass confirm window — emit
+            # END_OF_TURN immediately.  This is the ~400ms win.
+            log.info("tm: Flux END_OF_TURN native text=%r", text[:60])
+            # Cancel any pending confirm task from a prior EAGER we may
+            # have emitted (in case Flux fires EAGER→END back to back).
+            if self._state.eager_confirm_task and not self._state.eager_confirm_task.done():
+                self._state.eager_confirm_task.cancel()
+                self._state.eager_confirm_task = None
+            await self._emit(
+                TurnEventKind.END_OF_TURN, text=text, is_final=True,
+            )
+            return
+        if kind == "turn_resumed":
+            # Flux says caller kept talking after EagerEndOfTurn.
+            # Cancel any pending confirm task + emit TURN_RESUMED so
+            # downstream can cancel speculative brain.
+            log.info("tm: Flux TURN_RESUMED native")
+            if self._state.eager_confirm_task and not self._state.eager_confirm_task.done():
+                self._state.eager_confirm_task.cancel()
+                self._state.eager_confirm_task = None
+            await self._emit(TurnEventKind.TURN_RESUMED, text="")
             return
         # stream_failed, unknown — ignore
         return

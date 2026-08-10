@@ -47,8 +47,17 @@ def get_llm() -> LLMProvider:
 def get_stt() -> STTProvider:
     provider = settings.stt_provider.lower()
     if provider == "deepgram":
+        # 2026-08-11 (task #316): opt-in Flux for voice-agent-optimized
+        # native turn events (saves ~400ms/turn on English).  Nova-3
+        # stays default so multilingual tenants keep working.
+        if settings.deepgram_use_flux:
+            from .stt.deepgram_flux_stt import DeepgramFluxSTT
+            return DeepgramFluxSTT()
         from .stt.deepgram_stt import DeepgramSTT
         return DeepgramSTT()
+    if provider == "deepgram_flux":
+        from .stt.deepgram_flux_stt import DeepgramFluxSTT
+        return DeepgramFluxSTT()
     if provider == "openai":
         from .stt.openai_stt import OpenAISTT
         return OpenAISTT()

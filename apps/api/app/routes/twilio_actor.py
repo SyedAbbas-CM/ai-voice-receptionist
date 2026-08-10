@@ -556,6 +556,13 @@ class TwilioActorSession:
             actor.handlers[(EventSource.STT, "speech_start")] = self._on_stt_speech_signal
             actor.handlers[(EventSource.STT, "speech_end")] = self._on_stt_speech_signal
             actor.handlers[(EventSource.STT, "stream_failed")] = self._on_stt_stream_failed
+            # 2026-08-11 (task #316): Deepgram Flux native turn events.
+            # Nova-3 never emits these kinds; Flux does.  Same handler
+            # since turn manager fully absorbs each kind and re-emits
+            # the appropriate CONTROL event.
+            actor.handlers[(EventSource.STT, "eager_end_of_turn")] = self._on_stt_native_turn
+            actor.handlers[(EventSource.STT, "end_of_turn")] = self._on_stt_native_turn
+            actor.handlers[(EventSource.STT, "turn_resumed")] = self._on_stt_native_turn
         if settings.turn_manager_enabled:
             actor.handlers[(EventSource.CONTROL, TurnEventKind.EAGER_END_OF_TURN.value)] = self._on_turn_event
             actor.handlers[(EventSource.CONTROL, TurnEventKind.END_OF_TURN.value)] = self._on_turn_event_end
@@ -1396,6 +1403,19 @@ class TwilioActorSession:
             self._cancel_idle_followup()
         if self._turn_manager is not None:
             await self._turn_manager.on_stt_event(kind)
+        return True
+
+    async def _on_stt_native_turn(self, actor: CallActor, event: CallEvent) -> bool:
+        """2026-08-11 (task #316): Deepgram Flux emits native
+        eager_end_of_turn / end_of_turn / turn_resumed events.  Forward
+        to turn manager which trusts them directly (bypasses our 400ms
+        confirm window → saves ~400ms per turn).  Nova-3 never fires
+        these kinds so this handler is Flux-only in practice."""
+        kind = event.kind
+        text = event.payload.get("text", "")
+        _tel.record_stream_event(self.tenant_id, kind=kind)
+        if self._turn_manager is not None:
+            await self._turn_manager.on_stt_event(kind, text=text)
         return True
 
     async def _on_stt_stream_failed(self, actor: CallActor, event: CallEvent) -> bool:

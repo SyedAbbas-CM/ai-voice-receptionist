@@ -68,8 +68,15 @@ class STTEvent(BaseModel):
       is_final-only should be buffered until speech_final arrives.
     - kind="speech_start" — VAD detected voice; text will be empty.
     - kind="speech_end" — VAD detected end of voice.
+    - kind="eager_end_of_turn" — 2026-08-11 Deepgram Flux only.  Model
+      thinks caller is done but hasn't committed yet — safe to fire
+      speculative brain, cancel if TurnResumed follows.
+    - kind="end_of_turn" — Deepgram Flux only.  Model confirmed the
+      turn is complete.  Bypasses our 400ms confirm window.
+    - kind="turn_resumed" — Deepgram Flux only.  Cancel any speculative
+      brain fired on eager_end_of_turn.
     """
-    kind: str  # partial | final | speech_start | speech_end
+    kind: str  # partial | final | speech_start | speech_end | eager_end_of_turn | end_of_turn | turn_resumed
     text: str = ""
     is_final: bool = False
     speech_final: bool = False   # True when VAD confirmed real end-of-utterance

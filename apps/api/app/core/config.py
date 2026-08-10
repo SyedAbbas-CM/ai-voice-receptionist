@@ -141,6 +141,18 @@ class Settings(BaseSettings):
     # es, fr, de + code-switching (e.g. hi-Latn for Hindi-English mixed).
     # Per-tenant override via business profile.language_code.
     deepgram_language: Optional[str] = "en-US"
+    # 2026-08-11 (task #316): Flux is Deepgram's voice-agent-optimized
+    # model with native EagerEndOfTurn / EndOfTurn events.  Bypasses
+    # our 400ms confirm window → saves ~400ms per turn.  Opt-in via
+    # env: DEEPGRAM_USE_FLUX=true (default false so multilingual tenants
+    # stay on Nova-3).  Only supports en + 10 langs, NOT Urdu.
+    deepgram_use_flux: bool = False
+    # Flux turn-taking tuning.  eot_threshold is model confidence
+    # required to commit an end-of-turn.  Higher = less false-EOTs
+    # (safer but slower), lower = snappier turns (more false-cuts).
+    deepgram_flux_eot_threshold: float = 0.7
+    deepgram_flux_eager_eot_threshold: float = 0.5
+    deepgram_flux_eot_timeout_ms: int = 3000
 
     elevenlabs_api_key: Optional[str] = None
     elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM"
