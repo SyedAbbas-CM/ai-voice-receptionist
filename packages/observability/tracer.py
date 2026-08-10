@@ -236,3 +236,119 @@ def get_tracer() -> Tracer:
 def set_tracer(tracer: Tracer) -> None:
     global _tracer_singleton
     _tracer_singleton = tracer
+
+
+# ── LangChain-project port: async decorator + tri-sink init (2026-08-10) ──
+#
+# Ported from /Users/az/Desktop/LangChain/src/observability/tracer.py.
+# That project runs Phoenix (local UI) + LangSmith (cloud) + Langfuse
+# (self-hosted) in parallel — each sink env-gated so you can turn any of
+# them on/off without touching code.  For voice-AI where every turn is a
+# ~2s critical path this gives us: latency per span, per-call cost, per-
+# provider p95, error taxonomy — all viewable in Phoenix's local UI or
+# shipped to LangSmith/Langfuse for team dashboards.
+
+import functools as _functools
+import os as _os
+from contextlib import asynccontextmanager
+from typing import Callable as _Callable
+
+
+def init_tri_sink_tracing(service_name: str = "voiceops-ai-agent") -> None:
+    """Idempotent per-sink init driven by env vars.  Any combination:
+
+      LANGSMITH_TRACING=true + LANGSMITH_API_KEY=ls_...
+      PHOENIX_ENABLED=true + PHOENIX_COLLECTOR_ENDPOINT=http://localhost:6006
+      LANGFUSE_ENABLED=true + LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY
+
+    Also sets our module singleton to OTelTracer so `get_tracer()` picks
+    up the Phoenix/LangSmith exporter chain automatically.
+
+    Safe to call multiple times."""
+    if _os.getenv("PHOENIX_ENABLED", "").lower() in ("true", "1", "yes"):
+        try:
+            from phoenix.otel import register as _phx_register
+            _phx_register(project_name=service_name, auto_instrument=True)
+            log.info("phoenix tracing enabled (%s)",
+                     _os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "local"))
+        except ImportError:
+            log.warning("PHOENIX_ENABLED set but arize-phoenix not installed")
+
+    if _os.getenv("LANGSMITH_TRACING", "").lower() in ("true", "1", "yes"):
+        try:
+            import langsmith  # noqa: F401 — env-var auto-config
+            log.info("langsmith tracing enabled (project=%s)",
+                     _os.getenv("LANGSMITH_PROJECT", service_name))
+        except ImportError:
+            log.warning("LANGSMITH_TRACING set but langsmith not installed")
+
+    if _os.getenv("LANGFUSE_ENABLED", "").lower() in ("true", "1", "yes"):
+        try:
+            from langfuse import Langfuse  # noqa: F401
+            log.info("langfuse tracing enabled")
+        except ImportError:
+            log.warning("LANGFUSE_ENABLED set but langfuse not installed")
+
+    # If ANY sink is enabled, install OTelTracer.  Otherwise leave the
+    # singleton as-is (usually NoopTracer or whatever main.py wired).
+    any_sink = any(
+        _os.getenv(k, "").lower() in ("true", "1", "yes")
+        for k in ("PHOENIX_ENABLED", "LANGSMITH_TRACING", "LANGFUSE_ENABLED")
+    )
+    if any_sink and not isinstance(_tracer_singleton, OTelTracer):
+        set_tracer(OTelTracer(service_name=service_name))
+
+
+@asynccontextmanager
+async def trace_context(name: str, **attrs):
+    """Async context manager wrapping the current tracer's `span()`.
+    Yields the Span so callers can attach attrs mid-op:
+
+        async with trace_context("rag.retrieve", tenant_id="x") as s:
+            docs = await retriever(query)
+            s.set_attribute("hits", len(docs))
+    """
+    with get_tracer().span(name, **attrs) as s:
+        yield s
+
+
+def atraced(name: Optional[str] = None):
+    """Async function decorator.  Wraps the call in trace_context.
+    Ported from LangChain project — makes it trivial to instrument any
+    async RAG/LLM/TTS call with one line:
+
+        @atraced("rag.retrieve")
+        async def retrieve(...): ...
+    """
+    def deco(fn: _Callable):
+        label = name or fn.__qualname__
+        @_functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            async with trace_context(label):
+                return await fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+
+def span_output(span: Any, output: dict) -> None:
+    """Attach output fields as `output.{k}` span attributes.  Matches
+    OpenInference GenAI conventions Phoenix expects for auto-render."""
+    if span is None:
+        return
+    for k, v in output.items():
+        try:
+            span.set_attribute(f"output.{k}", v)
+        except Exception:
+            pass
+
+
+def flush() -> None:
+    """Force-flush all sinks before process exit.  Call in shutdown hook.
+    Safe if nothing is registered."""
+    try:
+        from opentelemetry import trace as _otel_trace
+        provider = _otel_trace.get_tracer_provider()
+        if hasattr(provider, "force_flush"):
+            provider.force_flush(timeout_millis=5000)
+    except Exception:
+        pass

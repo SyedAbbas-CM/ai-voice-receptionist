@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     deepgram_api_key: Optional[str] = None
     deepgram_model: Optional[str] = "nova-3"
     deepgram_tts_voice: Optional[str] = "aura-asteria-en"
+    # 2026-08-10: STT language (BCP-47).  Nova-3 supports en, nl, ur, hi,
+    # es, fr, de + code-switching (e.g. hi-Latn for Hindi-English mixed).
+    # Per-tenant override via business profile.language_code.
+    deepgram_language: Optional[str] = "en-US"
 
     elevenlabs_api_key: Optional[str] = None
     elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM"

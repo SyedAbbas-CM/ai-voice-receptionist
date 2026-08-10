@@ -49,9 +49,15 @@ class DeepgramSTT(STTProvider):
     _WS_URL = "wss://api.deepgram.com/v1/listen"
     _HTTP_URL = "https://api.deepgram.com/v1/listen"
 
-    def __init__(self) -> None:
+    def __init__(self, language: Optional[str] = None) -> None:
         self.api_key = settings.deepgram_api_key
         self.model = settings.deepgram_model or "nova-3"
+        # 2026-08-10: per-language STT.  Nova-3 supports en, nl, hi, ur,
+        # es, fr, de, pt, ja, ko + many more and code-switching between
+        # them.  Business profile picks the language for the tenant;
+        # defaults to en-US.  When switching Nova-3 → Flux, this same
+        # constructor param carries over unchanged.
+        self.language = (language or settings.deepgram_language or "en-US").strip()
 
     async def transcribe(self, audio_bytes: bytes, sample_rate: int = 16000, mime: str = "audio/wav") -> str:
         if not self.api_key:
@@ -60,7 +66,7 @@ class DeepgramSTT(STTProvider):
             "model": self.model,
             "smart_format": "true",
             "punctuate": "true",
-            "language": "en-US",
+            "language": self.language,
         }
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
@@ -129,7 +135,7 @@ class DeepgramSTT(STTProvider):
             # seen a speech_final in 1s of continuous audio, force one."
             ("utterance_end_ms", "1000"),
             ("vad_events", "true"),
-            ("language", "en-US"),
+            ("language", self.language),
         ]
         # S13-B: keyterm boosting for dental / medical vocabulary.
         # Nova-3 supports repeated `keyterm` params — kills mishearings
