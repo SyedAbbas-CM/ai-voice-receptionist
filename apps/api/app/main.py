@@ -266,23 +266,35 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _warm_llm_router() -> None:
-        """2026-08-08: pre-warm the LLM router's HTTP clients + do a
-        3-token echo to hot the TLS session on the primary provider.
-        Kills first-call TCP + TLS + Mistral first-byte lag (~1-2s)
-        on turn 1 of every call.  Per docs/rnd-2026-08/51-latency-deep-dive.md."""
+        """2026-08-08: pre-warm the LLM router's HTTP clients + TLS session.
+        2026-08-11: also send a WITH-TOOLS call so the router's
+        capability-aware routing picks the SAME provider+model that
+        real brain calls will use.  Previously we warmed with tools=None
+        which selected a different (smaller) model on some providers;
+        the first real call still had to cold-start the primary tools
+        model.  Now the first real call hits an already-warm socket AND
+        model.  Uses one dummy tool so the shape matches production."""
         try:
             from app.providers.llm.router_llm import RouterLLM
+            from packages.schemas import ToolDefinition
             router = RouterLLM()
-            # Hot the primary provider only — one cheap call.
+            dummy_tools = [ToolDefinition(
+                name="check_hours",
+                description="Check business hours.",
+                parameters={"type": "object", "properties": {}, "required": []},
+            )]
+            # Match production call shape: tools=list, messages incl. system+user.
             resp = await router.complete(
                 messages=[
-                    {"role": "system", "content": "Reply with only the word ok."},
+                    {"role": "system", "content": "You are a helper. Reply 'ok'."},
                     {"role": "user", "content": "hi"},
                 ],
+                tools=dummy_tools,
                 temperature=0.0,
                 max_tokens=5,
+                site="brain.warmup",
             )
-            print(f"[startup] llm router warmed: primary served, reply={resp.text[:20]!r}")
+            print(f"[startup] llm router warmed (with tools): reply={resp.text[:20]!r}")
         except Exception as e:
             print(f"[startup] llm router warmup skipped: {e}")
 
