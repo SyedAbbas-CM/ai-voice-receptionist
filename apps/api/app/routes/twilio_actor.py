@@ -1594,9 +1594,27 @@ class TwilioActorSession:
     async def _flush_pending_turn_after_window(self) -> None:
         """Sleep FRAGMENT_MERGE_WINDOW_MS, then commit the pending turn
         to the brain.  Cancelled + re-armed each time a new END_OF_TURN
-        arrives inside the window."""
+        arrives inside the window.
+
+        2026-08-11: dynamic window.  When the LAST agent utterance asked
+        the caller for STRUCTURED DATA (name, phone, number, address),
+        callers naturally pause mid-answer to remember digits or spell
+        their name.  400ms cuts them off; use 2000ms so we can splice
+        "my name is Abbas" + "and my number is" + "0330-..." into one
+        commit.  Observed on trace CA7eb96fd where the agent's phone
+        request got 3 separate turn commits over 5 sec.
+        """
+        window_ms = self._FRAGMENT_MERGE_WINDOW_MS
+        last_agent = (self._recent_agent_utterances[-1] if self._recent_agent_utterances else "").lower()
+        if any(kw in last_agent for kw in (
+            "phone number", "10-digit", "ten-digit", "ten digit",
+            "your name", "full name", "your number", "callback",
+            "spell", "address", "email",
+        )):
+            window_ms = 2000
+            log.debug("fragment merge window widened to %dms (structured-data ask)", window_ms)
         try:
-            await asyncio.sleep(self._FRAGMENT_MERGE_WINDOW_MS / 1000.0)
+            await asyncio.sleep(window_ms / 1000.0)
         except asyncio.CancelledError:
             # Another fragment arrived — the new task will handle it.
             return

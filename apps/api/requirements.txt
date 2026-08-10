@@ -3,7 +3,7 @@ uvicorn[standard]>=0.30
 pydantic>=2.7
 pydantic-settings>=2.4
 sqlalchemy>=2.0
-httpx>=0.27
+httpx[http2]>=0.27
 python-multipart>=0.0.9
 
 # Optional — uncomment what you actually use

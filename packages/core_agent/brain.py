@@ -312,16 +312,52 @@ class ReceptionistBrain:
                         site="brain.reply",
                     )
                 except Exception as e:
-                    # LLM crashed — most common cause is a Groq 400 when the
-                    # 8B fallback model botches tool-call syntax (emits
-                    # `<function=name>{args}` XML instead of the required
-                    # JSON tool_calls array). Return a polite fallback reply
-                    # so the caller isn't left staring at a spinner.
+                    # LLM crashed — most common causes:
+                    #   1. Groq 400 when 8B fallback botches tool_call syntax
+                    #      (emits `<function=name>{args}` XML instead of JSON)
+                    #   2. Provider timeout / rate-limit chain exhausted
+                    #   3. Router returned no working provider
+                    # 2026-08-11 (task #311): capture rich failure context to
+                    # the durable call_event_log so post-mortems don't rely
+                    # on /tmp/uvicorn.log (which rotates + loses events).
                     _span.set_attribute("error", f"{e.__class__.__name__}: {str(e)[:200]}")
                     import logging as _logging
-                    _logging.getLogger(__name__).warning(
-                        "LLM.complete raised %s — returning fallback reply", e
+                    import traceback as _tb
+                    _log = _logging.getLogger(__name__)
+                    _log.error(
+                        "LLM.complete raised %s: %s (session=%s, n_messages=%d, n_tools=%d)",
+                        e.__class__.__name__, e,
+                        state.session_id, len(messages), len(self.tools or []),
+                        exc_info=True,
                     )
+                    # Persist to durable event log so we can post-mortem
+                    # weeks later even if uvicorn.log is long gone.
+                    try:
+                        from packages.observability.call_event_log import (
+                            get_call_event_log, CallEvent as _CE,
+                            EventSourceKind as _SK,
+                        )
+                        _elog = get_call_event_log()
+                        if _elog is not None:
+                            _elog.write(_CE(
+                                call_id=state.session_id or "?",
+                                tenant_id=getattr(state, "tenant_id", "default"),
+                                source=_SK.ERROR,
+                                kind="llm_exception",
+                                payload={
+                                    "exc_class": e.__class__.__name__,
+                                    "exc_message": str(e)[:500],
+                                    "traceback": _tb.format_exc()[:2000],
+                                    "n_messages": len(messages),
+                                    "n_tools": len(self.tools or []),
+                                    "site": "brain.reply",
+                                    "provider": getattr(self.llm, "name", "?"),
+                                    "model": getattr(self.llm, "model", "?"),
+                                },
+                                error_category="llm_provider",
+                            ))
+                    except Exception as _log_e:
+                        _log.debug("failed to record llm_exception event: %s", _log_e)
                     fallback_text = (
                         "Sorry, I had a moment there. Could you say that again?"
                     )
