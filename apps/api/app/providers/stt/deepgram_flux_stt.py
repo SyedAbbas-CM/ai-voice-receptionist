@@ -87,11 +87,13 @@ class DeepgramFluxSTT(STTProvider):
                 "Deepgram Flux streaming needs `pip install websockets`."
             ) from e
 
+        # 2026-08-11: Flux REJECTS `channels` param (unlike Nova-3 which
+        # requires it).  Handshake bench in /tmp/test_flux_handshake.py
+        # confirmed: every other param works, `channels=1` returns HTTP 400.
         params: list[tuple[str, str]] = [
             ("model", self.model),
             ("encoding", encoding),
             ("sample_rate", str(sample_rate)),
-            ("channels", "1"),
             # Turn-taking tuning.  eot_threshold gates how confident the
             # model needs to be that the caller is done.  0.7 is the
             # documented default; can drop for snappier turns (more
