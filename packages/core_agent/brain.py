@@ -26,6 +26,57 @@ if TYPE_CHECKING:
 ToolHandler = Callable[[ToolCall], Awaitable[ToolResult]]
 
 
+# 2026-08-11 (task #310): reply-side sanity check for fake booking
+# confirmations.  We match on the LLM's WORDS (what the caller will
+# actually hear), not the internal state.  If any of these phrases fire
+# but no book_appointment tool call succeeded this turn, the reply is
+# lying and we rewrite it.
+import re as _re_book
+
+_FAKE_BOOKING_PATTERNS = tuple(
+    _re_book.compile(pat, _re_book.IGNORECASE)
+    for pat in (
+        r"\byou'?re all set\b",
+        r"\byou'?re booked\b",
+        r"\byou'?re confirmed\b",
+        r"\bi'?ve booked\b",
+        r"\bi'?ve got you (down|booked|scheduled) for\b",
+        r"\b(?:appointment|booking) (?:is )?(?:booked|confirmed|locked in|set)\b",
+        r"\blocked in\b",
+        r"\bsee you\s+(?:then|on|at|next|this|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        r"\ball set for your\b",
+    )
+)
+
+_BOOKING_TOOLS = frozenset({"book_appointment", "book_reservation", "book_viewing"})
+
+
+def _reply_lies_about_booking(reply_text: str, tool_results: list[dict]) -> bool:
+    """Return True if the reply text claims a booking was made but no
+    successful booking-tool result exists in this turn's payload."""
+    if not reply_text:
+        return False
+    matched_pat = False
+    for pat in _FAKE_BOOKING_PATTERNS:
+        if pat.search(reply_text):
+            matched_pat = True
+            break
+    if not matched_pat:
+        return False
+    # Any booking tool succeeded this turn?  Success = present in the
+    # payload AND error is None/falsy AND result isn't a blocked/error dict.
+    for tr in tool_results:
+        if tr.get("name") not in _BOOKING_TOOLS:
+            continue
+        if tr.get("error"):
+            continue
+        result = tr.get("result")
+        if isinstance(result, dict) and (result.get("blocked") or result.get("error")):
+            continue
+        return False  # a good booking receipt exists — reply is truthful
+    return True  # reply claims booking but no successful tool call
+
+
 class BrainTurnResult(BaseModel):
     reply: str
     state: CallState
@@ -298,6 +349,28 @@ class ReceptionistBrain:
                 # tool-name leakage, and expand common abbreviations. Belt-and-
                 # suspenders for prompt rules the LLM sometimes ignores.
                 reply_text = sanitize_for_speech(response.text)
+
+                # 2026-08-11 (task #310): post-reply sanity check for fake
+                # booking confirmations.  Hassan trace CA156d550a showed
+                # the LLM saying "You're all set for your new patient exam
+                # on May twelfth" WITHOUT ever calling book_appointment.
+                # Booking confirmations without a tool receipt are lies to
+                # the caller and create phantom-booking risk in the DB.
+                # Rewrite the reply to a "still need more info" line instead.
+                if _reply_lies_about_booking(reply_text, tool_results_payload):
+                    import logging as _bk_log
+                    _bk_log.getLogger(__name__).warning(
+                        "brain: BLOCKING fake booking confirmation; rewriting reply. "
+                        "original=%r tool_results=%s",
+                        reply_text[:200],
+                        [tr.get("name") for tr in tool_results_payload],
+                    )
+                    reply_text = (
+                        "Hold on, I don't have everything I need yet to book that. "
+                        "Can you give me your full name, a full ten-digit phone number, "
+                        "and the day and time you want?"
+                    )
+
                 state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=reply_text))
                 self._refresh_extraction_bg(state)
                 return BrainTurnResult(
