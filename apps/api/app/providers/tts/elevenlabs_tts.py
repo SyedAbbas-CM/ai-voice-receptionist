@@ -25,6 +25,14 @@ _ELEVEN_FORMATS = {
 class ElevenLabsTTS(TTSProvider):
     name = "elevenlabs"
 
+    # 2026-08-11 speed fix: shared persistent HTTP/2 client per (provider,
+    # format).  From Pakistan we were paying ~500ms TLS handshake on
+    # every /stream request because each call opened a fresh
+    # httpx.AsyncClient.  With keep-alive + HTTP/2 multiplexing the
+    # second turn onward reuses the same TLS session.  Class-level
+    # dict keyed by output_format so ulaw + mp3 wrappers don't share.
+    _shared_clients: dict[str, httpx.AsyncClient] = {}
+
     def __init__(self, output_format: str = "mp3_44100_128") -> None:
         self.api_key = settings.elevenlabs_api_key
         self.default_voice = settings.elevenlabs_voice_id or "21m00Tcm4TlvDq8ikWAM"
@@ -36,6 +44,24 @@ class ElevenLabsTTS(TTSProvider):
             )
         self.output_format = output_format
         self._eleven_fmt, self.mime = _ELEVEN_FORMATS[output_format]
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return the shared HTTP/2 keep-alive client for this format.
+        Lazily created on first use, reused for every subsequent call."""
+        key = self.output_format
+        cli = ElevenLabsTTS._shared_clients.get(key)
+        if cli is None or cli.is_closed:
+            cli = httpx.AsyncClient(
+                http2=True,
+                timeout=httpx.Timeout(60.0, connect=5.0),
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                    keepalive_expiry=300.0,
+                ),
+            )
+            ElevenLabsTTS._shared_clients[key] = cli
+        return cli
 
     async def synthesize(self, text: str, voice: Optional[str] = None) -> tuple[bytes, str]:
         if not self.api_key:
@@ -50,14 +76,14 @@ class ElevenLabsTTS(TTSProvider):
             "model_id": self.model,
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                url,
-                headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            return resp.content, self.mime
+        client = self._get_client()
+        resp = await client.post(
+            url,
+            headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.content, self.mime
 
     async def stream_synthesize(self, text: str, voice: Optional[str] = None):
         """2026-08-09 speed sprint: yield audio chunks as ElevenLabs streams
@@ -82,16 +108,16 @@ class ElevenLabsTTS(TTSProvider):
             "model_id": self.model,
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            async with client.stream(
-                "POST", url,
-                headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
-                json=payload,
-            ) as resp:
-                resp.raise_for_status()
-                async for chunk in resp.aiter_bytes(chunk_size=1600):
-                    if chunk:
-                        yield chunk, self.mime
+        client = self._get_client()
+        async with client.stream(
+            "POST", url,
+            headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
+            json=payload,
+        ) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.aiter_bytes(chunk_size=1600):
+                if chunk:
+                    yield chunk, self.mime
 
     async def synthesize_from_plan(
         self, plan, voice: Optional[str] = None,
@@ -125,11 +151,11 @@ class ElevenLabsTTS(TTSProvider):
         # Fill model if the compiler produced a mismatched one (compilers
         # default to eleven_turbo_v2_5; provider default may differ per tenant).
         payload.setdefault("model_id", self.model)
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                url,
-                headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            return resp.content, mime
+        client = self._get_client()
+        resp = await client.post(
+            url,
+            headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.content, mime
