@@ -229,18 +229,38 @@ def create_app() -> FastAPI:
         try:
             from app.providers import get_tts
             from packages.tts_cache import warm_common_utterances, TTSCacheWrapper
+            from packages.tts_cache.warmup import DEFAULT_BACKCHANNELS
+            from packages.voice.filler import DEFAULT_FILLERS
+            # 2026-08-10 FIX: filler pool + speech-act cache both need
+            # entries in the ULAW format the phone path reads.  Old code
+            # only warmed the browser (mp3) TTS wrapper — filler cache
+            # MISSed on every real phone call, degrading to silent, so
+            # callers heard no reassurance during 1-4s brain latency.
+            # Now warms both wrappers with backchannels + fillers.
+            phrases = list(dict.fromkeys(list(DEFAULT_BACKCHANNELS) + list(DEFAULT_FILLERS)))
+            wrappers = []
             tts = get_tts()
-            if not isinstance(tts, TTSCacheWrapper):
-                print("[startup] tts_cache warmup skipped (provider not wrapped)")
+            if isinstance(tts, TTSCacheWrapper):
+                wrappers.append(("browser", tts))
+            try:
+                from app.routes.twilio import _get_telephony_tts
+                phone_tts = _get_telephony_tts()
+                if isinstance(phone_tts, TTSCacheWrapper):
+                    wrappers.append(("phone", phone_tts))
+            except Exception as e:
+                print(f"[startup] tts_cache: phone wrapper unavailable ({e})")
+            if not wrappers:
+                print("[startup] tts_cache warmup skipped (no wrapped providers)")
                 return
-            results = await warm_common_utterances(tts)
-            warmed = sum(1 for v in results.values() if v == "warmed")
-            cached = sum(1 for v in results.values() if v == "cached")
-            errors = sum(1 for v in results.values() if v.startswith("error"))
-            print(
-                f"[startup] tts_cache warmup: {cached} already cached, "
-                f"{warmed} newly warmed, {errors} errors"
-            )
+            for label, wrapper in wrappers:
+                results = await warm_common_utterances(wrapper, phrases=phrases)
+                warmed = sum(1 for v in results.values() if v == "warmed")
+                cached = sum(1 for v in results.values() if v == "cached")
+                errors = sum(1 for v in results.values() if v.startswith("error"))
+                print(
+                    f"[startup] tts_cache warmup ({label}): "
+                    f"{cached} cached, {warmed} newly warmed, {errors} errors"
+                )
         except Exception as e:
             print(f"[startup] tts_cache warmup skipped: {e}")
 
