@@ -118,6 +118,34 @@ def _infer_speech_act_from_payload(payload: dict) -> str:
 log = logging.getLogger(__name__)
 
 
+def _text_matches_for_speculative(speculative: str, confirmed: str) -> bool:
+    """2026-08-10 (task #284): return True if the confirmed END_OF_TURN
+    text is a safe match for a speculative EAGER_END_OF_TURN we already
+    fired.  A fragment-merge or trailing punctuation is fine.  Adding
+    a whole new clause is not.
+
+    Rule: the confirmed text must contain the speculative text as a
+    prefix, AND any extra content is short (<= 3 words).  Deepgram
+    typically appends 1-2 word fragments during the confirm window
+    (\"and one more thing\", trailing punctuation).  If more arrives
+    we treat as a real change and cancel the speculative reply."""
+    import re as _re
+    def _norm(s: str) -> str:
+        return _re.sub(r"[^a-z0-9 ]+", " ", s.lower()).strip()
+    a = _norm(speculative)
+    b = _norm(confirmed)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if b.startswith(a):
+        extra = b[len(a):].strip().split()
+        return len(extra) <= 3
+    if a.startswith(b):  # confirmed is shorter — Deepgram revised down
+        return True
+    return False
+
+
 def _looks_like_agent_echo(transcript: str, recent_agent: list[str]) -> bool:
     """Return True only if the transcript is a near-exact CONTIGUOUS
     subsequence of a recent agent utterance — i.e. Deepgram literally
@@ -324,6 +352,12 @@ class TwilioActorSession:
         # speaker.  Only reject finals that overlap significantly with
         # something the agent JUST said.
         self._recent_agent_utterances: list[str] = []
+
+        # 2026-08-10 (task #284): speculative dispatch state.  Set when
+        # EAGER_END_OF_TURN fires; cleared on TURN_RESUMED (cancel) or
+        # END_OF_TURN (short-circuit, task keeps running).
+        self._speculative_task: Optional[asyncio.Task] = None
+        self._speculative_text: Optional[str] = None
 
         # Fragment-merge window: Deepgram sometimes emits two speech_final
         # events within ~500ms when the caller pauses mid-sentence.
@@ -1379,10 +1413,55 @@ class TwilioActorSession:
         return True
 
     async def _on_turn_event(self, actor: CallActor, event: CallEvent) -> bool:
-        """Generic no-op handler for turn events that are informational
-        (EAGER_END_OF_TURN, TURN_RESUMED).  Metric bump + log; the
-        actual action fires from END_OF_TURN / INTERRUPTION / etc."""
+        """Handler for EAGER_END_OF_TURN, TURN_RESUMED, and FALSE_INTERRUPTION.
+
+        2026-08-10 (task #284): speculative dispatch on EAGER_END_OF_TURN.
+        Fire the brain the moment turn manager thinks the caller is done,
+        WITHOUT waiting for the 400ms confirm.  If TURN_RESUMED fires
+        (caller keeps talking), cancel the speculative task.  If
+        END_OF_TURN confirms, we already have the reply in flight —
+        _on_turn_event_end awaits it instead of firing a new one.
+
+        Net saving: ~400ms of brain time on every real turn.  User
+        specifically called out this moment: "it responded to me as
+        i was talking that felt really damn good."
+        """
         _tel.record_turn_event(self.tenant_id, kind=event.kind)
+
+        if event.kind == TurnEventKind.EAGER_END_OF_TURN.value:
+            text = (event.payload.get("text") or "").strip()
+            if not text or len(text.split()) < 2:
+                return True
+            # Only speculate if we're not already speaking / thinking.
+            if actor.state not in (CallState.LISTENING,):
+                return True
+            # Don't stack — a prior speculative task means we haven't
+            # cleaned up yet; skip this one.
+            if getattr(self, "_speculative_task", None) and \
+                    not self._speculative_task.done():
+                return True
+            speculative_turn = actor.turn_generation
+            log.info("speculative brain firing call=%s gen=%d text=%r",
+                     self.call_id, speculative_turn, text[:80])
+            self._speculative_text = text
+            self._speculative_task = asyncio.create_task(
+                self._run_brain_from_text(text, speculative_turn),
+                name=f"speculative-{self.call_id}-{speculative_turn}",
+            )
+            return True
+
+        if event.kind == TurnEventKind.TURN_RESUMED.value:
+            # Caller kept talking — cancel any in-flight speculative
+            # brain (the text we sped up on is stale).
+            spec = getattr(self, "_speculative_task", None)
+            if spec is not None and not spec.done():
+                log.info("speculative brain cancelled (TURN_RESUMED) call=%s",
+                         self.call_id)
+                spec.cancel()
+            self._speculative_task = None
+            self._speculative_text = None
+            return True
+
         return True
 
     # Fragment-merge tuning (2026-08-05):
@@ -1601,6 +1680,32 @@ class TwilioActorSession:
         # continuation-merged rather than starting a competing turn.
         self._last_committed_transcript = text
         self._last_final_monotonic = time.monotonic()
+
+        # 2026-08-10 (task #284): speculative dispatch short-circuit.
+        # If we already fired a speculative brain on EAGER_END_OF_TURN
+        # AND the confirmed text matches (or is a trivial prefix/suffix
+        # extension), the reply is already in flight.  Its brain_completed
+        # event will land on this same turn_generation.  Do NOT bump the
+        # turn (that would cancel our own in-flight task) and do NOT
+        # spawn a second brain.
+        spec_task = getattr(self, "_speculative_task", None)
+        spec_text = getattr(self, "_speculative_text", None) or ""
+        if spec_task is not None and not spec_task.done() and spec_text:
+            if _text_matches_for_speculative(spec_text, text):
+                log.info("speculative HIT call=%s: text=%r spec=%r",
+                         self.call_id, text[:60], spec_text[:60])
+                # Clear the speculative markers; the task itself will
+                # emit brain_completed as usual.
+                self._speculative_task = None
+                self._speculative_text = None
+                return True
+            # Text drifted — cancel speculative and fall through to
+            # normal fire.
+            log.info("speculative MISS call=%s: cancelling, text=%r spec=%r",
+                     self.call_id, text[:60], spec_text[:60])
+            spec_task.cancel()
+            self._speculative_task = None
+            self._speculative_text = None
 
         await actor.bump_turn(reason="end-of-turn")
         self._open_turn_span(actor.turn_generation)
