@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     cerebras_api_key: Optional[str] = None
     cerebras_model: Optional[str] = "llama-3.3-70b"
 
+    # Fireworks AI — added 2026-08-11 (task #320).  600 RPM free tier
+    # (20x Groq), $1 signup credit, then PAYG.  Kills rate-limit hell.
+    # Supports tool calling.  OpenAI-compatible API.  Model IDs like
+    # `llama-v3p3-70b-instruct` (auto-prefixed to `accounts/fireworks/models/`).
+    fireworks_api_key: Optional[str] = None
+    fireworks_model: Optional[str] = "llama-v3p3-70b-instruct"
+
     # Mistral La Plateforme — added 2026-08-04.  8 working models
     # (mistral-large-latest, mistral-small-latest, ministral-3b/8b,
     # codestral, pixtral, open-mistral-nemo).  EU-hosted.

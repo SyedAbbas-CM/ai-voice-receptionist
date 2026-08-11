@@ -81,6 +81,10 @@ def _mk_provider(name: str, model: Optional[str] = None) -> Optional[LLMProvider
         if name == "cerebras" and settings.cerebras_api_key:
             from .cerebras_llm import CerebrasLLM
             return CerebrasLLM(model=model) if model else CerebrasLLM()
+        # 2026-08-11 (task #320): Fireworks — 600 RPM free tier (20x Groq)
+        if name == "fireworks" and getattr(settings, "fireworks_api_key", None):
+            from .fireworks_llm import FireworksLLM
+            return FireworksLLM(model=model) if model else FireworksLLM()
         if name == "mistral" and getattr(settings, "mistral_api_key", None):
             from .mistral_llm import MistralLLM
             return MistralLLM(model=model) if model else MistralLLM()
