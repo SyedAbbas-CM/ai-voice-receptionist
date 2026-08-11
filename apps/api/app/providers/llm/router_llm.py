@@ -120,15 +120,11 @@ def _mk_provider(name: str, model: Optional[str] = None) -> Optional[LLMProvider
 _PROVIDER_ALTERNATES: dict[str, list[str]] = {
     # Groq: bench-verified order.  llama-3.1-8b-instant (547ms, Q=4/4)
     # beats gpt-oss-20b (566ms, Q=1/4) on both speed AND intelligence.
-    "groq": [
-        "llama-3.1-8b-instant",           # 547ms, Q=4/4 — TOP.  Dies 2026-08-16.
-        "llama-3.3-70b-versatile",        # 590ms, Q=4/4.  Dies 2026-08-16.
-        "openai/gpt-oss-120b",            # 490ms, Q=2/4 — post-Aug-16 primary
-        "openai/gpt-oss-20b",             # 566ms, Q=1/4
-        "qwen/qwen3.6-27b",               # 559ms, Q=1/4
-        "allam-2-7b",                     # 108ms, Q=4/4 but NO tools.  Router
-                                          # skips when tools=[...] attached.
-    ],
+    # 2026-08-11: alternates=[] on tools calls.  Groq free-tier
+    # rate-limits ALL models under one shared bucket — cascading
+    # through 6 models on a 429 wastes ~2 sec chasing quota that
+    # doesn't exist.  On 429 we drop to next provider (Cerebras).
+    "groq": [],
     # Mistral: bench-verified order.  magistral-small tops on latency
     # (569ms, Q=4/4) — surprisingly beats mistral-medium.
     "mistral": [
