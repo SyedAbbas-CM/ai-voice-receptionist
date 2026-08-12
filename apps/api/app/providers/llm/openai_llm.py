@@ -105,3 +105,76 @@ class OpenAILLM(LLMProvider):
             finish_reason=choice.get("finish_reason", "stop"),
             raw=data,
         )
+
+    async def stream_complete(
+        self,
+        messages: list[dict],
+        temperature: float = 0.3,
+        max_tokens: int = 1024,
+    ):
+        """Task #283: token-level SSE streaming for the FINAL plain-text
+        reply.  Yields (delta_text, is_final) tuples.
+
+        No tools / no response_schema — the caller (brain.handle_user_turn)
+        only reaches this path after the tool loop already resolved with
+        no tool_calls.  Uses the same gpt-5/o-series parameter quirks as
+        complete() (max_completion_tokens + default temperature)."""
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY not set")
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+        }
+        _is_new_family = (
+            self.model.startswith("gpt-5")
+            or self.model.startswith("o1")
+            or self.model.startswith("o3")
+            or self.model.startswith("o4")
+        )
+        _needs_default_temp = (
+            self.model.startswith("o1")
+            or self.model.startswith("o3")
+            or self.model.startswith("o4")
+            or self.model == "gpt-5"
+            or self.model.startswith("gpt-5-mini")
+            or self.model.startswith("gpt-5-nano")
+            or self.model.startswith("gpt-5-pro")
+            or self.model.startswith("gpt-5.6-luna")
+        )
+        if not _needs_default_temp:
+            payload["temperature"] = temperature
+        if _is_new_family:
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream(
+                "POST", f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                json=payload,
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        yield "", True
+                        return
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    text = delta.get("content") or ""
+                    if text:
+                        yield text, False
