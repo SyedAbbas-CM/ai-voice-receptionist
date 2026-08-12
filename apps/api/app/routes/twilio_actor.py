@@ -1127,6 +1127,37 @@ class TwilioActorSession:
                 span.mark("tts_request")
             tts = _get_telephony_tts()
 
+            # 2026-08-12 (task #321): TTS cache-hit shortcut.  Before we
+            # even hit the network, check if this exact text is already
+            # cached on disk in the right format.  Greeting + fillers +
+            # common replies live here.  Hit = ~2ms disk read, MISS =
+            # falls through to network.  Fixes the 4.8s "greeting cache
+            # bypass" bug (trace CAcd97dff9): cached bytes existed but
+            # actor called stream_synthesize anyway.
+            try:
+                from packages.tts_cache.cache import get_shared_cache, _hash_key
+                voice = getattr(tts, "default_voice", "default")
+                fmt = getattr(tts, "output_format", "ulaw_8000")
+                provider = getattr(tts, "name", "tts")
+                # TTSCacheWrapper wraps the real provider; walk one level in
+                if hasattr(tts, "_inner"):
+                    voice = getattr(tts._inner, "default_voice", voice)
+                    fmt = getattr(tts._inner, "output_format", fmt)
+                    provider = getattr(tts._inner, "name", provider)
+                key = _hash_key(voice, text, fmt, provider)
+                hit = await get_shared_cache().get(key)
+                if hit is not None:
+                    audio_bytes, mime = hit
+                    log.info("TTS cache-hit shortcut: %d bytes for %r",
+                             len(audio_bytes), text[:60])
+                    if span is not None:
+                        span.mark("tts_first_byte")
+                        self._close_turn_span()
+                    await self._send_audio_frames(audio_bytes, mime)
+                    return
+            except Exception as _e:
+                log.debug("TTS cache-hit shortcut skipped: %s", _e)
+
             # 2026-08-09 SPEED SPRINT (task #281): use streaming TTS when
             # the provider supports it AND we're on the Twilio path (µ-law
             # is chunk-safe).  First audio chunk arrives ~150-200ms after
