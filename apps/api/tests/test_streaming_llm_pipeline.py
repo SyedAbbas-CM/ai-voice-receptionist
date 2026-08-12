@@ -39,3 +39,31 @@ def test_sentence_buffer_handles_question_and_exclaim():
     buf = SentenceBuffer(min_first_chars=5)
     out = buf.push("Are you sure? Yes! And no.")
     assert out == ["Are you sure?", "Yes!", "And no."]
+
+
+# ── Task 2: LLMProvider.stream_complete ──────────────────────────────
+
+import asyncio
+import pytest
+from app.providers.base import LLMProvider
+from app.providers.llm.mistral_llm import MistralLLM
+
+
+class _DummyLLM(LLMProvider):
+    name = "dummy"
+
+    async def complete(self, messages, tools=None, temperature=0.3,
+                       max_tokens=1024, response_schema=None):
+        raise NotImplementedError
+
+
+def test_llm_base_stream_complete_raises_by_default():
+    llm = _DummyLLM()
+    agen = llm.stream_complete([{"role": "user", "content": "hi"}])
+    with pytest.raises(NotImplementedError):
+        asyncio.get_event_loop().run_until_complete(agen.__anext__())
+
+
+def test_mistral_still_has_stream_complete():
+    # Regression guard — task 283 depends on this method's existence
+    assert hasattr(MistralLLM, "stream_complete")

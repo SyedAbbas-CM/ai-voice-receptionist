@@ -54,6 +54,26 @@ class LLMProvider(ABC):
         response = await self.complete(messages, tools, temperature)
         yield response.text
 
+    async def stream_complete(
+        self,
+        messages: list[dict],
+        temperature: float = 0.3,
+        max_tokens: int = 1024,
+    ):
+        """Optional token-level streaming for the FINAL post-tool-loop
+        reply. Yields (delta_text: str, is_final: bool) tuples.
+
+        Providers opt in by overriding. The default raises so callers
+        can hasattr-check AND still handle a router LLM whose current
+        pick doesn't support it. No tools / no response_schema — this
+        path is ONLY for the final plain-text reply after the tool loop
+        has resolved.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not support token-level streaming",
+        )
+        yield  # pragma: no cover — makes this an async generator
+
 
 class STTEvent(BaseModel):
     """Streaming STT emits a sequence of these.
