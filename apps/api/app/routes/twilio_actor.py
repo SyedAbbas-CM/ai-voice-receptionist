@@ -66,6 +66,7 @@ from packages.voice.vpl.validator import validate_vpl_and_repair
 from packages.voice.vpl.compilers import compile_elevenlabs
 from packages.core_agent.planners import PerformancePlanner
 from packages.core_agent.planners.semantic import _infer_speech_act
+from packages.core_agent.streaming import SentenceBuffer
 
 
 def _apply_mulaw_gain(mulaw: bytes, gain_db: float) -> bytes:
@@ -892,6 +893,59 @@ class TwilioActorSession:
                      self.call_id, turn_gen)
         return True
 
+    def _streaming_llm_eligible(self, brain) -> bool:
+        """Task #283: gate the streaming LLM→TTS path.
+
+        Off unless the flag is on AND the resolved provider has
+        stream_complete AND we're on the phone leg AND VPL is off.
+        Tool-call turns are auto-fallen-through inside brain.handle_user_turn
+        (streaming only fires on the terminal no-tools branch)."""
+        if not settings.streaming_llm_to_tts:
+            return False
+        if settings.two_planner_enabled:
+            return False
+        if self.stream_sid.startswith("browser_"):
+            return False
+        if not hasattr(brain.llm, "stream_complete"):
+            return False
+        return True
+
+    async def _pump_sentence_queue(
+        self, queue: "asyncio.Queue", gen: int,
+    ) -> None:
+        """Consumer: takes sentences off the queue and pipes each into
+        _stream_tts_incremental sequentially. Stops when it sees None.
+        Runs as a background task spawned from _run_brain_streaming."""
+        from app.routes.twilio import _get_telephony_tts
+        from packages.voice.speech_sanitizer import sanitize_for_speech
+        tts = _get_telephony_tts()
+        span = self._current_turn_span
+        first = True
+        while True:
+            sentence = await queue.get()
+            if sentence is None:
+                break
+            if gen != self.speech_generation:
+                log.info(
+                    "TTS_SENTENCE_DROPPED_STALE call=%s stale_gen=%d cur_gen=%d",
+                    self.call_id, gen, self.speech_generation,
+                )
+                continue
+            try:
+                clean = sanitize_for_speech(sentence)
+                if not clean.strip():
+                    continue
+                log.info(
+                    "TTS_SENTENCE_QUEUED call=%s gen=%d first=%s text=%r",
+                    self.call_id, gen, first, clean[:80],
+                )
+                await self._stream_tts_incremental(tts, clean, gen, span if first else None)
+                first = False
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.exception("TTS_SENTENCE_FAILED: %s", e)
+
     async def _run_brain(self, mulaw: bytes, turn_gen: int) -> None:
         from app.routes.twilio import _mulaw_frames_to_wav
         span = self._current_turn_span
@@ -921,6 +975,11 @@ class TwilioActorSession:
             else:
                 state, brain = handle
 
+            # Task #283: streaming LLM→TTS branch when eligible.
+            if self._streaming_llm_eligible(brain):
+                await self._run_brain_streaming(state, brain, transcript, turn_gen, span)
+                return
+
             payload = await session_manager.run_user_turn(state, brain, transcript)
             if span is not None:
                 span.mark("llm_first_token")
@@ -937,6 +996,80 @@ class TwilioActorSession:
             raise
         except Exception as e:
             log.exception("actor _run_brain failed: %s", e)
+
+    async def _run_brain_streaming(
+        self, state, brain, transcript: str, turn_gen: int, span,
+    ) -> None:
+        """Task #283: streaming LLM→TTS path.
+
+        Callback pushes tokens into a SentenceBuffer. Each complete
+        sentence goes onto a queue that a background pumper feeds into
+        _stream_tts_incremental in order. When brain finishes:
+          - If the returned reply diverges from what we streamed (fake-
+            booking guard rewrote it), interrupt in-flight audio and
+            speak the safe replacement.
+          - Otherwise flush any residual tokens as a final sentence.
+        """
+        buf = SentenceBuffer(min_first_chars=20)
+        queue: asyncio.Queue = asyncio.Queue()
+        pumper_task = asyncio.create_task(
+            self._pump_sentence_queue(queue, turn_gen),
+            name=f"tts-pump-{self.call_id}-g{turn_gen}",
+        )
+        first_delta = True
+
+        async def on_delta(delta: str):
+            nonlocal first_delta
+            if first_delta and span is not None:
+                span.mark("llm_first_token")
+                first_delta = False
+            for sentence in buf.push(delta):
+                await queue.put(sentence)
+
+        try:
+            payload = await session_manager.run_user_turn(
+                state, brain, transcript, on_delta=on_delta,
+            )
+            self._current_speech_act = _infer_speech_act_from_payload(payload)
+
+            # Flush residual (text after the last sentence-ender)
+            residual = buf.flush()
+            if residual:
+                await queue.put(residual)
+
+            # Signal end-of-stream to the pumper
+            await queue.put(None)
+            await pumper_task
+
+            # If the brain replaced the reply (fake-booking guard),
+            # payload["reply"] won't match buf.full_text. Interrupt
+            # what we sent + speak the replacement. NOTE: if buf.full_text
+            # is empty (streaming path fell through to batch inside brain),
+            # payload["reply"] holds the real reply and we speak it now.
+            planned = (payload.get("reply") or "").strip()
+            streamed = buf.full_text.strip()
+            if planned and planned != streamed:
+                if not streamed:
+                    # Streaming never happened (batch fallback inside brain).
+                    log.info(
+                        "STREAM_BATCH_FALLBACK call=%s gen=%d — speaking batch reply",
+                        self.call_id, turn_gen,
+                    )
+                    await self._speak(planned)
+                else:
+                    log.warning(
+                        "STREAM_REPLY_REPLACED call=%s gen=%d spoken=%r planned=%r",
+                        self.call_id, turn_gen,
+                        streamed[:100], planned[:100],
+                    )
+                    await self._send_twilio_clear()
+                    await self._speak(planned)
+        except asyncio.CancelledError:
+            pumper_task.cancel()
+            raise
+        except Exception as e:
+            log.exception("_run_brain_streaming failed: %s", e)
+            pumper_task.cancel()
 
     async def _on_barge_candidate(
         self, actor: CallActor, event: CallEvent,
@@ -2428,6 +2561,21 @@ class TwilioActorSession:
                 )
             else:
                 state, brain = handle
+
+            # Task #283: streaming LLM→TTS branch when eligible.
+            if self._streaming_llm_eligible(brain):
+                await self._run_brain_streaming(state, brain, transcript, turn_gen, span)
+                if _elog is not None:
+                    try:
+                        _elog.write(_CE(
+                            call_id=self.session_id, tenant_id=self.tenant_id,
+                            source=_SK.LLM, kind="reply",
+                            payload={"reply": "<streamed>", "streaming": True},
+                            turn_generation=turn_gen,
+                        ))
+                    except Exception:
+                        pass
+                return
 
             payload = await session_manager.run_user_turn(state, brain, transcript)
             if span is not None:
