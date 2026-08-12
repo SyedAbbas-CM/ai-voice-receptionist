@@ -198,7 +198,15 @@ class ReceptionistBrain:
             self._kernel = None
         return self._kernel
 
-    async def handle_user_turn(self, state: CallState, user_text: str) -> BrainTurnResult:
+    async def handle_user_turn(
+        self, state: CallState, user_text: str,
+        on_delta=None,
+    ) -> BrainTurnResult:
+        """on_delta: optional Callable[[str], Awaitable[None]] fired for
+        each streamed token from the FINAL (no-tool-calls) LLM reply.
+        The caller (twilio_actor) uses this to pipe tokens into TTS as
+        sentence boundaries land. When on_delta is None or the resolved
+        provider lacks stream_complete, we use the batch path."""
         state.add_turn(TranscriptTurn(role=TurnRole.USER, text=user_text))
 
         # K3+K4 (2026-08-05): classify turn intent BEFORE brain fires so
@@ -381,10 +389,67 @@ class ReceptionistBrain:
                     pass
 
             if not response.tool_calls:
+                # ── Task #283: streaming path ──────────────────────────
+                # If caller provided on_delta AND provider streams,
+                # re-fire as a streaming call and pump deltas out.
+                # We already know no tools will be emitted (this branch),
+                # so a second call is safe.  Doubles token cost on
+                # no-tool turns; the user accepted this trade for safety.
+                streaming_full_text: Optional[str] = None
+                if on_delta is not None and hasattr(self.llm, "stream_complete"):
+                    try:
+                        import time as _t
+                        _t0 = _t.perf_counter()
+                        import logging as _sl
+                        _slog = _sl.getLogger(__name__)
+                        _slog.info(
+                            "LLM_STREAM_START session=%s provider=%s model=%s",
+                            state.session_id,
+                            getattr(self.llm, "name", "?"),
+                            getattr(self.llm, "model", "?"),
+                        )
+                        _chunks: list[str] = []
+                        _first_token_ms: Optional[float] = None
+                        async for _delta, _is_final in self.llm.stream_complete(
+                            messages, temperature=0.3, max_tokens=300,
+                        ):
+                            if _delta:
+                                if _first_token_ms is None:
+                                    _first_token_ms = (_t.perf_counter() - _t0) * 1000
+                                    _slog.info(
+                                        "LLM_FIRST_TOKEN session=%s first_token_ms=%.0f",
+                                        state.session_id, _first_token_ms,
+                                    )
+                                _chunks.append(_delta)
+                                try:
+                                    await on_delta(_delta)
+                                except Exception as _cbe:
+                                    _slog.warning("on_delta raised: %s", _cbe)
+                            if _is_final:
+                                break
+                        streaming_full_text = "".join(_chunks)
+                        _slog.info(
+                            "LLM_STREAM_DONE session=%s chars=%d total_ms=%.0f",
+                            state.session_id, len(streaming_full_text),
+                            (_t.perf_counter() - _t0) * 1000,
+                        )
+                    except NotImplementedError:
+                        # Router picked a non-streaming provider — fall
+                        # through to batch response.text
+                        streaming_full_text = None
+                    except Exception as _se:
+                        import logging as _sl
+                        _sl.getLogger(__name__).warning(
+                            "streaming path failed, falling back to batch: %s",
+                            _se,
+                        )
+                        streaming_full_text = None
+
+                raw_text = streaming_full_text if streaming_full_text else response.text
                 # Sanitize before speaking: strip (parentheses), <angle brackets>,
                 # tool-name leakage, and expand common abbreviations. Belt-and-
                 # suspenders for prompt rules the LLM sometimes ignores.
-                reply_text = sanitize_for_speech(response.text)
+                reply_text = sanitize_for_speech(raw_text)
 
                 # 2026-08-11 (task #310): post-reply sanity check for fake
                 # booking confirmations.  Hassan trace CA156d550a showed
