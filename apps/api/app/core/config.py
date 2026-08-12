@@ -329,6 +329,23 @@ class Settings(BaseSettings):
     streaming_stt_enabled: bool = False
     turn_manager_enabled: bool = False
 
+    # 2026-08-13 (N1 — architectural networking): open a persistent
+    # WebSocket to OpenAI's Responses API for each call, warm it with
+    # the exact tenant system prompt + tool schemas during greeting
+    # playback, and route real LLM turns over the already-live socket.
+    # From PK this eliminates the per-turn HTTPS handshake + the ~500-
+    # 800ms cost of re-transmitting the full prompt prefix.
+    # OFF by default; toggle on for A/B against the HTTP router.
+    openai_persistent_ws_enabled: bool = False
+    openai_persistent_ws_url: str = "wss://api.openai.com/v1/responses"
+    # Model used on the persistent socket.  Falls back to openai_model
+    # when unset.  Kept separate so we can A/B a lower-latency model on
+    # the WS lane without disturbing the HTTP router.
+    openai_persistent_ws_model: str = ""
+    # OpenAI Fast tier — lower + more predictable latency for eligible
+    # models.  Ignored if the model doesn't support it.
+    openai_persistent_ws_service_tier: str = ""
+
     # 2026-08-13 (P0-startup): silence-pump fed fake µ-law into Deepgram
     # while the greeting was playing.  Root-cause fix (non-blocking
     # greeting playback) means real caller media flows continuously

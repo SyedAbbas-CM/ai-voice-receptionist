@@ -348,6 +348,13 @@ class TwilioActorSession:
         # receive loop isn't stalling.
         self._twilio_media_debug_count: int = 0
         self._twilio_stream_wall_start: Optional[float] = None
+        # 2026-08-13 (N1 task #344): persistent OpenAI Responses WS —
+        # opened during session.start() when enabled, warmed concurrently
+        # with the greeting playback, closed on stop().  Only used for
+        # the terminal no-tools LLM turn; tool-call turns keep routing
+        # through the HTTP router until we've soaked the WS path.
+        self._openai_ws = None  # OpenAIResponsesWS | None
+        self._openai_ws_warm_task: Optional[asyncio.Task] = None
         # Rolling text buffer captured from streaming STT so END_OF_TURN
         # has a final utterance to feed the brain.
         self._streaming_utterance_text = ""
@@ -565,6 +572,36 @@ class TwilioActorSession:
         # doesn't help at all because the "slow" is internal reasoning
         # tokens, not prefix processing.  Kept the code path clean.
 
+        # 2026-08-13 (N1 task #344): open persistent OpenAI Responses WS
+        # + warm it in the background so warmup happens concurrent with
+        # the greeting playback below.  On any WS failure we log + drop
+        # to None; _run_brain_streaming falls back to the HTTP router.
+        if settings.openai_persistent_ws_enabled:
+            try:
+                from app.providers.llm.openai_responses_ws import OpenAIResponsesWS
+                self._openai_ws = OpenAIResponsesWS(call_id=self.call_id)
+
+                async def _open_and_warm():
+                    try:
+                        ok = await self._openai_ws.open(
+                            system_prompt=brain.system_prompt,
+                            tools=brain.tools,
+                            warm=True,
+                        )
+                        if not ok:
+                            self._openai_ws = None
+                    except Exception:
+                        log.exception("openai persistent WS open/warm failed")
+                        self._openai_ws = None
+
+                self._openai_ws_warm_task = asyncio.create_task(
+                    _open_and_warm(),
+                    name=f"openai-ws-warm-{self.call_id}",
+                )
+            except Exception:
+                log.exception("openai persistent WS init failed")
+                self._openai_ws = None
+
         greeting = await session_manager.run_greeting(state, brain)
         self.actor.transition(CallState.GREETING)
         # 2026-08-13 (P0-startup fix): fire-and-forget the greeting so
@@ -609,6 +646,17 @@ class TwilioActorSession:
         if self._greeting_task is not None and not self._greeting_task.done():
             self._greeting_task.cancel()
             self._greeting_task = None
+        # 2026-08-13 (N1 task #344): tear down persistent OpenAI WS.
+        # Warmup task may still be in flight — cancel then close.
+        if self._openai_ws_warm_task is not None and not self._openai_ws_warm_task.done():
+            self._openai_ws_warm_task.cancel()
+            self._openai_ws_warm_task = None
+        if self._openai_ws is not None:
+            try:
+                await self._openai_ws.close()
+            except Exception:
+                log.debug("openai persistent WS close failed", exc_info=True)
+            self._openai_ws = None
         # Sprint 10 STREAMING WIRING: shut the STT bridge cleanly
         if self._stt_bridge is not None:
             try:
@@ -952,6 +1000,81 @@ class TwilioActorSession:
                      self.call_id, turn_gen)
         return True
 
+    async def _try_openai_ws_turn(
+        self,
+        transcript: str,
+        on_delta,
+        buf,
+    ) -> Optional[dict]:
+        """2026-08-13 (N1 task #344): try the persistent OpenAI WS.
+
+        Returns a payload dict (same shape as brain.handle_user_turn)
+        on success — caller uses it directly and skips the HTTP router.
+        Returns None on any of:
+          - WS disabled / not open / warmup not done yet
+          - WS raised any error mid-turn
+          - WS returned tool_calls (we don't run the tool loop over WS
+            yet; hand it back to the brain's HTTP tool-loop for safety)
+
+        Buf is the same SentenceBuffer the HTTP path uses — deltas from
+        WS feed into on_delta which pushes into buf/queue, so the TTS
+        pipeline downstream is unchanged.
+        """
+        if not settings.openai_persistent_ws_enabled:
+            return None
+        if self._openai_ws is None or not self._openai_ws.is_open():
+            return None
+        # If warmup is still in flight the socket exists but state
+        # prep hasn't finished — using it here still works, we just
+        # miss the prewarm benefit.  Fine to proceed.
+        try:
+            reply_text, tool_calls = await self._openai_ws.stream_reply(
+                user_text=transcript, on_delta=on_delta,
+            )
+        except Exception:
+            log.exception(
+                "OPENAI_PERSISTENT_WS_TURN_FAIL call=%s — falling back to HTTP",
+                self.call_id,
+            )
+            # 2026-08-13 (verified via live probe): validation errors
+            # (type="error") leave the socket LOOKING open but the next
+            # send hangs then closes.  Safer to tear down + retire the
+            # WS for the rest of this call than to try to reuse it.
+            if self._openai_ws is not None:
+                try:
+                    await self._openai_ws.close()
+                except Exception:
+                    pass
+                self._openai_ws = None
+            return None
+        if tool_calls:
+            log.info(
+                "OPENAI_PERSISTENT_WS_TOOL_CALLS call=%s n=%d — deferring to HTTP tool loop",
+                self.call_id, len(tool_calls),
+            )
+            # Discard the tokens we streamed (they were partial pre-tool)
+            # and let the brain's HTTP path re-run this turn with the
+            # full tool loop.
+            buf._buf = ""  # type: ignore[attr-defined]
+            buf._full = ""  # type: ignore[attr-defined]
+            buf._first_emitted = False  # type: ignore[attr-defined]
+            # Also clear any sentences already queued for the pumper.
+            # The safest way is to signal cancel + return None so the
+            # HTTP path runs its own on_delta from scratch.
+            return None
+        log.info(
+            "OPENAI_PERSISTENT_WS_TURN_OK call=%s chars=%d",
+            self.call_id, len(reply_text),
+        )
+        # Shape matches what brain.handle_user_turn returns for a no-
+        # tool reply so the downstream code (fake-booking guard check,
+        # response-cache put, planned-vs-streamed diff) all still work.
+        return {
+            "reply": reply_text,
+            "tool_results": [],
+            "escalated": False,
+        }
+
     def _should_dedupe_dispatch(self, transcript: str) -> bool:
         """2026-08-13: transcript-superset dedupe.
 
@@ -1279,9 +1402,21 @@ class TwilioActorSession:
                 await queue.put(sentence)
 
         try:
-            payload = await session_manager.run_user_turn(
-                state, brain, transcript, on_delta=on_delta,
+            # 2026-08-13 (N1 task #344): if the persistent OpenAI WS is
+            # live for this call, route the terminal LLM turn over it
+            # instead of the HTTP router.  Fall back to HTTP on any
+            # error or if the WS returned tool_calls (we don't run the
+            # tool loop over WS yet — safer to hand tool turns to the
+            # existing brain path).
+            ws_payload = await self._try_openai_ws_turn(
+                transcript, on_delta, buf,
             )
+            if ws_payload is not None:
+                payload = ws_payload
+            else:
+                payload = await session_manager.run_user_turn(
+                    state, brain, transcript, on_delta=on_delta,
+                )
             self._current_speech_act = _infer_speech_act_from_payload(payload)
 
             # Flush residual (text after the last sentence-ender)
