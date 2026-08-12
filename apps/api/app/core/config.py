@@ -33,7 +33,10 @@ class Settings(BaseSettings):
     tts_provider: str = "browser"
 
     openai_api_key: Optional[str] = None
-    openai_model: Optional[str] = "gpt-4o-mini"
+    # 2026-08-12 bench: gpt-5.4-nano wins (958ms median from PK, 3/3 tools,
+    # ~$0.10/M in cheaper than gpt-4o-mini).  gpt-5.4-mini alt for smarter
+    # turns.  See /tmp/bench_openai.py for full comparison.
+    openai_model: Optional[str] = "gpt-5.4-nano"
     openai_stt_model: Optional[str] = "whisper-1"
     openai_tts_model: Optional[str] = "gpt-4o-mini-tts"
     openai_tts_voice: Optional[str] = "alloy"
@@ -59,7 +62,10 @@ class Settings(BaseSettings):
     # Supports tool calling.  OpenAI-compatible API.  Model IDs like
     # `llama-v3p3-70b-instruct` (auto-prefixed to `accounts/fireworks/models/`).
     fireworks_api_key: Optional[str] = None
-    fireworks_model: Optional[str] = "llama-v3p3-70b-instruct"
+    # 2026-08-11: Fireworks retired llama models — using gpt-oss-120b
+    # (same model Cerebras serves; supports tools, ~500ms).  kimi-k2p6
+    # is a good alternate.  minimax-m3 for cheaper.
+    fireworks_model: Optional[str] = "gpt-oss-120b"
 
     # Mistral La Plateforme — added 2026-08-04.  8 working models
     # (mistral-large-latest, mistral-small-latest, ministral-3b/8b,

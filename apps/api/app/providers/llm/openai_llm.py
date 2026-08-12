@@ -41,12 +41,37 @@ class OpenAILLM(LLMProvider):
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY not set")
 
+        # 2026-08-12: GPT-5.x + o-series use max_completion_tokens; older
+        # GPT-4.x still requires max_tokens.  Also GPT-5 base / GPT-5.6 luna /
+        # o-series require temperature=1 (they reject anything else with 400).
+        # GPT-5.4-mini/nano DO allow custom temperature.
         payload: dict = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        _is_new_family = (
+            self.model.startswith("gpt-5")
+            or self.model.startswith("o1")
+            or self.model.startswith("o3")
+            or self.model.startswith("o4")
+        )
+        # Models that REQUIRE temperature=1 (reject anything else with 400)
+        _needs_default_temp = (
+            self.model.startswith("o1")
+            or self.model.startswith("o3")
+            or self.model.startswith("o4")
+            or self.model == "gpt-5"
+            or self.model.startswith("gpt-5-mini")
+            or self.model.startswith("gpt-5-nano")
+            or self.model.startswith("gpt-5-pro")
+            or self.model.startswith("gpt-5.6-luna")
+        )
+        if not _needs_default_temp:
+            payload["temperature"] = temperature
+        if _is_new_family:
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
         if tools:
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
