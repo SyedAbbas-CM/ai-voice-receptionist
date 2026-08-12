@@ -337,6 +337,19 @@ class TwilioActorSession:
         # and its VAD stays warm.  See docs/rnd-2026-08/53-fast-stt-
         # alternatives.md § "Cold-start hang" for the analysis.
         self._silence_pump_task: Optional[asyncio.Task] = None
+        # 2026-08-13 (M1 task #343): event-loop lag watchdog task.
+        # Sleeps 20ms in a loop; if wake-up drift exceeds threshold we
+        # log a WARN.  Catches the case where create_task(_speak(...))
+        # looks non-blocking but sync work between awaits still stalls
+        # the receiver.
+        self._loop_lag_watchdog_task: Optional[asyncio.Task] = None
+        # 2026-08-13 (M1 task #343): outbound wire-to-ear instrumentation.
+        # send_wall recorded when we ship the "FIRST40_<n>" mark; the
+        # ack on that mark tells us caller actually heard the first
+        # 40ms of this reply.  ack_wall - send_wall = TRUE wire-to-ear
+        # latency for this call, no guessing.
+        self._first40_send_wall: dict[str, float] = {}
+        self._first40_counter: int = 0
         # 2026-08-13 (P0-startup fix): greeting is fired as a background
         # task from session.start() so the WebSocket receive loop can
         # begin consuming inbound caller media immediately.  Tracked so
@@ -347,7 +360,16 @@ class TwilioActorSession:
         # media.timestamp + wall-clock delta printed so we can prove the
         # receive loop isn't stalling.
         self._twilio_media_debug_count: int = 0
-        self._twilio_stream_wall_start: Optional[float] = None
+        # 2026-08-13 (M1 task #343): same-origin skew.  On the FIRST
+        # inbound frame we record BOTH the local wall clock and the
+        # carrier timestamp; every subsequent frame's skew is computed
+        # against those bases.  The previous metric compared local wall
+        # (from first-frame-received) against media.timestamp (from
+        # stream-start on Twilio's side) — two different zero points →
+        # nonsense negative "lag" values.  Cadence skew answers:
+        # "is the receive loop keeping up with the sender in real time?"
+        self._twilio_base_wall: Optional[float] = None
+        self._twilio_base_media_ts: Optional[int] = None
         # 2026-08-13 (N1 task #344): persistent OpenAI Responses WS —
         # opened during session.start() when enabled, warmed concurrently
         # with the greeting playback, closed on stop().  Only used for
@@ -527,6 +549,16 @@ class TwilioActorSession:
                 name=f"silence-pump-{self.call_id}",
             )
 
+        # 2026-08-13 (M1 task #343): event-loop lag watchdog.  Runs for
+        # the life of the call, ~50Hz, negligible CPU.  Emits WARN when
+        # loop drift exceeds 20ms.  If we see EVENT_LOOP_LAG during
+        # greeting or during a real turn, some coroutine is doing sync
+        # work between awaits.
+        self._loop_lag_watchdog_task = asyncio.create_task(
+            self._loop_lag_watchdog(),
+            name=f"loop-lag-{self.call_id}",
+        )
+
         # 2026-08-12 (task #323): fire-and-forget ElevenLabs TLS prewarm.
         # From PK the first TTS request pays ~500ms of TCP+TLS handshake
         # cost.  Kicking a dummy GET while greeting is being prepped
@@ -641,6 +673,10 @@ class TwilioActorSession:
         if self._silence_pump_task is not None and not self._silence_pump_task.done():
             self._silence_pump_task.cancel()
             self._silence_pump_task = None
+        # 2026-08-13 (M1 task #343): stop the event-loop lag watchdog.
+        if self._loop_lag_watchdog_task is not None and not self._loop_lag_watchdog_task.done():
+            self._loop_lag_watchdog_task.cancel()
+            self._loop_lag_watchdog_task = None
         # 2026-08-13 (P0-startup fix): cancel greeting task if caller
         # hung up mid-greeting.
         if self._greeting_task is not None and not self._greeting_task.done():
@@ -758,6 +794,36 @@ class TwilioActorSession:
                      self.call_id, frames_sent)
             return
 
+    async def _loop_lag_watchdog(self) -> None:
+        """2026-08-13 (M1 task #343): event-loop lag watchdog.
+
+        Sleeps 20ms in a loop.  If the actual sleep drifted longer than
+        `threshold_ms` past 20ms, we log a WARN — that means some
+        coroutine ran synchronously (or awaited on blocking code) long
+        enough to stall the event loop, which would ALSO stall the
+        Twilio receive loop that consumes inbound caller media.
+
+        Cheap: ~50 wakes per second, one time.perf_counter() per wake.
+        Cancelled on stop().
+        """
+        import time as _t
+        threshold_ms = 20.0
+        interval = 0.02
+        expected = _t.perf_counter()
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                now = _t.perf_counter()
+                lag_ms = (now - expected - interval) * 1000.0
+                if lag_ms > threshold_ms:
+                    log.warning(
+                        "EVENT_LOOP_LAG call=%s lag_ms=%.1f",
+                        self.call_id, lag_ms,
+                    )
+                expected = now
+        except asyncio.CancelledError:
+            return
+
     # ── inbound events (called by the /twilio/stream loop) ──────────
 
     async def on_media(self, mulaw_frame: bytes) -> None:
@@ -811,6 +877,21 @@ class TwilioActorSession:
 
     async def on_mark_ack(self, mark_id: str) -> None:
         """Twilio's `mark` webhook fired — the mark has been played out."""
+        # 2026-08-13 (M1 task #343): FIRST40 marks tell us true wire-to-
+        # ear latency for THIS reply's first audible byte.
+        # ack_wall - send_wall = time from "we shipped the first 40ms"
+        # to "Twilio confirmed caller has heard it."  Playing the 40ms
+        # itself is 40ms; the remainder is uplink + Twilio playout jitter.
+        if mark_id.startswith("FIRST40_"):
+            send_wall = self._first40_send_wall.pop(mark_id, None)
+            if send_wall is not None:
+                ack_wall = time.monotonic()
+                wire_to_ear_ms = int((ack_wall - send_wall) * 1000)
+                log.info(
+                    "TWILIO_FIRST40_ACK call=%s mark=%s send_to_ack_ms=%d "
+                    "(includes 40ms of actual playback)",
+                    self.call_id, mark_id, wire_to_ear_ms,
+                )
         if self.actor is None:
             return
         await self.actor.emit(CallEvent.new(
@@ -3255,6 +3336,17 @@ class TwilioActorSession:
             batch_duration_s = BATCH_FRAMES * TWILIO_FRAME_MS / 1000.0
             frames_in_batch = 0
             batch_start = time.monotonic()
+            # 2026-08-13 (M1 task #343): the FIRST40 mark goes right
+            # after the first 2 frames (40ms) of audio.  Twilio fires
+            # `mark` when preceding audio has played out, so ack-wall
+            # minus send-wall is the true wire-to-ear latency for THIS
+            # reply.  Sent once per _send_audio_frames call — this is
+            # the natural "start of a reply" boundary the caller cares
+            # about.  See docs/rnd-2026-08/54-chatgpt-audit-response.md
+            # (audit #3): "make cached reply the first 40 ms + mark".
+            first40_sent = False
+            first40_frames_needed = 2  # 2 * 20ms = 40ms
+            first40_mark_id: Optional[str] = None
             for i in range(0, len(mulaw), frame_bytes):
                 chunk = mulaw[i:i + frame_bytes]
                 await self.ws.send_text(json.dumps({
@@ -3263,6 +3355,23 @@ class TwilioActorSession:
                     "media": {"payload": base64.b64encode(chunk).decode("ascii")},
                 }))
                 frames_in_batch += 1
+                # Send the FIRST40 mark after the second frame lands.
+                if (
+                    not first40_sent
+                    and (i // frame_bytes) + 1 >= first40_frames_needed
+                ):
+                    self._first40_counter += 1
+                    first40_mark_id = f"FIRST40_{self._first40_counter}"
+                    self._first40_send_wall[first40_mark_id] = time.monotonic()
+                    try:
+                        await self.ws.send_text(json.dumps({
+                            "event": "mark",
+                            "streamSid": self.stream_sid,
+                            "mark": {"name": first40_mark_id},
+                        }))
+                    except Exception:
+                        log.debug("FIRST40 mark send failed", exc_info=True)
+                    first40_sent = True
                 if frames_in_batch >= BATCH_FRAMES:
                     # Pace to real audio duration.  Uses monotonic wall
                     # clock so drift can't accumulate — if we've been
@@ -3437,39 +3546,61 @@ async def handle_twilio_stream_via_actor(
 
             if kind == "media" and session is not None:
                 mulaw = base64.b64decode(event["media"]["payload"])
-                # 2026-08-13 (P0-startup instrumentation): log first N
-                # media events with Twilio's carrier timestamp + wall-
-                # clock delta to prove the receive loop isn't stalling
-                # behind greeting playback.  Twilio's media.timestamp
-                # is ms since stream start (see
-                # https://www.twilio.com/docs/voice/media-streams/
-                # websocket-messages).  If lag grows above ~50ms during
-                # the greeting, the receive loop is still blocked.
+                # 2026-08-13 (M1 task #343): honest cadence-skew metric.
+                # cadence_skew_ms = local_elapsed - twilio_elapsed
+                # where both elapsed values are measured against the same
+                # frame's arrival (first frame's wall + first frame's
+                # carrier timestamp).  Answers: "is the receive loop
+                # keeping up with the sender in real time?"  A steady
+                # ~0ms skew means we're on the pace; positive skew that
+                # grows means our loop is stalling; negative skew means
+                # Twilio is bursting media faster than real-time (their
+                # buffer is flushing).
+                # Also handler_ms: time inside on_media() — catches sync
+                # work still blocking the receiver post-P0-startup.
                 if session._twilio_media_debug_count < settings.twilio_media_timestamp_debug_frames:
                     import time as _t
-                    now = _t.monotonic()
-                    if session._twilio_stream_wall_start is None:
-                        session._twilio_stream_wall_start = now
-                    wall_ms = int((now - session._twilio_stream_wall_start) * 1000)
                     media = event.get("media", {})
                     try:
                         media_ts = int(media.get("timestamp", -1))
                     except (TypeError, ValueError):
                         media_ts = -1
-                    lag_ms = wall_ms - media_ts if media_ts >= 0 else -1
+                    recv_wall = _t.monotonic()
+                    if session._twilio_base_wall is None and media_ts >= 0:
+                        session._twilio_base_wall = recv_wall
+                        session._twilio_base_media_ts = media_ts
+                    if (
+                        session._twilio_base_wall is not None
+                        and session._twilio_base_media_ts is not None
+                        and media_ts >= 0
+                    ):
+                        local_elapsed_ms = int((recv_wall - session._twilio_base_wall) * 1000)
+                        twilio_elapsed_ms = media_ts - session._twilio_base_media_ts
+                        skew_ms = local_elapsed_ms - twilio_elapsed_ms
+                    else:
+                        local_elapsed_ms = -1
+                        twilio_elapsed_ms = -1
+                        skew_ms = -1
                     session._twilio_media_debug_count += 1
+                    handler_start = _t.perf_counter()
+                    await session.on_media(mulaw)
+                    handler_ms = int((_t.perf_counter() - handler_start) * 1000)
                     log.info(
-                        "TWILIO_MEDIA call=%s n=%d track=%s chunk=%s ts=%dms wall=%dms lag=%dms bytes=%d",
+                        "TWILIO_MEDIA call=%s n=%d track=%s chunk=%s "
+                        "twilio_elapsed=%dms local_elapsed=%dms skew=%dms "
+                        "handler_ms=%d bytes=%d",
                         session.call_id,
                         session._twilio_media_debug_count,
                         media.get("track"),
                         media.get("chunk"),
-                        media_ts,
-                        wall_ms,
-                        lag_ms,
+                        twilio_elapsed_ms,
+                        local_elapsed_ms,
+                        skew_ms,
+                        handler_ms,
                         len(mulaw),
                     )
-                await session.on_media(mulaw)
+                else:
+                    await session.on_media(mulaw)
                 continue
 
             if kind == "mark" and session is not None:
