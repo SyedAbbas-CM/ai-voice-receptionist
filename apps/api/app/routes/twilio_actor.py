@@ -493,6 +493,36 @@ class TwilioActorSession:
                 name=f"silence-pump-{self.call_id}",
             )
 
+        # 2026-08-12 (task #323): fire-and-forget ElevenLabs TLS prewarm.
+        # From PK the first TTS request pays ~500ms of TCP+TLS handshake
+        # cost.  Kicking a dummy GET while greeting is being prepped
+        # means the HTTP/2 client is already hot by the time real audio
+        # requests fly.  Uses the persistent shared client that
+        # elevenlabs_tts.py maintains — one warmed socket, reused.
+        async def _prewarm_elevenlabs():
+            try:
+                from app.routes.twilio import _get_telephony_tts
+                tts = _get_telephony_tts()
+                # Reach the real ElevenLabs adapter through cache wrapper
+                inner = getattr(tts, "_inner", tts)
+                if hasattr(inner, "_get_client"):
+                    client = inner._get_client()
+                    # Cheap HEAD-style GET to warm TLS + connection pool.
+                    api_key = getattr(inner, "api_key", None)
+                    if api_key:
+                        await client.get(
+                            "https://api.elevenlabs.io/v1/models",
+                            headers={"xi-api-key": api_key},
+                            timeout=3.0,
+                        )
+                        log.debug("elevenlabs TLS prewarmed call=%s", self.call_id)
+            except Exception as _e:
+                log.debug("elevenlabs prewarm skipped: %s", _e)
+        asyncio.create_task(
+            _prewarm_elevenlabs(),
+            name=f"11labs-prewarm-{self.call_id}",
+        )
+
         # Kick greeting through the same code path as normal replies so
         # ledger + generation tracking apply from turn 0.
         state, brain = session_manager.start_session_with_id(
