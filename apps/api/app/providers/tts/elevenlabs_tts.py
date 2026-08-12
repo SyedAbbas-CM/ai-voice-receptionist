@@ -176,19 +176,23 @@ class ElevenLabsTTS(TTSProvider):
         try:
             # Init message with voice_settings + start streaming text.
             # Sending text + settings in one message means no extra RTT.
+            # auto_mode=true (in URL) makes ElevenLabs auto-flush on
+            # sentence end and ignores generation_config.chunk_length_schedule.
+            # For string-mode (full-text one-shot) send we omit it entirely.
             init_msg = json.dumps({
                 "text": text + " ",
                 "voice_settings": {
                     "stability": 0.5,
                     "similarity_boost": 0.75,
                 },
-                "generation_config": {
-                    "chunk_length_schedule": [50, 90, 160, 250],
-                },
             })
             t_send = _t.perf_counter()
             await ws.send(init_msg)
-            # Signal end-of-text so ElevenLabs flushes the final audio.
+            # 2026-08-12: EOS is REQUIRED per ElevenLabs docs
+            # (help.elevenlabs.io/hc/en-us/articles/28084868106513).
+            # Without it the server holds the connection open for
+            # inactivity_timeout seconds waiting for more text. My
+            # earlier "fix" to omit it caused a 30s hang.
             await ws.send(json.dumps({"text": ""}))
             first_chunk_ms: Optional[float] = None
             chunks = 0
