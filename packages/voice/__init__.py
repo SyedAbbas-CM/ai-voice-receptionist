@@ -6,6 +6,10 @@ from .greeting_cache import (
     get_cached_greeting, warm_greeting_cache, clear_cache as clear_greeting_cache,
     cache_size as greeting_cache_size,
 )
+from .conversation_control import (
+    match_intent as match_conversation_control_intent,
+    all_canonical_replies as all_conversation_control_replies,
+)
 
 __all__ = [
     "VoiceActivityDetector", "SileroVAD", "RmsVAD", "build_vad",
@@ -14,4 +18,5 @@ __all__ = [
     "split_into_speakable_chunks",
     "get_cached_greeting", "warm_greeting_cache",
     "clear_greeting_cache", "greeting_cache_size",
+    "match_conversation_control_intent", "all_conversation_control_replies",
 ]

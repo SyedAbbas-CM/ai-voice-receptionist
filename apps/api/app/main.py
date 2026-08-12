@@ -197,6 +197,52 @@ def create_app() -> FastAPI:
             print(f"[startup] greeting cache skipped: {e}")
 
     @app.on_event("startup")
+    async def _warm_conversation_control_fastpath() -> None:
+        """2026-08-13 (A1 patch): warm the TTS cache for deterministic
+        conversation-control replies ("Yep, I can hear you...", "Hi
+        there...").  The actor's fastpath speaks these canonical strings
+        via _speak, which hits the TTS disk-cache shortcut — but only if
+        the bytes are already there.  Warm both the browser-format TTS
+        and the µ-law phone singleton the same way the greeting warmup
+        does."""
+        if settings.tts_provider == "qwen3":
+            print("[startup] conv-control fastpath skipped (Qwen3-TTS too slow)")
+            return
+        try:
+            from app.providers import get_tts
+            from packages.voice import (
+                all_conversation_control_replies,
+                warm_greeting_cache,
+            )
+            replies = all_conversation_control_replies()
+            n_browser = 0
+            for text in replies:
+                if await warm_greeting_cache(text, get_tts()):
+                    n_browser += 1
+            n_phone = 0
+            try:
+                from app.routes.twilio import _get_telephony_tts
+                from packages.tts_cache import TTSCacheWrapper
+                from packages.tts_cache.cache import get_shared_cache
+                telephony = _get_telephony_tts()
+                if not isinstance(telephony, TTSCacheWrapper):
+                    telephony = TTSCacheWrapper(telephony, cache=get_shared_cache())
+                    import app.routes.twilio as _tw
+                    _tw._telephony_tts_singleton = telephony
+                for text in replies:
+                    try:
+                        await telephony.synthesize(text)
+                        n_phone += 1
+                    except Exception as _e:
+                        print(f"[startup] conv-control phone warm FAILED for {text!r}: {_e}")
+            except Exception as _e:
+                print(f"[startup] conv-control phone warm skipped: {_e}")
+            print(f"[startup] conv-control fastpath warmed: {n_browser}/{len(replies)} browser, "
+                  f"{n_phone}/{len(replies)} phone")
+        except Exception as e:
+            print(f"[startup] conv-control fastpath skipped: {e}")
+
+    @app.on_event("startup")
     async def _warm_smart_turn() -> None:
         """S13-A: pre-warm the smart-turn ONNX model + prime the
         inference cache.  Cold first-call is ~450ms which was
@@ -275,9 +321,12 @@ def create_app() -> FastAPI:
         model.  Now the first real call hits an already-warm socket AND
         model.  Uses one dummy tool so the shape matches production."""
         try:
-            from app.providers.llm.router_llm import RouterLLM
+            # 2026-08-13 (ChatGPT audit fix): use the SHARED get_llm()
+            # instance, NOT a fresh RouterLLM().  Warming a throwaway
+            # object leaves the real call's HTTP client cold.
+            from app.providers import get_llm
             from packages.schemas import ToolDefinition
-            router = RouterLLM()
+            router = get_llm()
             dummy_tools = [ToolDefinition(
                 name="check_hours",
                 description="Check business hours.",
@@ -291,7 +340,7 @@ def create_app() -> FastAPI:
                 ],
                 tools=dummy_tools,
                 temperature=0.0,
-                max_tokens=5,
+                max_tokens=60,  # reasoning models (gpt-oss-120b) burn tokens on internal thinking; must be > 20 or content=null
                 site="brain.warmup",
             )
             print(f"[startup] llm router warmed (with tools): reply={resp.text[:20]!r}")

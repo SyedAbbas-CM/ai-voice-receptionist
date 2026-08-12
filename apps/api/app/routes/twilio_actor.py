@@ -337,6 +337,17 @@ class TwilioActorSession:
         # and its VAD stays warm.  See docs/rnd-2026-08/53-fast-stt-
         # alternatives.md § "Cold-start hang" for the analysis.
         self._silence_pump_task: Optional[asyncio.Task] = None
+        # 2026-08-13 (P0-startup fix): greeting is fired as a background
+        # task from session.start() so the WebSocket receive loop can
+        # begin consuming inbound caller media immediately.  Tracked so
+        # stop() can cancel on hangup.
+        self._greeting_task: Optional[asyncio.Task] = None
+        # 2026-08-13 (P0-startup fix): rate-limit counter for Twilio
+        # media-event debug logs — the first N frames per call get their
+        # media.timestamp + wall-clock delta printed so we can prove the
+        # receive loop isn't stalling.
+        self._twilio_media_debug_count: int = 0
+        self._twilio_stream_wall_start: Optional[float] = None
         # Rolling text buffer captured from streaming STT so END_OF_TURN
         # has a final utterance to feed the brain.
         self._streaming_utterance_text = ""
@@ -375,6 +386,14 @@ class TwilioActorSession:
         # merged into a re-planned turn instead of racing.
         self._last_committed_transcript: str = ""
         self._last_final_monotonic: float = 0.0
+        # 2026-08-13 (double-brain fix): track the transcript that most
+        # recently dispatched a brain, and whether that brain has already
+        # spoken any audio.  Used by _should_dedupe_dispatch to suppress
+        # the "prefix-then-full-sentence" double-fire pattern from
+        # Deepgram's aggressive endpointing (see stt/deepgram_stt.py:126).
+        self._inflight_dispatch_transcript: str = ""
+        self._inflight_dispatch_monotonic: float = 0.0
+        self._inflight_has_spoken: bool = False
         # K1: hint for the brain about an incomplete-looking turn.
         # Populated by _flush_pending_turn_after_window, consumed by
         # _brain_job.  NEVER goes into the transcript — that broke
@@ -484,11 +503,18 @@ class TwilioActorSession:
                 log.warning("turn manager disabled: %s", e)
                 self._turn_manager = None
 
-        # 2026-08-08: kick off the silence pump so Deepgram sees a
-        # continuous audio stream from t=0.  Cancelled when the real
-        # caller frames start flowing (Twilio media event) or on stop().
-        # See _silence_pump docstring for the root cause.
-        if self._stt_bridge is not None:
+        # 2026-08-13 (P0-startup fix): silence-pump gated OFF by default.
+        # It was created to seed Deepgram's VAD before real caller media
+        # arrived — but the real reason media didn't flow was that
+        # session.start() blocked the WebSocket receive loop on greeting
+        # playback (~2.4s).  Now that greeting is fire-and-forget below,
+        # real caller frames flow into on_media() from t=0 continuously
+        # and the pump becomes redundant duplication that stacked on
+        # top of the queued-burst real audio → confused VAD → wasted
+        # 1.8s on an empty speech_final at turn 1.
+        # Flag lets us bring it back for A/B if the concurrency fix
+        # ever regresses.
+        if settings.silence_pump_enabled and self._stt_bridge is not None:
             self._silence_pump_task = asyncio.create_task(
                 self._silence_pump(),
                 name=f"silence-pump-{self.call_id}",
@@ -529,9 +555,37 @@ class TwilioActorSession:
         state, brain = session_manager.start_session_with_id(
             self.session_id, tenant_id=self.tenant_id,
         )
+
+        # 2026-08-12 UPDATE: LLM prompt-cache prewarm REMOVED.
+        # Research (see /tmp research summary): on 1500-token prompts
+        # OpenAI cache saves only 10-15% TTFT (~200-300ms).  Prewarm
+        # request itself contends for the same HTTP/2 connection as
+        # the real turn.  Net effect: neutral to slightly negative.
+        # If we go back to gpt-5.4-nano (reasoning model), prewarm
+        # doesn't help at all because the "slow" is internal reasoning
+        # tokens, not prefix processing.  Kept the code path clean.
+
         greeting = await session_manager.run_greeting(state, brain)
         self.actor.transition(CallState.GREETING)
-        await self._speak(greeting)
+        # 2026-08-13 (P0-startup fix): fire-and-forget the greeting so
+        # session.start() returns to the WebSocket receive loop BEFORE
+        # the ~2.4s of paced µ-law playback.  Previously we awaited
+        # _speak(greeting) here, blocking the outer loop from calling
+        # ws.receive_text() — which meant real caller media queued in
+        # the WebSocket buffer for the entire greeting.  When the loop
+        # unblocked, ~2.4s of stacked media flushed into Deepgram all
+        # at once.  Combined with silence-pump's fake µ-law that had
+        # been flowing in parallel, DG saw a corrupted VAD startup:
+        # empty speech_final at t=3.6s, wasted 1.8s finding the real
+        # one at t=5.4s, then finally usable transcript at t=6.6s.
+        # That was the 3.7 sec pre-LLM tax on turn 1.
+        # By spawning as a task we return immediately; on_media() sees
+        # real frames continuously from t=0 and feeds DG in real time.
+        # _greeting_task is tracked so stop() can cancel on hangup.
+        self._greeting_task = asyncio.create_task(
+            self._speak(greeting),
+            name=f"greeting-{self.call_id}",
+        )
 
     async def stop(self, reason: str = "hangup") -> None:
         self._close_turn_span()
@@ -550,6 +604,11 @@ class TwilioActorSession:
         if self._silence_pump_task is not None and not self._silence_pump_task.done():
             self._silence_pump_task.cancel()
             self._silence_pump_task = None
+        # 2026-08-13 (P0-startup fix): cancel greeting task if caller
+        # hung up mid-greeting.
+        if self._greeting_task is not None and not self._greeting_task.done():
+            self._greeting_task.cancel()
+            self._greeting_task = None
         # Sprint 10 STREAMING WIRING: shut the STT bridge cleanly
         if self._stt_bridge is not None:
             try:
@@ -893,6 +952,145 @@ class TwilioActorSession:
                      self.call_id, turn_gen)
         return True
 
+    def _should_dedupe_dispatch(self, transcript: str) -> bool:
+        """2026-08-13: transcript-superset dedupe.
+
+        Deepgram sometimes commits speech_final=True on a mid-sentence
+        fragment (150ms endpointing is aggressive), then commits the
+        full sentence 500-2000ms later.  Without this gate the brain
+        fires twice — once for the fragment, once for the full — and
+        the caller hears two replies.
+
+        Rules:
+          1. If the new transcript IS the last dispatched one (bytes-
+             equal after trim) — always dedupe.  Same turn re-committed.
+          2. If the new transcript is a STRICT SUPERSET of the last
+             dispatched one AND the prior brain hasn't spoken audio yet
+             — do NOT dedupe.  Caller can bump_turn/cancel the prior
+             and re-fire with the fuller transcript (normal path).
+          3. If the new transcript is a strict superset AND the prior
+             brain has already spoken — dedupe.  Otherwise we'd stack
+             two replies.  The full sentence just becomes the caller's
+             next turn (a natural follow-up).
+          4. If prior transcript is a prefix of the new one — same as
+             (2)/(3): superset semantics.
+          5. Otherwise (different content) — dispatch normally.
+
+        Only applies within a 4-second window of the last dispatch; older
+        entries can't be "the same turn re-fragmented."
+        """
+        import time
+        now = time.monotonic()
+        prev = (self._inflight_dispatch_transcript or "").strip()
+        gap = now - (self._inflight_dispatch_monotonic or 0.0)
+        if not prev or gap > 4.0:
+            return False
+        cur = (transcript or "").strip()
+        if not cur:
+            return False
+        # Case-insensitive comparison so "hello" and "Hello" collapse.
+        prev_l = prev.lower()
+        cur_l = cur.lower()
+        if prev_l == cur_l:
+            log.info("DEDUPE_DISPATCH call=%s reason=exact-match gap=%.2fs input=%r",
+                     self.call_id, gap, cur[:80])
+            return True
+        # Superset check both directions.
+        if cur_l.startswith(prev_l) or prev_l.startswith(cur_l):
+            if self._inflight_has_spoken:
+                log.info("DEDUPE_DISPATCH call=%s reason=superset-after-speak gap=%.2fs prev=%r cur=%r",
+                         self.call_id, gap, prev[:60], cur[:60])
+                return True
+            # Prior brain still thinking; let it be cancelled + re-fired.
+            log.info("DEDUPE_DISPATCH_ALLOW call=%s reason=superset-prespeak gap=%.2fs prev=%r cur=%r",
+                     self.call_id, gap, prev[:60], cur[:60])
+            return False
+        return False
+
+    def _mark_dispatched(self, transcript: str) -> None:
+        """Record that we're firing brain for this transcript now."""
+        import time
+        self._inflight_dispatch_transcript = transcript
+        self._inflight_dispatch_monotonic = time.monotonic()
+        self._inflight_has_spoken = False
+
+    async def _try_conversation_control_fastpath(
+        self,
+        transcript: str,
+        turn_gen: int,
+    ) -> bool:
+        """2026-08-13 (A1 patch): conversation-control fastpath.
+
+        Deterministic caller intents ("hello?", "can you hear me?",
+        "are you there?") have canonical replies the LLM adds nothing to.
+        This bypass runs BEFORE the response cache (which strips 'hi'/
+        'hello' as fillers and misses these) and BEFORE any LLM dispatch.
+
+        Warmed at boot into the TTS disk cache, so hits are ~2ms disk +
+        wire time.  Turn-1 sub-500ms even on the very first call.
+
+        Returns True if handled.  False → fall through to response cache /
+        LLM path unchanged.
+        """
+        try:
+            from packages.voice import match_conversation_control_intent
+            reply = match_conversation_control_intent(transcript)
+            if reply is None:
+                return False
+            log.info(
+                "CONV_CONTROL_FASTPATH_HIT call=%s input=%r → reply=%r",
+                self.call_id, transcript[:80], reply[:80],
+            )
+            await self._speak(reply)
+            return True
+        except Exception:
+            log.exception("conversation-control fastpath failed")
+            return False
+
+    async def _try_response_cache_fastpath(
+        self,
+        state,
+        transcript: str,
+        turn_gen: int,
+    ) -> bool:
+        """2026-08-13 (ChatGPT audit): response-cache fastpath.
+
+        Common turns ("Hello can you hear me", "what are your hours",
+        "where are you located") are pre-seeded in the response cache
+        keyed by (business_id, tenant_id, normalized_input).  A hit
+        skips the ~2.6s LLM call entirely and goes straight to _speak(),
+        which itself hits the TTS cache for a ~<200ms end-to-end reply.
+
+        Returns True if the turn was served from cache and NO further
+        brain dispatch is needed.  False otherwise (fall through to LLM).
+        """
+        try:
+            from packages.response_cache import get_shared_response_cache
+
+            business_id = (
+                getattr(getattr(state, "business", None), "id", None)
+                or getattr(state, "business_id", None)
+                or "unknown"
+            )
+            hit = get_shared_response_cache().get(
+                business_id,
+                self.tenant_id,
+                transcript,
+            )
+            if hit is None:
+                return False
+
+            log.info(
+                "RESPONSE_CACHE_STREAM_HIT call=%s biz=%s input=%r → reply=%r",
+                self.call_id, business_id,
+                transcript[:80], hit.reply_text[:80],
+            )
+            await self._speak(hit.reply_text)
+            return True
+        except Exception:
+            log.exception("streaming response-cache lookup failed")
+            return False
+
     def _streaming_llm_eligible(self, brain) -> bool:
         """Task #283: gate the streaming LLM→TTS path.
 
@@ -915,9 +1113,16 @@ class TwilioActorSession:
     ) -> None:
         """Consumer: takes sentences off the queue and pipes each into
         _stream_tts_incremental sequentially. Stops when it sees None.
-        Runs as a background task spawned from _run_brain_streaming."""
+        Runs as a background task spawned from _run_brain_streaming.
+
+        2026-08-12 fix: on the FIRST sentence, transition actor state
+        listening → speaking + start_generation on the ledger so barge-in
+        and generation tracking work.  _speak() does this in the non-
+        streaming path; we have to replicate here.  Missing this was the
+        2.4-second gap between TTS_FIRST_BYTE and 'listening → speaking'
+        seen on turn 1 of trace CA9a02ad."""
         from app.routes.twilio import _get_telephony_tts
-        from packages.voice.speech_sanitizer import sanitize_for_speech
+        from packages.core_agent.speech_sanitizer import sanitize_for_speech
         tts = _get_telephony_tts()
         span = self._current_turn_span
         first = True
@@ -925,16 +1130,24 @@ class TwilioActorSession:
             sentence = await queue.get()
             if sentence is None:
                 break
-            if gen != self.speech_generation:
+            cur_gen = self.actor.speech_generation if self.actor is not None else gen
+            if gen != cur_gen:
                 log.info(
                     "TTS_SENTENCE_DROPPED_STALE call=%s stale_gen=%d cur_gen=%d",
-                    self.call_id, gen, self.speech_generation,
+                    self.call_id, gen, cur_gen,
                 )
                 continue
             try:
                 clean = sanitize_for_speech(sentence)
                 if not clean.strip():
                     continue
+                if first and self.actor is not None:
+                    # Mark speaking + open a new speech generation.
+                    self.actor.transition(CallState.SPEAKING)
+                    # 2026-08-13 (double-brain fix): see _speak() note.
+                    self._inflight_has_spoken = True
+                    speech_gen = self.actor.speech_generation
+                    self.actor.ledger.start_generation(speech_gen, clean)
                 log.info(
                     "TTS_SENTENCE_QUEUED call=%s gen=%d first=%s text=%r",
                     self.call_id, gen, first, clean[:80],
@@ -975,6 +1188,32 @@ class TwilioActorSession:
             else:
                 state, brain = handle
 
+            # 2026-08-13 (double-brain fix): dedupe fragment→full re-fires.
+            # If Deepgram already emitted a prefix of this transcript and
+            # we spoke a reply for it, drop this superset — it would just
+            # stack a second reply.
+            if self._should_dedupe_dispatch(transcript):
+                return
+            self._mark_dispatched(transcript)
+
+            # 2026-08-13 (A1 patch): conversation-control fastpath FIRST.
+            # Deterministic intents ("can you hear me", "hello", "are you
+            # there") skip both the LLM and the response cache — canonical
+            # replies are warmed into the TTS disk cache at boot.
+            if await self._try_conversation_control_fastpath(
+                transcript, turn_gen,
+            ):
+                return
+
+            # 2026-08-13 (ChatGPT audit fix): response-cache fastpath.
+            # Streaming path used to bypass the response cache entirely,
+            # forcing "Hello can you hear me" through a 2.6s OpenAI call
+            # every time.  Check cache BEFORE any LLM dispatch.
+            if await self._try_response_cache_fastpath(
+                state, transcript, turn_gen,
+            ):
+                return
+
             # Task #283: streaming LLM→TTS branch when eligible.
             if span is not None:
                 span.mark("brain_start")
@@ -1014,7 +1253,16 @@ class TwilioActorSession:
             speak the safe replacement.
           - Otherwise flush any residual tokens as a final sentence.
         """
-        buf = SentenceBuffer(min_first_chars=20)
+        # 2026-08-13 REV2 (voice-breakup + double-reply fix):
+        # min_first_chars=1 broke merge-tiny-openers — every "Sure!" or
+        # "Yes." fired its own TTS request, and with PK→US 400-1000ms
+        # per RTT the caller heard 3-4 chopped sentences with gaps.
+        # min_first_chars=12 restores the merge for very short openers
+        # ("Sure!" 5 chars → merged into next sentence, no separate RTT)
+        # while still releasing anything ~10+ chars ("One moment." 11
+        # chars → emits immediately).  20 (original) was too conservative
+        # and held even reasonable openers.
+        buf = SentenceBuffer(min_first_chars=12)
         queue: asyncio.Queue = asyncio.Queue()
         pumper_task = asyncio.create_task(
             self._pump_sentence_queue(queue, turn_gen),
@@ -1045,6 +1293,37 @@ class TwilioActorSession:
             await queue.put(None)
             await pumper_task
 
+            # 2026-08-13 (ChatGPT audit fix): populate response cache
+            # from streaming path too, so turn N+1 with the same input
+            # (or the SAME phrase on a future call) hits the fastpath.
+            # Only cache turns with no tool_results (dynamic) and no
+            # rewrite (safe).
+            try:
+                planned_reply = (payload.get("reply") or "").strip()
+                tool_results = payload.get("tool_results") or []
+                if (
+                    planned_reply
+                    and not tool_results
+                    and not payload.get("escalated")
+                ):
+                    from packages.response_cache import get_shared_response_cache
+                    business_id = (
+                        getattr(getattr(state, "business", None), "id", None)
+                        or getattr(state, "business_id", None)
+                        or "unknown"
+                    )
+                    key = get_shared_response_cache().put(
+                        business_id, self.tenant_id,
+                        transcript, planned_reply,
+                    )
+                    if key:
+                        log.info(
+                            "RESPONSE_CACHE_STREAM_PUT call=%s key=%s input=%r",
+                            self.call_id, key[:8], transcript[:60],
+                        )
+            except Exception:
+                log.debug("streaming response-cache put skipped", exc_info=True)
+
             # If the brain replaced the reply (fake-booking guard),
             # payload["reply"] won't match buf.full_text. Interrupt
             # what we sent + speak the replacement. NOTE: if buf.full_text
@@ -1052,15 +1331,24 @@ class TwilioActorSession:
             # payload["reply"] holds the real reply and we speak it now.
             planned = (payload.get("reply") or "").strip()
             streamed = buf.full_text.strip()
-            if planned and planned != streamed:
-                if not streamed:
-                    # Streaming never happened (batch fallback inside brain).
-                    log.info(
-                        "STREAM_BATCH_FALLBACK call=%s gen=%d — speaking batch reply",
-                        self.call_id, turn_gen,
-                    )
-                    await self._speak(planned)
-                else:
+            if not planned:
+                pass  # nothing to compare against
+            elif not streamed:
+                # Streaming never happened (batch fallback inside brain).
+                log.info(
+                    "STREAM_BATCH_FALLBACK call=%s gen=%d — speaking batch reply",
+                    self.call_id, turn_gen,
+                )
+                await self._speak(planned)
+            else:
+                # Normalize both sides through the sanitizer so em-dash /
+                # comma / whitespace / abbreviation-expansion noise doesn't
+                # trigger a false replacement.  Only re-speak when the
+                # canonical text actually diverged (fake-booking guard
+                # rewrite or similar policy step).
+                from packages.core_agent.speech_sanitizer import sanitize_for_speech
+                _norm = lambda s: " ".join(sanitize_for_speech(s).lower().split())
+                if _norm(streamed) != _norm(planned):
                     log.warning(
                         "STREAM_REPLY_REPLACED call=%s gen=%d spoken=%r planned=%r",
                         self.call_id, turn_gen,
@@ -1068,6 +1356,13 @@ class TwilioActorSession:
                     )
                     await self._send_twilio_clear()
                     await self._speak(planned)
+                else:
+                    # Cosmetic-only diff (punctuation, whitespace, casing) —
+                    # do NOT re-speak.  This fixes the "responds twice" bug.
+                    log.debug(
+                        "STREAM_REPLY_MATCH_COSMETIC call=%s gen=%d",
+                        self.call_id, turn_gen,
+                    )
         except asyncio.CancelledError:
             pumper_task.cancel()
             raise
@@ -1256,6 +1551,10 @@ class TwilioActorSession:
             pass
 
         actor.transition(CallState.SPEAKING)
+        # 2026-08-13 (double-brain fix): mark the in-flight dispatch as
+        # having produced audio, so a Deepgram-fragment-then-superset
+        # arriving after this point gets dropped by _should_dedupe_dispatch.
+        self._inflight_has_spoken = True
         gen = actor.speech_generation
         actor.ledger.start_generation(gen, text)
 
@@ -1638,6 +1937,15 @@ class TwilioActorSession:
         text = event.payload.get("text", "")
         if text:
             self._streaming_utterance_text = text
+            # 2026-08-12: first partial → open a new turn span so
+            # TURN_SUMMARY can measure stt→llm→tts per turn.  media_in
+            # is set at the same moment (this is the first evidence
+            # caller audio hit the pipe).
+            if self._current_turn_span is None and self.actor is not None:
+                self._open_turn_span(self.actor.turn_generation)
+            if self._current_turn_span is not None:
+                self._current_turn_span.mark("media_in")
+                self._current_turn_span.mark("stt_first_partial")
         _tel.record_stream_event(self.tenant_id, kind="stt_partial")
         if self._turn_manager is not None:
             await self._turn_manager.on_stt_event("partial", text=text)
@@ -1654,6 +1962,10 @@ class TwilioActorSession:
         speech_final = event.payload.get("speech_final", False)
         if text:
             self._streaming_utterance_text = text
+            # 2026-08-12: mark stt_final on the turn span so TURN_SUMMARY
+            # can compute stt_partial→stt_final and stt_final→brain_start.
+            if self._current_turn_span is not None:
+                self._current_turn_span.mark("stt_final")
             # Caller spoke a real chunk — kill any pending idle prompt/hangup.
             # Cancel only on speech_final so echo/noise fragments don't
             # reset the idle timer between agent responses.
@@ -2566,6 +2878,32 @@ class TwilioActorSession:
             else:
                 state, brain = handle
 
+            # 2026-08-13 (double-brain fix): dedupe fragment→full re-fires.
+            # If Deepgram already emitted a prefix of this transcript and
+            # we spoke a reply for it, drop this superset — it would just
+            # stack a second reply.
+            if self._should_dedupe_dispatch(transcript):
+                return
+            self._mark_dispatched(transcript)
+
+            # 2026-08-13 (A1 patch): conversation-control fastpath FIRST.
+            # Deterministic intents ("can you hear me", "hello", "are you
+            # there") skip both the LLM and the response cache — canonical
+            # replies are warmed into the TTS disk cache at boot.
+            if await self._try_conversation_control_fastpath(
+                transcript, turn_gen,
+            ):
+                return
+
+            # 2026-08-13 (ChatGPT audit fix): response-cache fastpath.
+            # Streaming path used to bypass the response cache entirely,
+            # forcing "Hello can you hear me" through a 2.6s OpenAI call
+            # every time.  Check cache BEFORE any LLM dispatch.
+            if await self._try_response_cache_fastpath(
+                state, transcript, turn_gen,
+            ):
+                return
+
             # Task #283: streaming LLM→TTS branch when eligible.
             if span is not None:
                 span.mark("brain_start")
@@ -2964,6 +3302,38 @@ async def handle_twilio_stream_via_actor(
 
             if kind == "media" and session is not None:
                 mulaw = base64.b64decode(event["media"]["payload"])
+                # 2026-08-13 (P0-startup instrumentation): log first N
+                # media events with Twilio's carrier timestamp + wall-
+                # clock delta to prove the receive loop isn't stalling
+                # behind greeting playback.  Twilio's media.timestamp
+                # is ms since stream start (see
+                # https://www.twilio.com/docs/voice/media-streams/
+                # websocket-messages).  If lag grows above ~50ms during
+                # the greeting, the receive loop is still blocked.
+                if session._twilio_media_debug_count < settings.twilio_media_timestamp_debug_frames:
+                    import time as _t
+                    now = _t.monotonic()
+                    if session._twilio_stream_wall_start is None:
+                        session._twilio_stream_wall_start = now
+                    wall_ms = int((now - session._twilio_stream_wall_start) * 1000)
+                    media = event.get("media", {})
+                    try:
+                        media_ts = int(media.get("timestamp", -1))
+                    except (TypeError, ValueError):
+                        media_ts = -1
+                    lag_ms = wall_ms - media_ts if media_ts >= 0 else -1
+                    session._twilio_media_debug_count += 1
+                    log.info(
+                        "TWILIO_MEDIA call=%s n=%d track=%s chunk=%s ts=%dms wall=%dms lag=%dms bytes=%d",
+                        session.call_id,
+                        session._twilio_media_debug_count,
+                        media.get("track"),
+                        media.get("chunk"),
+                        media_ts,
+                        wall_ms,
+                        lag_ms,
+                        len(mulaw),
+                    )
                 await session.on_media(mulaw)
                 continue
 

@@ -102,14 +102,14 @@ class MistralLLM(LLMProvider):
         messages: list[dict],
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        tools=None,
     ):
-        """2026-08-09 speed sprint (task #283): stream text tokens from
-        Mistral as they arrive.  Yields (delta_text, is_final) tuples.
+        """2026-08-12 task #283 v2: yields (kind, payload, is_final).
 
-        No tools/response_schema support — this path is ONLY for the
-        final plain-text reply after any tool loop has resolved.  The
-        caller (twilio_actor) uses this to pipe tokens into
-        ElevenLabs stream_synthesize as sentence boundaries land.
+        kind="text" → payload is a delta string.
+        kind="tool_call" → payload is a partial tool-call dict with
+        keys {id, name, arguments}.  Mistral's SSE mirrors OpenAI's
+        wire format so accumulation logic is identical.
 
         First token arrives ~250-400ms after request instead of waiting
         the full ~1000-1500ms for the complete response."""
@@ -122,6 +122,10 @@ class MistralLLM(LLMProvider):
             "max_tokens": max_tokens,
             "stream": True,
         }
+        if tools:
+            payload["tools"] = [t.to_openai_format() for t in tools]
+            payload["tool_choice"] = "auto"
+        tool_calls_acc: dict[int, dict] = {}
         async with httpx.AsyncClient(timeout=60) as client:
             async with client.stream(
                 "POST", f"{self.base_url}/chat/completions",
@@ -138,7 +142,9 @@ class MistralLLM(LLMProvider):
                         continue
                     data_str = line[6:].strip()
                     if data_str == "[DONE]":
-                        yield "", True
+                        for tc in tool_calls_acc.values():
+                            yield "tool_call", tc, True
+                        yield "text", "", True
                         return
                     try:
                         chunk = json.loads(data_str)
@@ -148,6 +154,19 @@ class MistralLLM(LLMProvider):
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
-                    text = delta.get("content") or ""
+                    text = delta.get("content")
                     if text:
-                        yield text, False
+                        yield "text", text, False
+                    for tc_delta in (delta.get("tool_calls") or []):
+                        idx = tc_delta.get("index", 0)
+                        acc = tool_calls_acc.setdefault(idx, {
+                            "id": None, "name": None, "arguments": "",
+                        })
+                        if tc_delta.get("id"):
+                            acc["id"] = tc_delta["id"]
+                        fn = tc_delta.get("function") or {}
+                        if fn.get("name"):
+                            acc["name"] = fn["name"]
+                            yield "tool_call", dict(acc), False
+                        if "arguments" in fn:
+                            acc["arguments"] += fn["arguments"] or ""

@@ -35,6 +35,7 @@ bypassed (they'll still exist but the router's timeout fires first).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -448,4 +449,92 @@ class RouterLLM(LLMProvider):
 
         raise RuntimeError(
             f"RouterLLM: all providers failed. Attempts: {'; '.join(errors)}"
+        )
+
+    async def stream_complete(
+        self,
+        messages: list[dict],
+        temperature: float = 0.3,
+        max_tokens: int = 1024,
+        tools=None,
+    ):
+        """Task #283 v2: delegate to the first available provider whose
+        model supports the shape asked for.  Yields (kind, payload, is_final).
+
+        - kind="text" → payload is a delta str.
+        - kind="tool_call" → payload is a partial tool-call dict.
+
+        If tools=... is passed, we only pick providers whose model has
+        tool_calling capability (matches complete()'s gate).  If no
+        streaming provider is available, raise NotImplementedError so
+        the caller can fall back to batch complete()."""
+        now = time.time()
+        errors: list[str] = []
+        for name, provider in self.providers:
+            if not self._available(name, now):
+                continue
+            model_name = getattr(provider, "model", "?")
+            if tools and not _model_supports(model_name, "tool_calling"):
+                errors.append(f"{name}[{model_name}]=skipped(no_tools)")
+                continue
+            base_method = LLMProvider.stream_complete
+            prov_method = type(provider).stream_complete
+            has_native_stream = prov_method is not base_method
+            _call_started = time.perf_counter()
+            first_ms: Optional[float] = None
+            try:
+                if has_native_stream:
+                    # True SSE streaming path.
+                    async for kind, payload, is_final in provider.stream_complete(
+                        messages, temperature=temperature, max_tokens=max_tokens,
+                        tools=tools,
+                    ):
+                        if first_ms is None and (payload or kind == "tool_call"):
+                            first_ms = (time.perf_counter() - _call_started) * 1000
+                            log.info(
+                                "LLM_STREAM_CALL site=brain.reply provider=%s model=%s "
+                                "first_kind=%s first_ms=%.0f transport=sse",
+                                name, model_name, kind, first_ms,
+                            )
+                        yield kind, payload, is_final
+                        if is_final:
+                            self._mark_ok(name)
+                            return
+                    self._mark_ok(name)
+                    return
+                # 2026-08-12 FALLBACK: adapter has no stream_complete
+                # (cerebras/fireworks/groq/nvidia).  Call batch complete()
+                # and emit result as a single "text" chunk so the caller
+                # (brain) still gets a working reply — just without the
+                # per-token latency win.  Better than skipping the fast
+                # provider and defaulting to OpenAI SSE.
+                resp = await provider.complete(
+                    messages, tools=tools,
+                    temperature=temperature, max_tokens=max_tokens,
+                )
+                elapsed = (time.perf_counter() - _call_started) * 1000
+                log.info(
+                    "LLM_STREAM_CALL site=brain.reply provider=%s model=%s "
+                    "batch_ms=%.0f transport=batch-shim tools=%d",
+                    name, model_name, elapsed,
+                    len(resp.tool_calls or []),
+                )
+                # Emit tool_calls first (they take priority over text)
+                for tc in (resp.tool_calls or []):
+                    yield "tool_call", {
+                        "id": tc.id, "name": tc.name,
+                        "arguments": json.dumps(tc.arguments) if tc.arguments else "",
+                    }, False
+                # Then text (may be empty on tool-call turns)
+                if resp.text:
+                    yield "text", resp.text, False
+                yield "text", "", True
+                self._mark_ok(name)
+                return
+            except Exception as e:
+                errors.append(f"{name}={type(e).__name__}")
+                self._mark_failed(name, str(e))
+                continue
+        raise NotImplementedError(
+            f"RouterLLM: no streaming provider available. Attempts: {'; '.join(errors)}"
         )

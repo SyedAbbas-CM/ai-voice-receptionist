@@ -103,10 +103,10 @@ def test_handle_user_turn_invokes_on_delta_when_streaming():
                            site=None):
             return LLMResponse(text="Hello there. All good.", tool_calls=[])
         async def stream_complete(self, messages, temperature=0.3,
-                                  max_tokens=1024):
+                                  max_tokens=1024, tools=None):
             for tok in ["Hello ", "there. ", "All ", "good."]:
-                yield tok, False
-            yield "", True
+                yield "text", tok, False
+            yield "text", "", True
 
     brain = ReceptionistBrain.__new__(ReceptionistBrain)
     brain.llm = StubStreamLLM()

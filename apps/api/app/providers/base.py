@@ -59,15 +59,17 @@ class LLMProvider(ABC):
         messages: list[dict],
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        tools: Optional[list[ToolDefinition]] = None,
     ):
-        """Optional token-level streaming for the FINAL post-tool-loop
-        reply. Yields (delta_text: str, is_final: bool) tuples.
+        """Task #283 v2: yields (kind, payload, is_final) tuples.
 
-        Providers opt in by overriding. The default raises so callers
-        can hasattr-check AND still handle a router LLM whose current
-        pick doesn't support it. No tools / no response_schema — this
-        path is ONLY for the final plain-text reply after the tool loop
-        has resolved.
+        kind="text" → payload is a str delta.
+        kind="tool_call" → payload is a partial tool-call dict:
+                          {id, name, arguments}
+        Providers opt in by overriding.  Optional `tools` lets the
+        caller stream WITH tools so the first chunks tell us which
+        branch the model chose (text vs tool_call) — that's the whole
+        early-cancel design.
         """
         raise NotImplementedError(
             f"{self.name} does not support token-level streaming",

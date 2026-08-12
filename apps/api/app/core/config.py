@@ -329,6 +329,21 @@ class Settings(BaseSettings):
     streaming_stt_enabled: bool = False
     turn_manager_enabled: bool = False
 
+    # 2026-08-13 (P0-startup): silence-pump fed fake µ-law into Deepgram
+    # while the greeting was playing.  Root-cause fix (non-blocking
+    # greeting playback) means real caller media flows continuously
+    # from t=0 — the fake silence just duplicates + confuses the VAD.
+    # Deepgram's built-in KeepAlive JSON handles idle-WS protection.
+    # Kept as a feature flag so we can turn it back on for A/B if
+    # the concurrency fix somehow regresses VAD startup.
+    silence_pump_enabled: bool = False
+
+    # 2026-08-13 (P0-startup): log the first N Twilio media events with
+    # their carrier timestamp + wall-clock delta, so we can PROVE the
+    # receive loop isn't stalling behind greeting playback.
+    # twilio_media_lag = wall_elapsed - media.timestamp must stay <50ms.
+    twilio_media_timestamp_debug_frames: int = 50
+
     # Sprint 12 Track A: mailbox handlers spawn+return instead of
     # awaiting long-running LLM/TTS/tool work.  Turn events dispatched
     # during agent speech get processed within ~50ms instead of queueing

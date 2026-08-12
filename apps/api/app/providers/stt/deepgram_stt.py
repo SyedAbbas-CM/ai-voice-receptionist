@@ -115,14 +115,11 @@ class DeepgramSTT(STTProvider):
             ("smart_format", "true"),
             ("punctuate", "true"),
             ("interim_results", "true"),
-            # 150 ms — dropped 2026-08-08 from 800ms per latency
-            # research (docs/rnd-2026-08/51-latency-deep-dive.md).
-            # Smart-turn-v3 handles prosodic mid-sentence pauses AND
-            # our continuation-merge splices back-to-back finals into
-            # one turn if Deepgram commits too eagerly.  Every ms of
-            # endpointing = dead air on turn commit.  If cut-offs
-            # spike, first try 300ms; only revert to 800ms if the
-            # smart-turn hold-below threshold (0.30) is failing.
+            # 2026-08-13: back to 150ms after adding transcript-superset
+            # dedupe in twilio_actor._run_brain_from_text.  The dedupe
+            # catches the "Yeah. Can you tell me about" → "...about tooth
+            # implants?" double-fire at the brain-dispatch layer, so we
+            # can keep endpointing aggressive for latency.
             ("endpointing", "150"),
             # 2026-08-08: added utterance_end_ms. Per Deepgram docs
             # (https://developers.deepgram.com/docs/utterance-end) +

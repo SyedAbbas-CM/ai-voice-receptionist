@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from pydantic import BaseModel
@@ -20,7 +21,9 @@ from .prompt import build_system_prompt
 from .speech_sanitizer import sanitize_for_speech
 
 if TYPE_CHECKING:
-    from apps.api.app.providers.base import LLMProvider
+    from apps.api.app.providers.base import LLMProvider, LLMResponse
+else:
+    from apps.api.app.providers.base import LLMResponse
 
 
 ToolHandler = Callable[[ToolCall], Awaitable[ToolResult]]
@@ -313,70 +316,150 @@ class ReceptionistBrain:
                 # text, exhaust MAX_TOOL_ITERATIONS, and hit the teammate
                 # fallback.  300 tokens ≈ ~100 words ≈ ~15s audio ≈ still
                 # in-budget for a real receptionist reply.
-                try:
-                    response = await self.llm.complete(
-                        messages, tools=self.tools,
-                        temperature=0.3, max_tokens=300,
-                        site="brain.reply",
-                    )
-                except Exception as e:
-                    # LLM crashed — most common causes:
-                    #   1. Groq 400 when 8B fallback botches tool_call syntax
-                    #      (emits `<function=name>{args}` XML instead of JSON)
-                    #   2. Provider timeout / rate-limit chain exhausted
-                    #   3. Router returned no working provider
-                    # 2026-08-11 (task #311): capture rich failure context to
-                    # the durable call_event_log so post-mortems don't rely
-                    # on /tmp/uvicorn.log (which rotates + loses events).
-                    _span.set_attribute("error", f"{e.__class__.__name__}: {str(e)[:200]}")
-                    import logging as _logging
-                    import traceback as _tb
-                    _log = _logging.getLogger(__name__)
-                    _log.error(
-                        "LLM.complete raised %s: %s (session=%s, n_messages=%d, n_tools=%d)",
-                        e.__class__.__name__, e,
-                        state.session_id, len(messages), len(self.tools or []),
-                        exc_info=True,
-                    )
-                    # Persist to durable event log so we can post-mortem
-                    # weeks later even if uvicorn.log is long gone.
+                # ── Task #283 v2: STREAM-FIRST with tools ──────────────
+                # If the caller wants streaming AND the provider supports
+                # it, fire stream_complete WITH tools directly.  Peek at
+                # the first chunk: text kind → tokens flow to on_delta.
+                # tool_call kind → drain, build response, execute tools,
+                # loop.  This kills the 2.5s batch wait on text turns.
+                _stream_ok = (
+                    on_delta is not None
+                    and hasattr(self.llm, "stream_complete")
+                )
+                response = None
+                _stream_full_text = ""
+                _stream_tool_calls: list[ToolCall] = []
+                if _stream_ok:
                     try:
-                        from packages.observability.call_event_log import (
-                            get_call_event_log, CallEvent as _CE,
-                            EventSourceKind as _SK,
+                        import time as _t
+                        import logging as _sl
+                        _t0 = _t.perf_counter()
+                        _slog = _sl.getLogger(__name__)
+                        _slog.info(
+                            "LLM_STREAM_START session=%s provider=%s model=%s tools=%d",
+                            state.session_id,
+                            getattr(self.llm, "name", "?"),
+                            getattr(self.llm, "model", "?"),
+                            len(self.tools or []),
                         )
-                        _elog = get_call_event_log()
-                        if _elog is not None:
-                            _elog.write(_CE(
-                                call_id=state.session_id or "?",
-                                tenant_id=getattr(state, "tenant_id", "default"),
-                                source=_SK.ERROR,
-                                kind="llm_exception",
-                                payload={
-                                    "exc_class": e.__class__.__name__,
-                                    "exc_message": str(e)[:500],
-                                    "traceback": _tb.format_exc()[:2000],
-                                    "n_messages": len(messages),
-                                    "n_tools": len(self.tools or []),
-                                    "site": "brain.reply",
-                                    "provider": getattr(self.llm, "name", "?"),
-                                    "model": getattr(self.llm, "model", "?"),
-                                },
-                                error_category="llm_provider",
+                        _first_ms: Optional[float] = None
+                        _tc_by_id: dict[str, dict] = {}
+                        _text_chunks: list[str] = []
+                        async for _kind, _payload, _is_final in self.llm.stream_complete(
+                            messages, temperature=0.3, max_tokens=300,
+                            tools=self.tools,
+                        ):
+                            if _first_ms is None:
+                                _first_ms = (_t.perf_counter() - _t0) * 1000
+                                _slog.info(
+                                    "LLM_FIRST_%s session=%s ms=%.0f",
+                                    _kind.upper(), state.session_id, _first_ms,
+                                )
+                            if _kind == "text" and _payload:
+                                _text_chunks.append(_payload)
+                                try:
+                                    await on_delta(_payload)
+                                except Exception as _cbe:
+                                    _slog.warning("on_delta raised: %s", _cbe)
+                            elif _kind == "tool_call" and _payload:
+                                tid = _payload.get("id") or f"idx{len(_tc_by_id)}"
+                                _tc_by_id[tid] = _payload  # last-write-wins per id
+                            if _is_final:
+                                break
+                        _stream_full_text = "".join(_text_chunks)
+                        for _tc in _tc_by_id.values():
+                            if not _tc.get("name"):
+                                continue
+                            try:
+                                _args = json.loads(_tc.get("arguments") or "{}")
+                            except json.JSONDecodeError:
+                                _args = {}
+                            _stream_tool_calls.append(ToolCall(
+                                id=_tc.get("id") or "call_?",
+                                name=_tc["name"],
+                                arguments=_args,
                             ))
-                    except Exception as _log_e:
-                        _log.debug("failed to record llm_exception event: %s", _log_e)
-                    fallback_text = (
-                        "Sorry, I had a moment there. Could you say that again?"
-                    )
-                    state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=fallback_text))
-                    self._refresh_extraction_bg(state)
-                    return BrainTurnResult(
-                        reply=fallback_text,
-                        state=state,
-                        tool_results=tool_results_payload,
-                        escalated=escalated,
-                    )
+                        _slog.info(
+                            "LLM_STREAM_DONE session=%s chars=%d tools=%d total_ms=%.0f",
+                            state.session_id, len(_stream_full_text),
+                            len(_stream_tool_calls),
+                            (_t.perf_counter() - _t0) * 1000,
+                        )
+                        # Build a response-shaped object so the rest of the
+                        # tool-loop code below works unchanged.
+                        response = LLMResponse(
+                            text=_stream_full_text,
+                            tool_calls=_stream_tool_calls,
+                            finish_reason="tool_calls" if _stream_tool_calls else "stop",
+                            raw={},
+                        )
+                    except NotImplementedError:
+                        # Router had no streaming provider → fall back
+                        response = None
+                    except Exception as _se:
+                        import logging as _sl
+                        _sl.getLogger(__name__).warning(
+                            "stream-first path failed, falling back to batch: %s",
+                            _se,
+                        )
+                        response = None
+
+                if response is None:
+                    # Streaming path unavailable — fall back to batch.
+                    try:
+                        response = await self.llm.complete(
+                            messages, tools=self.tools,
+                            temperature=0.3, max_tokens=300,
+                            site="brain.reply",
+                        )
+                    except Exception as e:
+                        _span.set_attribute("error", f"{e.__class__.__name__}: {str(e)[:200]}")
+                        import logging as _logging
+                        import traceback as _tb
+                        _log = _logging.getLogger(__name__)
+                        _log.error(
+                            "LLM.complete raised %s: %s (session=%s, n_messages=%d, n_tools=%d)",
+                            e.__class__.__name__, e,
+                            state.session_id, len(messages), len(self.tools or []),
+                            exc_info=True,
+                        )
+                        try:
+                            from packages.observability.call_event_log import (
+                                get_call_event_log, CallEvent as _CE,
+                                EventSourceKind as _SK,
+                            )
+                            _elog = get_call_event_log()
+                            if _elog is not None:
+                                _elog.write(_CE(
+                                    call_id=state.session_id or "?",
+                                    tenant_id=getattr(state, "tenant_id", "default"),
+                                    source=_SK.ERROR,
+                                    kind="llm_exception",
+                                    payload={
+                                        "exc_class": e.__class__.__name__,
+                                        "exc_message": str(e)[:500],
+                                        "traceback": _tb.format_exc()[:2000],
+                                        "n_messages": len(messages),
+                                        "n_tools": len(self.tools or []),
+                                        "site": "brain.reply",
+                                        "provider": getattr(self.llm, "name", "?"),
+                                        "model": getattr(self.llm, "model", "?"),
+                                    },
+                                    error_category="llm_provider",
+                                ))
+                        except Exception as _log_e:
+                            _log.debug("failed to record llm_exception event: %s", _log_e)
+                        fallback_text = (
+                            "Sorry, I had a moment there. Could you say that again?"
+                        )
+                        state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=fallback_text))
+                        self._refresh_extraction_bg(state)
+                        return BrainTurnResult(
+                            reply=fallback_text,
+                            state=state,
+                            tool_results=tool_results_payload,
+                            escalated=escalated,
+                        )
                 # Try to record token usage if the raw response has it (OpenAI/Anthropic shapes)
                 try:
                     usage = (response.raw or {}).get("usage") or {}
@@ -389,63 +472,11 @@ class ReceptionistBrain:
                     pass
 
             if not response.tool_calls:
-                # ── Task #283: streaming path ──────────────────────────
-                # If caller provided on_delta AND provider streams,
-                # re-fire as a streaming call and pump deltas out.
-                # We already know no tools will be emitted (this branch),
-                # so a second call is safe.  Doubles token cost on
-                # no-tool turns; the user accepted this trade for safety.
-                streaming_full_text: Optional[str] = None
-                if on_delta is not None and hasattr(self.llm, "stream_complete"):
-                    try:
-                        import time as _t
-                        _t0 = _t.perf_counter()
-                        import logging as _sl
-                        _slog = _sl.getLogger(__name__)
-                        _slog.info(
-                            "LLM_STREAM_START session=%s provider=%s model=%s",
-                            state.session_id,
-                            getattr(self.llm, "name", "?"),
-                            getattr(self.llm, "model", "?"),
-                        )
-                        _chunks: list[str] = []
-                        _first_token_ms: Optional[float] = None
-                        async for _delta, _is_final in self.llm.stream_complete(
-                            messages, temperature=0.3, max_tokens=300,
-                        ):
-                            if _delta:
-                                if _first_token_ms is None:
-                                    _first_token_ms = (_t.perf_counter() - _t0) * 1000
-                                    _slog.info(
-                                        "LLM_FIRST_TOKEN session=%s first_token_ms=%.0f",
-                                        state.session_id, _first_token_ms,
-                                    )
-                                _chunks.append(_delta)
-                                try:
-                                    await on_delta(_delta)
-                                except Exception as _cbe:
-                                    _slog.warning("on_delta raised: %s", _cbe)
-                            if _is_final:
-                                break
-                        streaming_full_text = "".join(_chunks)
-                        _slog.info(
-                            "LLM_STREAM_DONE session=%s chars=%d total_ms=%.0f",
-                            state.session_id, len(streaming_full_text),
-                            (_t.perf_counter() - _t0) * 1000,
-                        )
-                    except NotImplementedError:
-                        # Router picked a non-streaming provider — fall
-                        # through to batch response.text
-                        streaming_full_text = None
-                    except Exception as _se:
-                        import logging as _sl
-                        _sl.getLogger(__name__).warning(
-                            "streaming path failed, falling back to batch: %s",
-                            _se,
-                        )
-                        streaming_full_text = None
-
-                raw_text = streaming_full_text if streaming_full_text else response.text
+                # Task #283 v2: streaming already happened above (with tools).
+                # If response.text is populated, it came from either the
+                # stream-first path (tokens already fired via on_delta) OR
+                # a batch fallback.  Either way, sanitize and finalize.
+                raw_text = response.text
                 # Sanitize before speaking: strip (parentheses), <angle brackets>,
                 # tool-name leakage, and expand common abbreviations. Belt-and-
                 # suspenders for prompt rules the LLM sometimes ignores.
