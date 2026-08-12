@@ -4,6 +4,8 @@ pydantic>=2.7
 pydantic-settings>=2.4
 sqlalchemy>=2.0
 httpx[http2]>=0.27
+# 2026-08-12 (task #322): ElevenLabs WebSocket streaming — /stream-input
+websockets>=13,<16
 python-multipart>=0.0.9
 
 # Optional — uncomment what you actually use

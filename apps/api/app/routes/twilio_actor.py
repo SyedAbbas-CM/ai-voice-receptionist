@@ -1265,32 +1265,112 @@ class TwilioActorSession:
         Caller hears the first ~150-200ms of audio while the rest is
         still being synthesized upstream.
 
+        2026-08-12 (task #322): if ELEVENLABS_USE_WS is on AND the inner
+        provider exposes ws_stream_synthesize, use the bidirectional
+        WebSocket. Cuts first-byte ~400ms on high-RTT clients because we
+        skip the HTTP /stream request/response setup.
+
         Trade-off: no full audio_bytes buffer → no ledger sizing at the
         top (ledger entry is written when the stream completes with the
         cumulative byte count).  Cancellation on bump_speech still works
         because we're inside a Task registered with the actor."""
+        import time as _t
         first_chunk = True
         cumulative_bytes = 0
+        chunk_count = 0
         mime = getattr(tts, "mime", "audio/x-mulaw;rate=8000")
+        t_request = _t.perf_counter()
+
+        # Pick WS vs HTTP stream. WS lives on the inner provider (cache
+        # wrapper doesn't expose it).
+        inner = getattr(tts, "_inner", tts)
+        use_ws = (
+            settings.elevenlabs_use_ws
+            and hasattr(inner, "ws_stream_synthesize")
+            and getattr(inner, "name", "") == "elevenlabs"
+        )
+        stream_source = inner if use_ws else tts
+        stream_method = (
+            inner.ws_stream_synthesize(text) if use_ws
+            else tts.stream_synthesize(text)
+        )
+        transport = "ws" if use_ws else "http"
+        log.info(
+            "TTS_STREAM_START call=%s gen=%d transport=%s text=%r",
+            self.call_id, gen, transport, text[:60],
+        )
+
         try:
-            async for chunk, chunk_mime in tts.stream_synthesize(text):
+            async for chunk, chunk_mime in stream_method:
                 if not chunk:
                     continue
                 if first_chunk:
                     first_chunk = False
+                    first_byte_ms = (_t.perf_counter() - t_request) * 1000
                     if span is not None:
                         span.mark("tts_first_byte")
                         self._close_turn_span()
                     mime = chunk_mime
+                    log.info(
+                        "TTS_FIRST_BYTE call=%s gen=%d transport=%s "
+                        "first_byte_ms=%.0f mime=%s",
+                        self.call_id, gen, transport, first_byte_ms, mime,
+                    )
+                chunk_count += 1
                 cumulative_bytes += len(chunk)
                 await self._send_audio_frames(chunk, mime)
         except asyncio.CancelledError:
-            log.info("stream TTS cancelled call=%s gen=%d bytes_sent=%d",
-                     self.call_id, gen, cumulative_bytes)
+            log.info(
+                "TTS_STREAM_CANCELLED call=%s gen=%d transport=%s "
+                "chunks=%d bytes=%d",
+                self.call_id, gen, transport, chunk_count, cumulative_bytes,
+            )
             raise
         except Exception as e:
-            log.exception("stream TTS failed: %s", e)
-            return
+            log.exception(
+                "TTS_STREAM_FAILED call=%s gen=%d transport=%s err=%s",
+                self.call_id, gen, transport, e,
+            )
+            # If WS failed before the first byte, fall back to HTTP so we
+            # don't leave the caller in silence. After first_byte we've
+            # already committed audio to the wire — safer to bail.
+            if use_ws and first_chunk:
+                log.warning(
+                    "TTS_STREAM_FALLBACK call=%s gen=%d ws→http",
+                    self.call_id, gen,
+                )
+                try:
+                    async for chunk, chunk_mime in tts.stream_synthesize(text):
+                        if not chunk:
+                            continue
+                        if first_chunk:
+                            first_chunk = False
+                            first_byte_ms = (_t.perf_counter() - t_request) * 1000
+                            if span is not None:
+                                span.mark("tts_first_byte")
+                                self._close_turn_span()
+                            mime = chunk_mime
+                            log.info(
+                                "TTS_FIRST_BYTE call=%s gen=%d transport=http-fallback "
+                                "first_byte_ms=%.0f mime=%s",
+                                self.call_id, gen, first_byte_ms, mime,
+                            )
+                        chunk_count += 1
+                        cumulative_bytes += len(chunk)
+                        await self._send_audio_frames(chunk, mime)
+                except Exception as e2:
+                    log.exception("TTS_STREAM_FALLBACK_FAILED: %s", e2)
+                    return
+            else:
+                return
+
+        total_ms = (_t.perf_counter() - t_request) * 1000
+        log.info(
+            "TTS_STREAM_DONE call=%s gen=%d transport=%s chunks=%d "
+            "bytes=%d total_ms=%.0f",
+            self.call_id, gen, transport, chunk_count, cumulative_bytes,
+            total_ms,
+        )
 
         # Ledger entry (approximate — we know the cumulative bytes now).
         _mime_lower = (mime or "").lower()

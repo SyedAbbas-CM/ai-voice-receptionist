@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import httpx
@@ -118,6 +119,109 @@ class ElevenLabsTTS(TTSProvider):
             async for chunk in resp.aiter_bytes(chunk_size=1600):
                 if chunk:
                     yield chunk, self.mime
+
+    async def ws_stream_synthesize(self, text: str, voice: Optional[str] = None):
+        """2026-08-12 (task #322): WebSocket streaming TTS.
+
+        Uses /v1/text-to-speech/{voice_id}/stream-input over WSS.  Two
+        wins vs HTTP /stream:
+          1. First audio byte in ~200ms vs ~1.2s (HTTP re-establishes
+             a fresh connection every call even with HTTP/2 keep-alive
+             because /stream is chunked-response, not persistent).
+          2. Can push text incrementally as LLM tokens arrive (task #283)
+             — first sentence starts synthesizing while LLM finishes
+             the rest.
+
+        Client → server: JSON messages with `text` field.  First message
+        also carries voice_settings + generation_config.  Empty text
+        closes the stream.
+
+        Server → client: JSON with `audio` (base64) and `isFinal`.
+
+        Yields (chunk_bytes, mime) tuples matching stream_synthesize
+        signature so the actor's _stream_tts_incremental path Just Works.
+        """
+        if not self.api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY not set")
+        try:
+            import websockets
+        except ImportError as e:
+            raise RuntimeError(
+                "ElevenLabs WS streaming needs `pip install websockets`."
+            ) from e
+        import base64 as _b64
+        voice_id = voice or self.default_voice
+        url = (
+            f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
+            f"?model_id={self.model}"
+            f"&output_format={self._eleven_fmt}"
+            f"&auto_mode=true"
+            f"&inactivity_timeout=30"
+        )
+        headers = {"xi-api-key": self.api_key}
+        import logging as _l
+        _log = _l.getLogger(__name__)
+        import time as _t
+        t_open_start = _t.perf_counter()
+        # websockets>=13 uses `additional_headers`; <13 uses `extra_headers`.
+        # The TypeError doesn't fire until we enter the context, so try/except
+        # has to wrap __aenter__, not connect().
+        try:
+            _ws_ctx = websockets.connect(url, additional_headers=headers)
+            ws = await _ws_ctx.__aenter__()
+        except TypeError:
+            _ws_ctx = websockets.connect(url, extra_headers=headers)
+            ws = await _ws_ctx.__aenter__()
+        t_open_ms = (_t.perf_counter() - t_open_start) * 1000
+        try:
+            # Init message with voice_settings + start streaming text.
+            # Sending text + settings in one message means no extra RTT.
+            init_msg = json.dumps({
+                "text": text + " ",
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.75,
+                },
+                "generation_config": {
+                    "chunk_length_schedule": [50, 90, 160, 250],
+                },
+            })
+            t_send = _t.perf_counter()
+            await ws.send(init_msg)
+            # Signal end-of-text so ElevenLabs flushes the final audio.
+            await ws.send(json.dumps({"text": ""}))
+            first_chunk_ms: Optional[float] = None
+            chunks = 0
+            total_bytes = 0
+            while True:
+                try:
+                    raw = await ws.recv()
+                except websockets.ConnectionClosed:
+                    break
+                try:
+                    msg = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+                except Exception:
+                    continue
+                if msg.get("audio"):
+                    audio_bytes = _b64.b64decode(msg["audio"])
+                    if first_chunk_ms is None:
+                        first_chunk_ms = (_t.perf_counter() - t_send) * 1000
+                        _log.info(
+                            "ELEVEN_WS first_chunk_ms=%.0f connect_ms=%.0f voice=%s fmt=%s",
+                            first_chunk_ms, t_open_ms, voice_id[:8], self._eleven_fmt,
+                        )
+                    chunks += 1
+                    total_bytes += len(audio_bytes)
+                    yield audio_bytes, self.mime
+                if msg.get("isFinal"):
+                    break
+            _log.info(
+                "ELEVEN_WS done chunks=%d bytes=%d first_ms=%s",
+                chunks, total_bytes,
+                f"{first_chunk_ms:.0f}" if first_chunk_ms else "?",
+            )
+        finally:
+            await _ws_ctx.__aexit__(None, None, None)
 
     async def synthesize_from_plan(
         self, plan, voice: Optional[str] = None,

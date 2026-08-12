@@ -170,6 +170,14 @@ class Settings(BaseSettings):
     elevenlabs_api_key: Optional[str] = None
     elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM"
     elevenlabs_model: Optional[str] = "eleven_turbo_v2_5"
+    # 2026-08-12 (task #322): WebSocket /stream-input transport.
+    # Bench (PK→US): HTTP /stream first_byte=316ms, WS=1601ms for
+    # single-shot full-text sends — WS is SLOWER because it optimizes
+    # for token-by-token streaming from an upstream LLM, and pays the
+    # end-of-text flush RTT when the whole text is available upfront.
+    # Kept OFF by default. Flip to True only when we wire streaming
+    # LLM tokens directly into ws.send (task #283).
+    elevenlabs_use_ws: bool = False
 
     cartesia_api_key: Optional[str] = None
     cartesia_voice_id: Optional[str] = None
