@@ -178,6 +178,12 @@ class Settings(BaseSettings):
     # Kept OFF by default. Flip to True only when we wire streaming
     # LLM tokens directly into ws.send (task #283).
     elevenlabs_use_ws: bool = False
+    # 2026-08-12 (task #283): Streaming LLM tokens directly into TTS
+    # per sentence. First sentence audio arrives ~250ms after brain
+    # fires instead of ~1000ms for full reply. Off by default while
+    # the fake-booking guard interplay is being validated. Gated to
+    # no-tools, no-VPL, no-browser, Mistral-only turns.
+    streaming_llm_to_tts: bool = False
 
     cartesia_api_key: Optional[str] = None
     cartesia_voice_id: Optional[str] = None
