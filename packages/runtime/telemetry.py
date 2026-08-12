@@ -411,6 +411,34 @@ class TurnSpan:
                 provider=self._provider("tts"),
             ).observe(tts_ms / 1000.0)
 
+        # 2026-08-12: emit a per-turn summary line so a plain log tail
+        # shows the full step-by-step budget.  One line per turn covers:
+        # media_in → stt_first_partial → stt_final → brain_start
+        # → llm_first_token → tts_request → tts_first_byte
+        # → tts_first_frame_wire  = end-to-end perceived latency.
+        def _seg(a: str, b: str) -> str:
+            v = self.elapsed_ms(a, b)
+            return f"{v:.0f}" if v is not None else "-"
+        e2e = self.elapsed_ms("media_in", "tts_first_byte")
+        e2e_s = f"{e2e:.0f}" if e2e is not None else "-"
+        log.info(
+            "TURN_SUMMARY call=%s gen=%d stt_partial=%sms stt_final=%sms "
+            "brain=%sms llm_first_tok=%sms tts_req=%sms tts_first_byte=%sms "
+            "wire_first_frame=%sms E2E=%sms stt=%s llm=%s tts=%s "
+            "streaming=%s",
+            self.call_id, self.turn_generation,
+            _seg("media_in", "stt_first_partial"),
+            _seg("media_in", "stt_final"),
+            _seg("stt_final", "brain_start"),
+            _seg("stt_final", "llm_first_token"),
+            _seg("llm_first_token", "tts_request"),
+            _seg("tts_request", "tts_first_byte"),
+            _seg("tts_first_byte", "tts_first_frame_wire"),
+            e2e_s,
+            self._provider("stt"), self._provider("llm"), self._provider("tts"),
+            "yes" if self._marks.get("streaming_path") else "no",
+        )
+
 
 # ── /metrics ASGI mount helper ──────────────────────────────────────
 

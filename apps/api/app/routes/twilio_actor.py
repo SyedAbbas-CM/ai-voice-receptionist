@@ -976,7 +976,11 @@ class TwilioActorSession:
                 state, brain = handle
 
             # Task #283: streaming LLM→TTS branch when eligible.
+            if span is not None:
+                span.mark("brain_start")
             if self._streaming_llm_eligible(brain):
+                if span is not None:
+                    span.mark("streaming_path")
                 await self._run_brain_streaming(state, brain, transcript, turn_gen, span)
                 return
 
@@ -2563,7 +2567,11 @@ class TwilioActorSession:
                 state, brain = handle
 
             # Task #283: streaming LLM→TTS branch when eligible.
+            if span is not None:
+                span.mark("brain_start")
             if self._streaming_llm_eligible(brain):
+                if span is not None:
+                    span.mark("streaming_path")
                 await self._run_brain_streaming(state, brain, transcript, turn_gen, span)
                 if _elog is not None:
                     try:
@@ -2720,6 +2728,12 @@ class TwilioActorSession:
         rate.  Zero encoding loss.
 
         Sprint 9f duck logic + gain logic preserved for the Twilio path."""
+        # 2026-08-12: record wire-time on FIRST send of the turn so the
+        # TURN_SUMMARY line shows the tts_first_byte → wire gap.  First-
+        # write-wins in the span means subsequent frames don't overwrite.
+        if self._current_turn_span is not None:
+            self._current_turn_span.mark("tts_first_frame_wire")
+
         is_browser = self.stream_sid.startswith("browser_")
 
         if is_browser:
