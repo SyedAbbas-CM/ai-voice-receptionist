@@ -32,6 +32,18 @@ def create_app() -> FastAPI:
     # Sprint 10 obs: install JSON log formatter if STRUCTURED_LOGS=true.
     # Called BEFORE init_db so init logs go through the new formatter.
     maybe_install_json_logs()
+
+    # 2026-08-13: per-call log extractor.  Every log line that mentions
+    # a Twilio call SID (CA<32 hex>) gets duplicated into
+    # data/logs/calls/<CA...>.log — one file per call, never pruned.
+    # Uvicorn logs still rotate per-restart but call-scoped logs are
+    # forever, so we can compare timings on a call weeks later.
+    try:
+        from packages.observability.per_call_logger import install_per_call_logger
+        install_per_call_logger()
+    except Exception as e:
+        print(f"[startup] per-call logger install failed: {e}")
+
     init_db()
 
     # Wire observability tracer once at startup. NoopTracer is the default

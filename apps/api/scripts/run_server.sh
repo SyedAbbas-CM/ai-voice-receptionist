@@ -22,8 +22,11 @@ ln -sfn "uvicorn-$STAMP.log" "$LOG_DIR/uvicorn-latest.log"
 # Also keep /tmp copy so existing tooling that greps it still works
 ln -sfn "$LOG_FILE" /tmp/uvicorn.log
 
-# Prune anything older than 14 days so disk doesn't fill up
-find "$LOG_DIR" -name 'uvicorn-*.log' -type f -mtime +14 -delete 2>/dev/null || true
+# 2026-08-13: DO NOT prune uvicorn logs.  Every call must be preserved
+# so we can go back weeks/months later to compare timings on a specific
+# CA-id.  Uvicorn logs are ~50KB per call — cheap.  If disk ever fills
+# up, archive to data/logs/archive/ manually or gzip old ones with
+# `find "$LOG_DIR" -name 'uvicorn-*.log' -mtime +30 -exec gzip {} \;`.
 
 cd "$REPO_ROOT/apps/api"
 exec nohup "$REPO_ROOT/.venv/bin/uvicorn" \

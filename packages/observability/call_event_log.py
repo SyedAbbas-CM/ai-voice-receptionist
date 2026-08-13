@@ -449,7 +449,9 @@ _SINGLETON_LOCK = threading.Lock()
 
 def get_call_event_log() -> CallEventLog:
     """Lazy singleton.  Path from CALL_EVENT_LOG_PATH env or
-    data/call_events.db default."""
+    data/call_events.db default.  Retention from CALL_EVENT_LOG_RETENTION_DAYS
+    env (0 or negative = never prune — default now).  The per-call row cap
+    (5000) already keeps a runaway call from blowing up the DB."""
     global _SINGLETON
     if _SINGLETON is not None:
         return _SINGLETON
@@ -459,7 +461,11 @@ def get_call_event_log() -> CallEventLog:
                 "CALL_EVENT_LOG_PATH",
                 str(Path(__file__).resolve().parents[2] / "data" / "call_events.db"),
             )
-            _SINGLETON = CallEventLog(db_path=path)
+            try:
+                retention_days = int(os.environ.get("CALL_EVENT_LOG_RETENTION_DAYS", "0"))
+            except (TypeError, ValueError):
+                retention_days = 0
+            _SINGLETON = CallEventLog(db_path=path, retention_days=retention_days)
     return _SINGLETON
 
 
