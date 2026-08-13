@@ -460,6 +460,24 @@ class TwilioActorSession:
         # turn.  Bounded so we don't hold forever.
         self._incomplete_hold_started_at: Optional[float] = None
 
+        # Task #369 (2026-08-14): per-generation response commit lock.
+        # Invariant: ONE generation → at most ONE committed assistant
+        # response (speculative revisions may live internally).  Set
+        # of turn_generations that already have a response committed
+        # to speech.  Any dispatch site checks this before firing;
+        # cleared on bump_turn.  Prevents the same-gen double-fire
+        # observed on Abdullah's gen=20 (speculative HIT cleared the
+        # in-flight marker while the task was still streaming; a
+        # follow-on EAGER_END_OF_TURN then slipped through the "no
+        # in-flight speculative" guard and dispatched a second brain
+        # on the SAME gen).
+        self._committed_response_gens: set[int] = set()
+        # Bookkeeping for the ChatGPT-requested response-id shape.
+        # Kept minimal in v1 — a monotonic counter per gen — so future
+        # replacement semantics have a stable label.  Not yet consumed
+        # by the ledger/telemetry.
+        self._response_revision_counter: dict[int, int] = {}
+
         # R3 P2 (2026-08-14): structured-input capture mode.  When
         # active, STT finals feed a slot session instead of running the
         # brain, and speculative brain dispatch is suppressed.  Actor
@@ -1405,6 +1423,49 @@ class TwilioActorSession:
         self._inflight_dispatch_monotonic = time.monotonic()
         self._inflight_has_spoken = False
 
+    # ── task #369: one-gen-one-commit invariant ─────────────────────
+    #
+    # Speculative revisions may live INSIDE the actor (draft A → draft
+    # B → commit) but only one can cross the speech-commit boundary.
+    # These helpers make that invariant explicit at every dispatch
+    # site (speculative brain, real END_OF_TURN, fastpaths).
+
+    def _try_claim_response_commit(self, gen: int, reason: str) -> bool:
+        """Atomically claim the response commit slot for `gen`.
+        Returns True if this caller owns the commit; False if the slot
+        is already claimed (caller MUST skip its dispatch).
+
+        Single-threaded asyncio: check + set is atomic without a lock.
+        """
+        if gen in self._committed_response_gens:
+            log.info(
+                "COMMIT_LOCK_SKIP call=%s gen=%d reason=%s "
+                "(slot already claimed)",
+                self.call_id, gen, reason,
+            )
+            return False
+        self._committed_response_gens.add(gen)
+        # Bookkeeping for future replacement semantics.
+        self._response_revision_counter[gen] = (
+            self._response_revision_counter.get(gen, 0) + 1
+        )
+        log.info(
+            "COMMIT_LOCK_CLAIM call=%s gen=%d reason=%s revision=%d",
+            self.call_id, gen, reason,
+            self._response_revision_counter[gen],
+        )
+        return True
+
+    def _clear_response_commits_before(self, keep_gen: int) -> None:
+        """Drop commit-lock entries for stale generations.  Called
+        after bump_turn so the new gen starts with a clean slot.
+        Keeps memory bounded (long calls otherwise accumulate entries)."""
+        stale = {g for g in self._committed_response_gens if g < keep_gen}
+        if stale:
+            self._committed_response_gens -= stale
+            for g in stale:
+                self._response_revision_counter.pop(g, None)
+
     async def _try_conversation_control_fastpath(
         self,
         transcript: str,
@@ -1624,6 +1685,17 @@ class TwilioActorSession:
             # we spoke a reply for it, drop this superset — it would just
             # stack a second reply.
             if self._should_dedupe_dispatch(transcript):
+                return
+            # Task #369: enforce one-gen-one-commit.  If another
+            # dispatch (usually a HITted speculative) already claimed
+            # this generation, we are the redundant fire — bail.  This
+            # is the definitive guard against Abdullah's gen=20 same-
+            # gen double dispatch; the transcript-based dedupe above
+            # catches text-repeats but not fresh transcripts on the
+            # same gen slot.
+            if not self._try_claim_response_commit(
+                turn_gen, reason="run_brain",
+            ):
                 return
             self._mark_dispatched(transcript)
             # R5 P0: start the stall timer.  Cleared by any downstream
@@ -2805,6 +2877,15 @@ class TwilioActorSession:
                     not self._speculative_task.done():
                 return True
             speculative_turn = actor.turn_generation
+            # Task #369: enforce one-gen-one-commit BEFORE spawning.
+            # Prevents the Abdullah-gen=20 race where speculative HIT
+            # cleared _speculative_task while the task was still
+            # running, letting a second EAGER_END_OF_TURN pass the
+            # "no in-flight" guard and fire another brain.
+            if not self._try_claim_response_commit(
+                speculative_turn, reason="speculative",
+            ):
+                return True
             log.info("speculative brain firing call=%s gen=%d text=%r",
                      self.call_id, speculative_turn, text[:80])
             self._speculative_text = text
@@ -3070,6 +3151,14 @@ class TwilioActorSession:
         # event will land on this same turn_generation.  Do NOT bump the
         # turn (that would cancel our own in-flight task) and do NOT
         # spawn a second brain.
+        #
+        # Task #369 note: we intentionally leave the commit-lock claim
+        # in place for the speculative's gen — the task is still running
+        # and owns the response.  Clearing the marker here (which we
+        # used to also do, and which Abdullah's gen=20 double-fire
+        # exploited) is fine now because a follow-on EAGER_END_OF_TURN
+        # will fail the commit-lock claim (same gen still held) and
+        # skip its dispatch.
         spec_task = getattr(self, "_speculative_task", None)
         spec_text = getattr(self, "_speculative_text", None) or ""
         if spec_task is not None and not spec_task.done() and spec_text:
@@ -3077,15 +3166,17 @@ class TwilioActorSession:
                 log.info("speculative HIT call=%s: text=%r spec=%r",
                          self.call_id, text[:60], spec_text[:60])
                 # Clear the speculative markers; the task itself will
-                # emit brain_completed as usual.
+                # emit brain_completed as usual.  The commit lock for
+                # its gen stays held until bump_turn / stall / hangup.
                 self._speculative_task = None
                 self._speculative_text = None
                 return True
-            # Text drifted — cancel speculative and fall through to
-            # normal fire.
+            # Text drifted — cancel speculative and release its lock
+            # so bump_turn can proceed cleanly on the new gen below.
             log.info("speculative MISS call=%s: cancelling, text=%r spec=%r",
                      self.call_id, text[:60], spec_text[:60])
             spec_task.cancel()
+            self._committed_response_gens.discard(actor.turn_generation)
             self._speculative_task = None
             self._speculative_text = None
 
@@ -3096,6 +3187,11 @@ class TwilioActorSession:
             self._current_turn_span.mark("stt_final")
 
         turn_gen = actor.turn_generation
+        # Task #369: fresh gen — clean up any stale commit-lock
+        # entries.  The new turn starts with an empty slot.  We do NOT
+        # claim immediately — the fastpaths + brain dispatch below
+        # each claim before firing, and the FIRST caller wins.
+        self._clear_response_commits_before(turn_gen)
 
         if settings.actor_nonblocking_handlers:
             # New path: spawn brain job, return immediately.  Job emits
@@ -3663,6 +3759,17 @@ class TwilioActorSession:
             # we spoke a reply for it, drop this superset — it would just
             # stack a second reply.
             if self._should_dedupe_dispatch(transcript):
+                return
+            # Task #369: enforce one-gen-one-commit.  If another
+            # dispatch (usually a HITted speculative) already claimed
+            # this generation, we are the redundant fire — bail.  This
+            # is the definitive guard against Abdullah's gen=20 same-
+            # gen double dispatch; the transcript-based dedupe above
+            # catches text-repeats but not fresh transcripts on the
+            # same gen slot.
+            if not self._try_claim_response_commit(
+                turn_gen, reason="run_brain",
+            ):
                 return
             self._mark_dispatched(transcript)
             # R5 P0: start the stall timer.  Cleared by any downstream
