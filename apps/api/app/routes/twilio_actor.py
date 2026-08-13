@@ -67,6 +67,12 @@ from packages.voice.vpl.compilers import compile_elevenlabs
 from packages.core_agent.planners import PerformancePlanner
 from packages.core_agent.planners.semantic import _infer_speech_act
 from packages.core_agent.streaming import SentenceBuffer
+from packages.slot_parsers import (
+    SlotSource,
+    SlotStatus,
+    StructuredInputSession,
+    get_slot_handlers,
+)
 
 
 def _apply_mulaw_gain(mulaw: bytes, gain_db: float) -> bytes:
@@ -452,6 +458,20 @@ class TwilioActorSession:
         # K1 (2026-08-06): tracks when we started holding an incomplete
         # turn.  Bounded so we don't hold forever.
         self._incomplete_hold_started_at: Optional[float] = None
+
+        # R3 P2 (2026-08-14): structured-input capture mode.  When
+        # active, STT finals feed a slot session instead of running the
+        # brain, and speculative brain dispatch is suppressed.  Actor
+        # is slot-type-agnostic; the WORKFLOW CONTROLLER (not tools)
+        # opens capture.  Tools operate on already-validated values.
+        self._active_slot: Optional[StructuredInputSession] = None
+        self._slot_normalizer = None
+        self._slot_on_commit = None          # coro(SlotResult) -> None
+        self._slot_on_stall = None           # coro(stage: str, session) -> None
+        self._slot_on_confirm_needed = None  # coro(SlotResult) -> None
+        self._slot_stall_task: Optional[asyncio.Task] = None
+        self._slot_stall_first_prompt_s: float = 6.0
+        self._slot_stall_escalate_s: float = 8.0
 
         self.actor: Optional[CallActor] = None
 
@@ -1946,6 +1966,259 @@ class TwilioActorSession:
         except asyncio.CancelledError:
             pass
 
+    # ── R3 P2: structured-input slot capture ─────────────────────────
+    #
+    # OWNERSHIP: the DIALOGUE / WORKFLOW CONTROLLER opens capture.  Tools
+    # do NOT.  A tool is a pure operation over already-validated inputs:
+    #     book_appointment(service, time, name, validated_phone)
+    # The workflow says "I need a phone" → enter_slot_capture("phone")
+    # → validated E.164 lands → workflow invokes the booking tool.
+    #
+    # While a slot is active:
+    #   - STT finals feed the session, not `_run_brain_from_text`
+    #   - Speculative brain dispatch is suppressed (fragments would
+    #     churn the brain during multi-turn digit dictation)
+    #   - VALID → on_commit fires; workflow resumes with a canonical value
+    #   - POSSIBLE → on_confirm_needed fires; workflow asks explicit
+    #     "just to confirm, is that ...?" and re-enters capture on "no"
+    #     or commits on "yes".  POSSIBLE never auto-commits.
+    #   - INVALID → stays inside the structured subsystem via on_stall
+    #     with stage="escalate"; the general LLM never gets to guess
+    #     digits from a partial buffer
+    #   - Stall watchdog fires on_stall("first_prompt" | "escalate")
+    #     when the caller goes silent mid-capture
+    # Stall watchdog defaults (config-overridable via kwargs to
+    # enter_slot_capture); the actor stays entirely inside the
+    # structured subsystem for the recovery cycle so the LLM never
+    # gets a chance to "count digits" from a partial buffer.
+    _SLOT_STALL_FIRST_PROMPT_S = 6.0
+    _SLOT_STALL_ESCALATE_S = 8.0
+
+    def enter_slot_capture(
+        self,
+        kind: str,
+        config: dict,
+        on_commit,
+        on_stall=None,
+        on_confirm_needed=None,
+        stall_first_prompt_s: Optional[float] = None,
+        stall_escalate_s: Optional[float] = None,
+    ) -> StructuredInputSession:
+        """Open a structured-input session for the caller's next turns.
+
+        kind:       slot type registered in packages/slot_parsers/registry
+                    (e.g. "phone").
+        config:     validator config (e.g. phone_default_region).
+        on_commit:  async callable(SlotResult) -> None, fires ONLY on
+                    VALID or on caller-confirmed POSSIBLE.  Booking
+                    flow resumes here.
+        on_confirm_needed:
+                    async callable(SlotResult) -> None.  Fires on
+                    POSSIBLE — the workflow controller decides how to
+                    ask "just to confirm, is that ...?" and re-enter
+                    capture on a "no" or commit on a "yes".
+        on_stall:   optional async callable(stage: str, session) -> None.
+                    Fires when the caller stops talking mid-capture.
+                    stage ∈ {"first_prompt", "escalate"}.
+        """
+        # Close any prior capture defensively — one active slot at a time.
+        if self._active_slot is not None:
+            self.exit_slot_capture(reason="replaced")
+
+        normalizer, validator = get_slot_handlers(kind)
+        session = StructuredInputSession(
+            slot_type=kind,
+            validator=validator,
+            config=config,
+        )
+        self._active_slot = session
+        self._slot_normalizer = normalizer
+        self._slot_on_commit = on_commit
+        self._slot_on_stall = on_stall
+        self._slot_on_confirm_needed = on_confirm_needed
+        self._slot_stall_first_prompt_s = (
+            stall_first_prompt_s if stall_first_prompt_s is not None
+            else self._SLOT_STALL_FIRST_PROMPT_S
+        )
+        self._slot_stall_escalate_s = (
+            stall_escalate_s if stall_escalate_s is not None
+            else self._SLOT_STALL_ESCALATE_S
+        )
+        # Arm the stall watchdog.  It's reset on every feed() and
+        # cancelled on commit/reset/exit.
+        self._arm_slot_stall_watchdog()
+        log.info("SLOT_CAPTURE_ENTER call=%s kind=%s config=%s",
+                 self.call_id, kind, config)
+        return session
+
+    def exit_slot_capture(self, reason: str = "commit") -> None:
+        """Close the active slot session, if any.  Cancels stall watchdog."""
+        if self._active_slot is None:
+            return
+        log.info("SLOT_CAPTURE_EXIT call=%s reason=%s buf=%r",
+                 self.call_id, reason,
+                 (self._active_slot.buffer or "")[:32])
+        self._cancel_slot_stall_watchdog()
+        self._active_slot = None
+        self._slot_normalizer = None
+        self._slot_on_commit = None
+        self._slot_on_stall = None
+        self._slot_on_confirm_needed = None
+
+    @property
+    def slot_capture_active(self) -> bool:
+        return self._active_slot is not None
+
+    def _arm_slot_stall_watchdog(self) -> None:
+        """Start / restart the inactivity timer for the active slot."""
+        self._cancel_slot_stall_watchdog()
+        if self._active_slot is None:
+            return
+        self._slot_stall_task = asyncio.create_task(
+            self._slot_stall_loop(),
+            name=f"slot-stall-{self.call_id}",
+        )
+
+    def _cancel_slot_stall_watchdog(self) -> None:
+        task = getattr(self, "_slot_stall_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._slot_stall_task = None
+
+    async def _slot_stall_loop(self) -> None:
+        """Two-stage stall recovery: prompt at T1, escalate at T1+T2.
+
+        Stage 1 (first_prompt) — nudge the caller to keep going, keeping
+        the current buffer.  Stage 2 (escalate) — hand back to the
+        workflow controller so it can offer DTMF or re-open capture.
+        The LLM is NOT invited to interpret a partial buffer here.
+        """
+        try:
+            await asyncio.sleep(self._slot_stall_first_prompt_s)
+            if self._active_slot is None:
+                return
+            on_stall = self._slot_on_stall
+            if on_stall is not None:
+                try:
+                    await on_stall("first_prompt", self._active_slot)
+                except Exception as e:
+                    log.exception(
+                        "SLOT_STALL_HANDLER_FAILED call=%s stage=first_prompt: %s",
+                        self.call_id, e,
+                    )
+            await asyncio.sleep(self._slot_stall_escalate_s)
+            if self._active_slot is None:
+                return
+            if on_stall is not None:
+                try:
+                    await on_stall("escalate", self._active_slot)
+                except Exception as e:
+                    log.exception(
+                        "SLOT_STALL_HANDLER_FAILED call=%s stage=escalate: %s",
+                        self.call_id, e,
+                    )
+        except asyncio.CancelledError:
+            pass
+
+    async def _feed_active_slot(
+        self, transcript: str, turn_gen: int,
+        source: SlotSource = SlotSource.SPEECH,
+    ) -> bool:
+        """Route an STT final (or DTMF batch) to the active slot session.
+
+        Return contract:
+          True  — transcript was CONSUMED by the slot (do NOT run brain).
+          False — no active slot (brain should run as usual).
+
+        NOTE: INVALID does NOT escape back to the LLM.  We stay inside
+        the structured subsystem via on_stall/on_confirm_needed hooks
+        so the general LLM never gets to guess digits from a partial buffer.
+        """
+        session = self._active_slot
+        if session is None:
+            return False
+
+        normalizer = self._slot_normalizer
+        result = session.feed(transcript, normalize=normalizer, source=source)
+
+        log.info(
+            "SLOT_FEED call=%s kind=%s status=%s buf=%r src=%s reason=%r",
+            self.call_id, session.slot_type, result.status.value,
+            (session.buffer or "")[:32], source.value, result.reason or "",
+        )
+
+        # Any fragment resets the stall timer — caller is still engaged.
+        self._arm_slot_stall_watchdog()
+
+        # VALID → commit immediately.  This is a validator-confirmed
+        # canonical value; no caller confirmation needed.
+        if result.status == SlotStatus.VALID:
+            if result.value:
+                session.commit(result.value)
+            on_commit = self._slot_on_commit
+            self.exit_slot_capture(reason="valid")
+            if on_commit is not None:
+                try:
+                    await on_commit(result)
+                except Exception as e:
+                    log.exception(
+                        "SLOT_ON_COMMIT_FAILED call=%s: %s",
+                        self.call_id, e,
+                    )
+            return True
+
+        # POSSIBLE → right shape but not verified.  Do NOT commit; the
+        # workflow controller must ask for explicit confirmation before
+        # promoting to VALID.  This protects against libphonenumber
+        # metadata lag for newly allocated ranges (and future non-phone
+        # validators with the same shape/allocation distinction).
+        if result.status == SlotStatus.POSSIBLE:
+            on_confirm = self._slot_on_confirm_needed
+            if on_confirm is not None:
+                try:
+                    await on_confirm(result)
+                except Exception as e:
+                    log.exception(
+                        "SLOT_ON_CONFIRM_FAILED call=%s: %s",
+                        self.call_id, e,
+                    )
+            else:
+                # No confirmation hook — safest is to stay in capture so
+                # the workflow controller can re-prompt.  Do not commit.
+                log.warning(
+                    "SLOT_POSSIBLE_NO_CONFIRM_HOOK call=%s buf=%r — staying in capture",
+                    self.call_id, (session.buffer or "")[:32],
+                )
+            return True
+
+        # INVALID → do NOT resume the general LLM.  Stay inside the
+        # structured subsystem and let the workflow controller decide
+        # how to recover (re-prompt, DTMF fallback, escalate).  The
+        # on_stall handler is the escape hatch — INVALID triggers an
+        # immediate "escalate" so the workflow can react.
+        if result.status == SlotStatus.INVALID:
+            log.warning(
+                "SLOT_INVALID call=%s reason=%s buf=%r — staying in capture",
+                self.call_id, result.reason,
+                (session.buffer or "")[:32],
+            )
+            on_stall = self._slot_on_stall
+            if on_stall is not None:
+                try:
+                    await on_stall("escalate", session)
+                except Exception as e:
+                    log.exception(
+                        "SLOT_ON_STALL_FAILED call=%s: %s",
+                        self.call_id, e,
+                    )
+            # Even on INVALID, we stay in capture — the workflow may
+            # reset() the buffer to give the caller a fresh try.
+            return True
+
+        # INCOMPLETE / AMBIGUOUS → keep listening.  Stall watchdog will
+        # fire if the caller goes silent.
+        return True
+
     async def _speak(self, text: str) -> None:
         """Synthesize `text`, chunk it, send to Twilio, register each
         chunk in the ledger with a mark ID.  Cancellable — bump_turn
@@ -2472,6 +2745,13 @@ class TwilioActorSession:
                 return True
             # Only speculate if we're not already speaking / thinking.
             if actor.state not in (CallState.LISTENING,):
+                return True
+            # R3 P2: during structured-input capture we suppress
+            # speculative brain — digit fragments would churn the LLM
+            # while the slot session accumulates.
+            if self.slot_capture_active:
+                log.debug("speculative brain suppressed (slot capture) call=%s",
+                          self.call_id)
                 return True
             # Don't stack — a prior speculative task means we haven't
             # cleaned up yet; skip this one.
@@ -3309,6 +3589,19 @@ class TwilioActorSession:
         try:
             log.info("stream-brain %s turn=%d heard: %s",
                      self.session_id, turn_gen, transcript)
+
+            # R3 P2: structured-input capture takes precedence.  When a
+            # slot session is open (e.g. booking flow asked for phone),
+            # STT finals feed the session, not the LLM.  The session
+            # decides when to release control back to normal brain flow
+            # via its on_commit callback.
+            if self.slot_capture_active:
+                consumed = await self._feed_active_slot(
+                    transcript, turn_gen, source=SlotSource.SPEECH,
+                )
+                if consumed:
+                    return
+
             handle = session_manager.get_session(
                 self.session_id, tenant_id=self.tenant_id,
             )
