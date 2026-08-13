@@ -279,6 +279,9 @@ class TwilioActorSession:
         call_id: str,
         tenant_id: str,
         session_id: Optional[str] = None,
+        caller_number: Optional[str] = None,
+        dialed_number: Optional[str] = None,
+        caller_name: Optional[str] = None,
     ) -> None:
         self.ws = ws
         self.stream_sid = stream_sid
@@ -287,6 +290,17 @@ class TwilioActorSession:
         # session_id is the brain's session key — keeps back-compat with
         # session_manager which was built pre-actor.
         self.session_id = session_id or f"twilio_{call_id}"
+
+        # R3 P3 (task #370): caller ANI + dialed DNIS, populated from
+        # Twilio's start.customParameters (see _twiml_stream_response).
+        # Empty string when Twilio didn't supply them (e.g. Media
+        # Streams without <Parameter> tags in the TwiML, or unknown
+        # blocked-caller IDs).  Used by resolve_ani_candidate() to
+        # offer "use the number you're calling from" during phone-slot
+        # capture — never auto-committed without caller confirmation.
+        self.caller_number: str = (caller_number or "").strip()
+        self.dialed_number: str = (dialed_number or "").strip()
+        self.caller_name: str = (caller_name or "").strip()
 
         # VAD-based utterance framing (unchanged from legacy path)
         self._buffer = bytearray()
@@ -2337,6 +2351,107 @@ class TwilioActorSession:
         # fire if the caller goes silent.
         return True
 
+    # ── R3 P3: DTMF + ANI ────────────────────────────────────────────
+
+    async def on_dtmf(self, digit: str, track: str = "inbound_track") -> None:
+        """Twilio delivered one DTMF keypress.  If a slot session is
+        active, feed it as a SlotSource.DTMF fragment (same accumulator
+        as speech — the caller can mix "0333" spoken + "5244772" keyed).
+        Outside of slot capture we just log and drop (future: could
+        interrupt the agent for a DTMF menu, but not needed yet).
+        """
+        digit = digit.strip()
+        if not digit:
+            return
+        # * and # arrive as literal characters; keep them for future
+        # menu semantics.  The phone validator strips non-digits so a
+        # stray * mid-number doesn't pollute the buffer.
+        if self.slot_capture_active:
+            log.info(
+                "DTMF_FEED_SLOT call=%s digit=%s track=%s slot=%s",
+                self.call_id, digit, track,
+                self._active_slot.slot_type if self._active_slot else "?",
+            )
+            # turn_gen is not tracked at this layer — DTMF is out-of-band
+            # with the STT turn generator.  Use 0 as a sentinel; the
+            # slot session doesn't use it for anything.
+            await self._feed_active_slot(
+                digit, turn_gen=0, source=SlotSource.DTMF,
+            )
+        else:
+            log.info(
+                "DTMF_IGNORED call=%s digit=%s track=%s (no slot active)",
+                self.call_id, digit, track,
+            )
+
+    def resolve_ani_candidate(
+        self,
+        default_region: Optional[str] = None,
+        accepted_regions: Optional[list[str]] = None,
+    ):
+        """Return the caller's ANI (from Twilio start.customParameters)
+        parsed through libphonenumber, so the workflow can offer:
+          "Should I use the number you're calling from?"
+
+        Returns:
+          A `SlotResult`-shaped object with status VALID / POSSIBLE /
+          INVALID / (INCOMPLETE if no ANI available).  The workflow is
+          responsible for asking the caller to confirm before treating
+          the value as authoritative — the ANI is a CANDIDATE, never
+          an auto-committed answer.
+
+        default_region / accepted_regions:
+          When not passed, the workflow can call parse_phone directly
+          on `self.caller_number`.  We keep them optional so a tenant
+          config wire-up later can pass them without another API change.
+        """
+        # Local import so tests that only exercise slot semantics
+        # don't pay the libphonenumber load cost.
+        from packages.slot_parsers import parse_phone, PhoneStatus
+        from packages.slot_parsers.session import SlotResult, SlotStatus
+
+        if not self.caller_number:
+            log.info(
+                "ANI_UNAVAILABLE call=%s (no caller_number from Twilio)",
+                self.call_id,
+            )
+            return SlotResult(
+                status=SlotStatus.INCOMPLETE,
+                reason="no caller_number available (blocked ID or Media "
+                       "Streams TwiML without <Parameter>)",
+                raw_digits="",
+            )
+
+        r = parse_phone(
+            self.caller_number,
+            default_region=default_region or "US",
+            accepted_regions=accepted_regions,
+        )
+        # Map PhoneStatus → SlotStatus for a uniform workflow surface.
+        if r.status == PhoneStatus.COMPLETE:
+            status = SlotStatus.VALID
+        elif r.status == PhoneStatus.POSSIBLE:
+            status = SlotStatus.POSSIBLE
+        elif r.status in (
+            PhoneStatus.PARTIAL, PhoneStatus.EMPTY,
+        ):
+            status = SlotStatus.INCOMPLETE
+        else:
+            status = SlotStatus.INVALID
+
+        log.info(
+            "ANI_RESOLVED call=%s raw=%r status=%s value=%r region=%s",
+            self.call_id, self.caller_number,
+            status.value, r.value, r.matched_region,
+        )
+        return SlotResult(
+            status=status,
+            value=r.value,
+            matched_region=r.matched_region,
+            raw_digits=self.caller_number,
+            reason=r.reason or "from Twilio ANI",
+        )
+
     async def _speak(self, text: str) -> None:
         """Synthesize `text`, chunk it, send to Twilio, register each
         chunk in the ledger with a mark ID.  Cancellable — bump_turn
@@ -4210,16 +4325,35 @@ async def handle_twilio_stream_via_actor(
                 continue
 
             if kind == "start":
-                stream_sid = event["start"]["streamSid"]
-                call_sid = (event["start"].get("callSid")
+                start_payload = event["start"]
+                stream_sid = start_payload["streamSid"]
+                call_sid = (start_payload.get("callSid")
                             or f"call_{uuid.uuid4().hex[:8]}")
+                # R3 P3 (task #370): Twilio delivers ANI/DNIS via the
+                # customParameters bag when TwiML sets <Parameter>.
+                # Keys are the "name" attribute; values are the
+                # already-expanded {{From}}/{{To}} strings.  Missing =
+                # empty string (blocked caller ID or older TwiML).
+                custom = start_payload.get("customParameters") or {}
+                caller_number = (custom.get("from") or "").strip()
+                dialed_number = (custom.get("to") or "").strip()
+                caller_name = (custom.get("callerName") or "").strip()
                 session = TwilioActorSession(
                     ws=ws,
                     stream_sid=stream_sid,
                     call_id=call_sid,
                     tenant_id=tenant_id,
+                    caller_number=caller_number,
+                    dialed_number=dialed_number,
+                    caller_name=caller_name,
                 )
-                log.info("actor twilio start: %s (%s)", call_sid, stream_sid)
+                log.info(
+                    "actor twilio start: %s (%s) caller=%r dialed=%r name=%r",
+                    call_sid, stream_sid,
+                    caller_number or "-",
+                    dialed_number or "-",
+                    caller_name or "-",
+                )
                 await session.start()
                 continue
 
@@ -4286,6 +4420,21 @@ async def handle_twilio_stream_via_actor(
                 mark_name = event.get("mark", {}).get("name")
                 if mark_name:
                     await session.on_mark_ack(mark_name)
+                continue
+
+            # R3 P3 (task #370): Twilio DTMF event during Media Streams.
+            # Payload shape (per Twilio docs):
+            #   {"event":"dtmf","streamSid":"MZ...","sequenceNumber":"N",
+            #    "dtmf":{"track":"inbound_track","digit":"5"}}
+            # Only 0-9 * # #A #B #C #D are legal digits.  Delivered as
+            # ONE event per keypress — batching (rapid keypad entry) is
+            # our problem, not Twilio's.
+            if kind == "dtmf" and session is not None:
+                dtmf = event.get("dtmf") or {}
+                digit = str(dtmf.get("digit") or "").strip()
+                track = dtmf.get("track") or "inbound_track"
+                if digit:
+                    await session.on_dtmf(digit, track=track)
                 continue
 
             if kind == "stop" and session is not None:

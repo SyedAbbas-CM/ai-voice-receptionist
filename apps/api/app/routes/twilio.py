@@ -119,10 +119,19 @@ def _get_vad():
 
 def _twiml_stream_response(public_url: str) -> str:
     ws_url = public_url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/") + "/twilio/stream"
+    # R3 P3 (task #370): pass caller ANI + dialed DNIS to the Media
+    # Streams `start` event via <Parameter> tags.  Twilio expands
+    # {{From}} and {{To}} on their side; they land on our side under
+    # start.customParameters.  Used by the ANI resolver for
+    # phone-slot capture ("Use the number you're calling from?").
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="{ws_url}" />
+    <Stream url="{ws_url}">
+      <Parameter name="from" value="{{{{From}}}}"/>
+      <Parameter name="to" value="{{{{To}}}}"/>
+      <Parameter name="callerName" value="{{{{CallerName}}}}"/>
+    </Stream>
   </Connect>
 </Response>"""
 

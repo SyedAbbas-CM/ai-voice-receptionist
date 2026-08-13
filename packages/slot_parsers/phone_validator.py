@@ -115,11 +115,21 @@ def parse_phone(
         )
 
         if phonenumbers.is_valid_number(num):
-            # First-wins: return immediately.
+            # First-wins: return immediately.  For fully-international
+            # numbers (starts with `+`), libphonenumber ignores the
+            # hint region and derives country from the country_code.
+            # Report the ACTUAL region from the parsed country code,
+            # not our first-try hint — otherwise a US-tenant probe of
+            # "+923335244772" reports matched_region="US" even though
+            # the number is PK.
+            try:
+                actual_region = phonenumbers.region_code_for_number(num)
+            except Exception:
+                actual_region = None
             return PhoneParseResult(
                 status=PhoneStatus.COMPLETE,
                 value=e164,
-                matched_region=region,
+                matched_region=actual_region or region,
                 raw_digits=canonical,
             )
 
