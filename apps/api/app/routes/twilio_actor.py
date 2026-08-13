@@ -353,6 +353,17 @@ class TwilioActorSession:
         self._speaking_watchdog_task: Optional[asyncio.Task] = None
         self._last_wire_send_at: Optional[float] = None
         self._speaking_entered_at: Optional[float] = None
+        # 2026-08-13 (R5 P0): turn-stall watchdog.  Stamped when a
+        # caller final is committed to brain dispatch.  Cleared when
+        # ANY response signal fires (TTS, LLM stream start, tool start,
+        # state transition to SPEAKING).  If it stays stamped >3s the
+        # watchdog logs TURN_STALLED with full context.  Would have
+        # diagnosed Hamzah's 40s dead air instantly.
+        self._turn_stall_watchdog_task: Optional[asyncio.Task] = None
+        self._committed_turn_at: Optional[float] = None
+        self._committed_turn_transcript: str = ""
+        self._committed_turn_gen: int = -1
+        self._turn_stalled_logged: bool = False
         # 2026-08-13 (M1 task #343): outbound wire-to-ear instrumentation.
         # send_wall recorded when we ship the "FIRST40_<n>" mark; the
         # ack on that mark tells us caller actually heard the first
@@ -575,6 +586,14 @@ class TwilioActorSession:
             self._speaking_watchdog(),
             name=f"speaking-wd-{self.call_id}",
         )
+        # 2026-08-13 (R5 P0): turn-stall watchdog.  ERRORs a
+        # TURN_STALLED line if a committed caller turn has no response
+        # signal within 3s.  Diagnoses zombie states before the caller
+        # notices.
+        self._turn_stall_watchdog_task = asyncio.create_task(
+            self._turn_stall_watchdog(),
+            name=f"turn-stall-wd-{self.call_id}",
+        )
 
         # 2026-08-12 (task #323): fire-and-forget ElevenLabs TLS prewarm.
         # From PK the first TTS request pays ~500ms of TCP+TLS handshake
@@ -698,6 +717,10 @@ class TwilioActorSession:
         if self._speaking_watchdog_task is not None and not self._speaking_watchdog_task.done():
             self._speaking_watchdog_task.cancel()
             self._speaking_watchdog_task = None
+        # 2026-08-13 (R5 P0): stop the turn-stall watchdog.
+        if self._turn_stall_watchdog_task is not None and not self._turn_stall_watchdog_task.done():
+            self._turn_stall_watchdog_task.cancel()
+            self._turn_stall_watchdog_task = None
         # 2026-08-13 (P0-startup fix): cancel greeting task if caller
         # hung up mid-greeting.
         if self._greeting_task is not None and not self._greeting_task.done():
@@ -842,6 +865,80 @@ class TwilioActorSession:
                         self.call_id, lag_ms,
                     )
                 expected = now
+        except asyncio.CancelledError:
+            return
+
+    def _stamp_turn_committed(self, transcript: str, turn_gen: int) -> None:
+        """R5: mark a caller turn as dispatched to brain.  Watchdog will
+        fire TURN_STALLED if no response signal within 3s."""
+        import time as _t
+        self._committed_turn_at = _t.monotonic()
+        self._committed_turn_transcript = transcript[:120]
+        self._committed_turn_gen = turn_gen
+        self._turn_stalled_logged = False
+
+    def _clear_turn_committed(self, reason: str = "response") -> None:
+        """R5: response signal fired — clear the stall timer."""
+        if self._committed_turn_at is not None:
+            self._committed_turn_at = None
+            self._committed_turn_transcript = ""
+            self._committed_turn_gen = -1
+            self._turn_stalled_logged = False
+
+    async def _turn_stall_watchdog(self) -> None:
+        """2026-08-13 (R5 P0): scream when a committed caller turn goes
+        3+ seconds with no response signal.
+
+        A "response signal" that clears the stall is any of:
+          - TTS_SENTENCE_QUEUED  (streaming brain fired)
+          - TTS_STREAM_START     (any TTS path fired)
+          - CONV_CONTROL_FASTPATH_HIT / RESPONSE_CACHE_STREAM_HIT
+          - state transition to SPEAKING
+          - tool started (via brain path)
+          - explicit clarification queued
+        Each of the above calls _clear_turn_committed().
+
+        Would have diagnosed Hamzah's zombie SPEAKING + fake-wait
+        combo instantly.  Emits TURN_STALLED with:
+          - actor.state
+          - actor.turn_generation, actor.speech_generation
+          - committed transcript + gen
+          - live speech task presence
+          - seconds since commit
+        Logs at ERROR level so it's grep-obvious.
+        """
+        import time as _t
+        stall_threshold_s = 3.0
+        interval_s = 0.5
+        try:
+            while True:
+                await asyncio.sleep(interval_s)
+                actor = self.actor
+                if actor is None:
+                    continue
+                committed_at = self._committed_turn_at
+                if committed_at is None:
+                    continue
+                if self._turn_stalled_logged:
+                    continue  # already screamed for this turn; don't spam
+                idle_s = _t.monotonic() - committed_at
+                if idle_s < stall_threshold_s:
+                    continue
+                speech_task = getattr(actor, "_current_speech_task", None)
+                live_speech = speech_task is not None and not speech_task.done()
+                log.error(
+                    "TURN_STALLED call=%s idle_s=%.1f state=%s "
+                    "turn_gen=%d speech_gen=%d live_speech_task=%s "
+                    "committed_gen=%d committed_transcript=%r",
+                    self.call_id, idle_s,
+                    getattr(actor.state, "value", str(actor.state)),
+                    actor.turn_generation,
+                    actor.speech_generation,
+                    live_speech,
+                    self._committed_turn_gen,
+                    self._committed_turn_transcript,
+                )
+                self._turn_stalled_logged = True
         except asyncio.CancelledError:
             return
 
@@ -1314,6 +1411,7 @@ class TwilioActorSession:
                 "CONV_CONTROL_FASTPATH_HIT call=%s input=%r → reply=%r",
                 self.call_id, transcript[:80], reply[:80],
             )
+            self._clear_turn_committed("conv_control_fastpath")
             await self._speak(reply)
             return True
         except Exception:
@@ -1358,6 +1456,7 @@ class TwilioActorSession:
                 self.call_id, business_id,
                 transcript[:80], hit.reply_text[:80],
             )
+            self._clear_turn_committed("response_cache_fastpath")
             await self._speak(hit.reply_text)
             return True
         except Exception:
@@ -1440,6 +1539,8 @@ class TwilioActorSession:
                         we_transitioned = True
                         # 2026-08-13 (double-brain fix): see _speak() note.
                         self._inflight_has_spoken = True
+                        # R5: streaming pump entering SPEAKING clears stall.
+                        self._clear_turn_committed("pump_start")
                         speech_gen = self.actor.speech_generation
                         self.actor.ledger.start_generation(speech_gen, clean)
                     log.info(
@@ -1504,6 +1605,10 @@ class TwilioActorSession:
             if self._should_dedupe_dispatch(transcript):
                 return
             self._mark_dispatched(transcript)
+            # R5 P0: start the stall timer.  Cleared by any downstream
+            # response signal (fastpath hit, TTS start, etc.).  Watchdog
+            # fires TURN_STALLED at ERROR if it stays stamped >3s.
+            self._stamp_turn_committed(transcript, turn_gen)
 
             # 2026-08-13 (A1 patch): conversation-control fastpath FIRST.
             # Deterministic intents ("can you hear me", "hello", "are you
@@ -1876,6 +1981,8 @@ class TwilioActorSession:
         # having produced audio, so a Deepgram-fragment-then-superset
         # arriving after this point gets dropped by _should_dedupe_dispatch.
         self._inflight_has_spoken = True
+        # R5: transition to SPEAKING is a response signal.
+        self._clear_turn_committed("speak_start")
         gen = actor.speech_generation
         actor.ledger.start_generation(gen, text)
 
@@ -3219,6 +3326,10 @@ class TwilioActorSession:
             if self._should_dedupe_dispatch(transcript):
                 return
             self._mark_dispatched(transcript)
+            # R5 P0: start the stall timer.  Cleared by any downstream
+            # response signal (fastpath hit, TTS start, etc.).  Watchdog
+            # fires TURN_STALLED at ERROR if it stays stamped >3s.
+            self._stamp_turn_committed(transcript, turn_gen)
 
             # 2026-08-13 (A1 patch): conversation-control fastpath FIRST.
             # Deterministic intents ("can you hear me", "hello", "are you
