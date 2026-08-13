@@ -54,6 +54,66 @@ _FAKE_BOOKING_PATTERNS = tuple(
 _BOOKING_TOOLS = frozenset({"book_appointment", "book_reservation", "book_viewing"})
 
 
+# 2026-08-13 (R2 P0): fake-wait guard.
+# If the LLM says "one moment / let me check / hold on / checking now"
+# WITHOUT actually invoking a tool, the caller waits forever for a
+# nothing that will never come.  This literally killed Hamzah's call
+# (2026-08-13, log 19:06:21 "One moment, please." + LLM_STREAM_DONE
+# tools=0 → 40 seconds of dead air until he asked "Are you still
+# there?").  Guard rewrites the reply to a clarifying question so at
+# least the caller stays engaged instead of getting ghosted.
+_WAIT_LANGUAGE_PATTERNS = tuple(
+    _re_book.compile(pat, _re_book.IGNORECASE)
+    for pat in (
+        r"\bone (?:moment|sec(?:ond)?|minute)\b",
+        r"\blet me (?:check|look|see|find|verify)\b",
+        r"\bi(?:'ll| will) (?:check|look|see|find|verify|pull up|grab)\b",
+        r"\bhold on\b",
+        r"\bhang on\b",
+        r"\bgive me (?:a )?(?:sec(?:ond)?|moment|minute|second)\b",
+        r"\bchecking (?:now|on that|availability|the calendar|for you)\b",
+        r"\bjust a (?:sec(?:ond)?|moment|minute)\b",
+        r"\blooking (?:that up|into (?:that|it))\b",
+        r"\bbear with me\b",
+    )
+)
+
+
+def _reply_promises_wait_without_tool(
+    reply_text: str, tool_results: list[dict], tool_calls: list,
+) -> bool:
+    """R2 P0: True if the reply promises a wait/check but no tool call
+    was made this round AND no tool result exists yet.
+
+    tool_calls   = the LLM's tool_calls list from THIS response object
+    tool_results = tool receipts accumulated across the whole turn's
+                   loop (may include tools from earlier rounds)
+
+    The check is intentionally strict on both fronts: the LLM is
+    telling the caller to wait for something.  Either the LLM must
+    actually invoke a tool in the same round OR we must have already
+    completed a tool that would have produced the info they're waiting
+    for.  Otherwise it's a lie and we rewrite."""
+    if not reply_text:
+        return False
+    matched = False
+    for pat in _WAIT_LANGUAGE_PATTERNS:
+        if pat.search(reply_text):
+            matched = True
+            break
+    if not matched:
+        return False
+    # LLM emitted tool_calls THIS round → not a fake wait, the tool
+    # will actually run.
+    if tool_calls:
+        return False
+    # A tool executed earlier in the same turn → also not a fake wait,
+    # the wait phrase is just conversational filler over real work.
+    if tool_results:
+        return False
+    return True  # wait language + zero tool activity anywhere = lie
+
+
 def _reply_lies_about_booking(reply_text: str, tool_results: list[dict]) -> bool:
     """Return True if the reply text claims a booking was made but no
     successful booking-tool result exists in this turn's payload."""
@@ -501,6 +561,28 @@ class ReceptionistBrain:
                         "Hold on, I don't have everything I need yet to book that. "
                         "Can you give me your full name, a full ten-digit phone number, "
                         "and the day and time you want?"
+                    )
+
+                # 2026-08-13 (R2 P0): fake-wait guard.  LLM said
+                # "one moment / let me check" but no tool was ever
+                # invoked this turn.  This is a lie — the caller waits
+                # for something that will never come.  Killed Hamzah.
+                # Rewrite to a direct clarifying question so the
+                # conversation stays alive.
+                if _reply_promises_wait_without_tool(
+                    reply_text, tool_results_payload, response.tool_calls or [],
+                ):
+                    import logging as _fw_log
+                    _fw_log.getLogger(__name__).warning(
+                        "brain: FAKE_WAIT_BLOCKED — rewriting; "
+                        "original=%r tool_calls=%d tool_results=%d",
+                        reply_text[:200],
+                        len(response.tool_calls or []),
+                        len(tool_results_payload),
+                    )
+                    reply_text = (
+                        "Actually, let me ask you directly — "
+                        "what day and time are you looking for?"
                     )
 
                 state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=reply_text))
