@@ -3085,21 +3085,34 @@ class TwilioActorSession:
     async def _play_cached_backchannel(self, phrase: str, turn_gen: int) -> bool:
         """Task B-wire: look up a backchannel phrase in the shared TTS
         cache and play the bytes directly.  Cache MISS = degrade to
-        silent lane (never synthesise fresh — defeats latency point)."""
+        silent lane (never synthesise fresh — defeats latency point).
+
+        2026-08-13 (R4 P0): fixed cache-key mismatch.  Writes via
+        TTSCacheWrapper.synthesize hash with the INNER provider name
+        ("elevenlabs"), but reads here were hashing with the wrapper
+        name ("elevenlabs+cache") because the wrapper overrides
+        `.name`.  Every reactive lookup missed — confirmed in
+        Abdullah's call log 18:53:54 + 18:54:22 (MISS for phrases
+        that ARE in DEFAULT_FILLERS + warmed at boot).  Unwrap to
+        the inner provider before extracting name/voice/format so
+        keys match writes exactly."""
         from packages.tts_cache.cache import get_shared_cache, _hash_key
         from app.routes.twilio import _get_telephony_tts
 
         tts = _get_telephony_tts()
-        voice = getattr(tts, "default_voice", "default")
-        fmt = getattr(tts, "output_format", "unknown")
-        provider = getattr(tts, "name", "tts")
+        # Unwrap the TTSCacheWrapper — synthesize() hashes with the
+        # inner provider's attrs, so reads must do the same.
+        inner = getattr(tts, "_inner", tts)
+        voice = getattr(inner, "default_voice", "default")
+        fmt = getattr(inner, "output_format", "unknown")
+        provider = getattr(inner, "name", "tts")
 
         key = _hash_key(voice, phrase, fmt, provider)
         cache = get_shared_cache()
         hit = await cache.get(key)
         if hit is None:
-            log.warning("reactive backchannel cache MISS for %r (voice=%s fmt=%s) — degrading to silent",
-                        phrase, voice, fmt)
+            log.warning("reactive backchannel cache MISS for %r (voice=%s fmt=%s provider=%s) — degrading to silent",
+                        phrase, voice, fmt, provider)
             return False
         audio, mime = hit
         log.info("reactive backchannel HIT: %r (%d bytes)", phrase, len(audio))
