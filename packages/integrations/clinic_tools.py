@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 from packages.schemas import (
     BusinessProfile,
@@ -119,9 +119,21 @@ class ClinicToolHandler:
         "find_existing_appointment", "cancel_appointment", "reschedule_appointment",
     })
 
-    def __init__(self, business: BusinessProfile, calendar: FakeCalendar) -> None:
+    def __init__(
+        self,
+        business: BusinessProfile,
+        calendar: FakeCalendar,
+        default_phone_region: str = "US",
+        accepted_phone_regions: Optional[list[str]] = None,
+    ) -> None:
         self.business = business
         self.calendar = calendar
+        # R3 P4 (task #371, slim v1): tenant phone-region config for
+        # the pre-write validator.  Defaults keep back-compat; wired
+        # from BusinessProfile / tenant config once that lands.
+        self.default_phone_region = default_phone_region
+        # If accepted_regions is not supplied, allow just the default.
+        self.accepted_phone_regions = accepted_phone_regions or [default_phone_region]
 
     def can_handle(self, tool_name: str) -> bool:
         return tool_name in self.TOOL_NAMES
@@ -174,6 +186,87 @@ class ClinicToolHandler:
             if s.name.lower() == name.lower():
                 return s.duration_minutes
         return 30
+
+    def _validate_phone_or_error(
+        self, raw_phone: str, call: ToolCall,
+    ):
+        """R3 P4 slim v1: pre-write phone validation.
+
+        Returns:
+          str  — canonical E.164 (VALID or POSSIBLE) — proceed to book.
+          ToolResult — structured error the LLM sees + re-asks the
+                       caller.  Do NOT hit the calendar.
+
+        Design notes:
+          - We accept POSSIBLE (right shape, not verified in the
+            allocation tables) alongside VALID.  Refusing POSSIBLE
+            would reject genuine new numbers.  PHASE2's workflow
+            controller will drive the explicit caller-confirm loop
+            for POSSIBLE; this slim v1 accepts it.
+          - INVALID / TOO_LONG / EMPTY → structured error.  The
+            `reason` field is written to be actionable when the LLM
+            reads it (short, imperative — "ask the caller to repeat
+            the number").
+        """
+        # Local import to avoid front-loading libphonenumber during
+        # tool-def enumeration.
+        from packages.slot_parsers import (
+            normalize_spoken_digits, parse_phone, PhoneStatus,
+        )
+
+        if not raw_phone:
+            return ToolResult(
+                tool_call_id=call.id, name=call.name,
+                result={
+                    "phone_missing": True,
+                    "reason": "The caller has not given a phone yet. "
+                              "Ask them for the full number before booking.",
+                },
+            )
+        # Layer A: normalize whatever shape the LLM sent (may be spoken
+        # digits copied from transcript, may be already-canonical).
+        canonical = normalize_spoken_digits(raw_phone) or raw_phone
+        # Layer B: libphonenumber wrap.
+        r = parse_phone(
+            canonical,
+            default_region=self.default_phone_region,
+            accepted_regions=self.accepted_phone_regions,
+        )
+        if r.status in (PhoneStatus.COMPLETE, PhoneStatus.POSSIBLE):
+            return r.value  # canonical E.164
+        # INVALID / PARTIAL / TOO_LONG / EMPTY
+        if r.status == PhoneStatus.PARTIAL:
+            return ToolResult(
+                tool_call_id=call.id, name=call.name,
+                result={
+                    "phone_partial": True,
+                    "phone_input": raw_phone,
+                    "reason": "The phone number is too short. Ask the "
+                              "caller to say the FULL number again.",
+                },
+            )
+        if r.status == PhoneStatus.TOO_LONG:
+            return ToolResult(
+                tool_call_id=call.id, name=call.name,
+                result={
+                    "phone_too_long": True,
+                    "phone_input": raw_phone,
+                    "reason": "The phone number is too long — it may "
+                              "include an extra digit or two numbers "
+                              "glued together. Ask the caller to say "
+                              "just their number.",
+                },
+            )
+        # INVALID / EMPTY / other
+        return ToolResult(
+            tool_call_id=call.id, name=call.name,
+            result={
+                "phone_invalid": True,
+                "phone_input": raw_phone,
+                "reason": "The phone number does not look valid. Ask "
+                          "the caller to repeat their number slowly.",
+            },
+        )
 
     async def __call__(self, call: ToolCall) -> ToolResult:
         try:
@@ -240,11 +333,29 @@ class ClinicToolHandler:
                     )
                 service = call.arguments["service"]
                 duration = self._service_duration(service)
+                # R3 P4 (task #371, slim v1): PHONE PRECONDITION.
+                # Run the LLM-supplied phone through libphonenumber
+                # BEFORE hitting the calendar.  Two purposes:
+                #   1. Catch hallucinated / mis-heard digits (LLM
+                #      loves inventing "555" numbers when it hasn't
+                #      actually heard one).  INVALID → structured
+                #      error the LLM sees and re-asks.
+                #   2. Normalize whatever shape landed (spoken,
+                #      spaced, hyphenated) into canonical E.164 so
+                #      the calendar record is stable + matchable.
+                raw_phone = str(call.arguments.get("phone") or "").strip()
+                validated_phone = self._validate_phone_or_error(
+                    raw_phone, call,
+                )
+                if isinstance(validated_phone, ToolResult):
+                    # Precondition failed — hand the LLM a structured
+                    # error and skip the calendar write entirely.
+                    return validated_phone
                 outcome = self.calendar.book(
                     start=start,
                     duration_minutes=duration,
                     caller_name=call.arguments["caller_name"],
-                    phone=call.arguments["phone"],
+                    phone=validated_phone,  # canonical E.164
                     service=service,
                     notes=call.arguments.get("notes"),
                 )

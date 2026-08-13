@@ -127,15 +127,26 @@ def _reply_lies_about_booking(reply_text: str, tool_results: list[dict]) -> bool
     if not matched_pat:
         return False
     # Any booking tool succeeded this turn?  Success = present in the
-    # payload AND error is None/falsy AND result isn't a blocked/error dict.
+    # payload AND error is None/falsy AND result isn't a blocked/error/
+    # precondition-failure dict.
     for tr in tool_results:
         if tr.get("name") not in _BOOKING_TOOLS:
             continue
         if tr.get("error"):
             continue
         result = tr.get("result")
-        if isinstance(result, dict) and (result.get("blocked") or result.get("error")):
-            continue
+        if isinstance(result, dict):
+            # R3 P4 slim v1: precondition failures return
+            # phone_invalid / phone_missing / phone_partial /
+            # phone_too_long / date_unparseable / date_ambiguous.
+            # None of these are successful writes.
+            if (
+                result.get("blocked") or result.get("error")
+                or result.get("phone_invalid") or result.get("phone_missing")
+                or result.get("phone_partial") or result.get("phone_too_long")
+                or result.get("date_unparseable") or result.get("date_ambiguous")
+            ):
+                continue
         return False  # a good booking receipt exists — reply is truthful
     return True  # reply claims booking but no successful tool call
 
@@ -709,13 +720,25 @@ class ReceptionistBrain:
                     "error": result.error,
                 })
                 # SpeechCommitGate signal: fire AFTER receipt.  ok=True
-                # iff no error AND (if result is a dict) not blocked
-                # and not error-shaped.  Held ACTION_CONFIRMATION
-                # sentences release on a successful matching receipt.
+                # iff no error AND (if result is a dict) not blocked,
+                # not error-shaped, and not a precondition failure.
+                # Held ACTION_CONFIRMATION sentences release only on a
+                # successful matching receipt.
                 if on_tool_receipt is not None:
                     _ok = result.error is None
                     if _ok and isinstance(result.result, dict):
-                        if result.result.get("blocked") or result.result.get("error"):
+                        # R3 P4 slim v1: phone precondition + other
+                        # non-success shapes.  Any *_invalid /
+                        # *_missing / *_partial / *_too_long /
+                        # *_unparseable / *_ambiguous key means the
+                        # tool did NOT execute the write.
+                        r = result.result
+                        if (
+                            r.get("blocked") or r.get("error")
+                            or r.get("phone_invalid") or r.get("phone_missing")
+                            or r.get("phone_partial") or r.get("phone_too_long")
+                            or r.get("date_unparseable") or r.get("date_ambiguous")
+                        ):
                             _ok = False
                     try:
                         await on_tool_receipt(tc.name, _ok)
