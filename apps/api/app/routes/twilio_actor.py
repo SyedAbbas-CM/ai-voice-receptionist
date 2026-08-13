@@ -343,6 +343,16 @@ class TwilioActorSession:
         # looks non-blocking but sync work between awaits still stalls
         # the receiver.
         self._loop_lag_watchdog_task: Optional[asyncio.Task] = None
+        # 2026-08-13 (R1 P0): zombie-SPEAKING watchdog.  Runs alongside
+        # loop-lag watchdog.  If actor is SPEAKING for >3s without any
+        # outbound wire activity, forcibly transition back to LISTENING
+        # (self-healing invariant) + log a WARN so we notice the leak.
+        # Belt-and-suspenders behind the pump's try/finally epilogue —
+        # if a future new speech code path forgets its lifecycle, this
+        # catches it instead of the caller experiencing dead air.
+        self._speaking_watchdog_task: Optional[asyncio.Task] = None
+        self._last_wire_send_at: Optional[float] = None
+        self._speaking_entered_at: Optional[float] = None
         # 2026-08-13 (M1 task #343): outbound wire-to-ear instrumentation.
         # send_wall recorded when we ship the "FIRST40_<n>" mark; the
         # ack on that mark tells us caller actually heard the first
@@ -558,6 +568,13 @@ class TwilioActorSession:
             self._loop_lag_watchdog(),
             name=f"loop-lag-{self.call_id}",
         )
+        # 2026-08-13 (R1 P0): zombie-SPEAKING self-heal watchdog.
+        # 500ms cadence, forces SPEAKING→LISTENING if state has been
+        # SPEAKING with no outbound wire activity for >3s.
+        self._speaking_watchdog_task = asyncio.create_task(
+            self._speaking_watchdog(),
+            name=f"speaking-wd-{self.call_id}",
+        )
 
         # 2026-08-12 (task #323): fire-and-forget ElevenLabs TLS prewarm.
         # From PK the first TTS request pays ~500ms of TCP+TLS handshake
@@ -677,6 +694,10 @@ class TwilioActorSession:
         if self._loop_lag_watchdog_task is not None and not self._loop_lag_watchdog_task.done():
             self._loop_lag_watchdog_task.cancel()
             self._loop_lag_watchdog_task = None
+        # 2026-08-13 (R1 P0): stop the zombie-SPEAKING watchdog.
+        if self._speaking_watchdog_task is not None and not self._speaking_watchdog_task.done():
+            self._speaking_watchdog_task.cancel()
+            self._speaking_watchdog_task = None
         # 2026-08-13 (P0-startup fix): cancel greeting task if caller
         # hung up mid-greeting.
         if self._greeting_task is not None and not self._greeting_task.done():
@@ -821,6 +842,54 @@ class TwilioActorSession:
                         self.call_id, lag_ms,
                     )
                 expected = now
+        except asyncio.CancelledError:
+            return
+
+    async def _speaking_watchdog(self) -> None:
+        """2026-08-13 (R1 P0): zombie-SPEAKING self-heal.
+
+        Runs alongside the loop-lag watchdog for the whole call.
+        Every 500ms it checks the actor.  If the state has been
+        SPEAKING with NO wire activity (`_last_wire_send_at`) for
+        >= 3 seconds, forcibly transitions to LISTENING and arms
+        idle-followup.  This is BELT-AND-SUSPENDERS behind the pump's
+        try/finally epilogue — if a future code path introduces a new
+        way to reach SPEAKING and forgets to unwind, this catches it
+        instead of the caller hearing dead air.
+
+        Killed Hamzah's call on 2026-08-13 (SPEAKING at 19:06:19,
+        stuck until 19:07:00 when caller said "Are you still there?"
+        which TurnManager mis-flagged as INTERRUPTION-during-speech).
+        """
+        import time as _t
+        # Threshold: 3s of SPEAKING with no wire send = zombie.
+        # A real reply of any length keeps `_last_wire_send_at` fresh
+        # every ~20ms (Twilio frame cadence).  3s is a huge margin.
+        zombie_threshold_s = 3.0
+        interval_s = 0.5
+        try:
+            while True:
+                await asyncio.sleep(interval_s)
+                actor = self.actor
+                if actor is None:
+                    continue
+                if actor.state != CallState.SPEAKING:
+                    continue
+                now = _t.monotonic()
+                # If we've never sent a wire frame this call, or the
+                # last send was long enough ago, consider it zombie.
+                last_activity = self._last_wire_send_at or 0.0
+                idle_s = now - last_activity if last_activity else zombie_threshold_s + 1
+                if idle_s >= zombie_threshold_s:
+                    log.warning(
+                        "ZOMBIE_SPEAKING call=%s idle_s=%.1f — forcing SPEAKING→LISTENING",
+                        self.call_id, idle_s,
+                    )
+                    actor.transition(CallState.LISTENING)
+                    self._arm_idle_followup()
+                    # Reset so we don't re-log every 500ms — the
+                    # transition itself makes state != SPEAKING so
+                    # the loop naturally skips.
         except asyncio.CancelledError:
             return
 
@@ -1324,44 +1393,80 @@ class TwilioActorSession:
         and generation tracking work.  _speak() does this in the non-
         streaming path; we have to replicate here.  Missing this was the
         2.4-second gap between TTS_FIRST_BYTE and 'listening → speaking'
-        seen on turn 1 of trace CA9a02ad."""
+        seen on turn 1 of trace CA9a02ad.
+
+        2026-08-13 (R1 P0 — zombie-SPEAKING fix): this pump used to
+        transition LISTENING→SPEAKING on the first sentence and then
+        never transition back.  If the caller waited politely instead
+        of interrupting, the actor sat in SPEAKING forever, TurnManager
+        treated the next final as INTERRUPTION-during-speech, idle-
+        followup silently no-op'd (it early-returns when state !=
+        LISTENING), and the call went dead.  This killed the Hamzah
+        call (2026-08-13 19:06:22 → 19:07:00, 34s of dead air).
+        Fix: try/finally epilogue mirrors _speak()'s lifecycle exactly:
+        SPEAKING → LISTENING + arm idle-followup, but ONLY if WE were
+        the ones who transitioned to SPEAKING (tracked via
+        `we_transitioned`).  A downstream branch in
+        _run_brain_streaming may call _speak(planned) for a fake-
+        booking replacement; that path handles its own lifecycle.
+        """
         from app.routes.twilio import _get_telephony_tts
         from packages.core_agent.speech_sanitizer import sanitize_for_speech
         tts = _get_telephony_tts()
         span = self._current_turn_span
         first = True
-        while True:
-            sentence = await queue.get()
-            if sentence is None:
-                break
-            cur_gen = self.actor.speech_generation if self.actor is not None else gen
-            if gen != cur_gen:
-                log.info(
-                    "TTS_SENTENCE_DROPPED_STALE call=%s stale_gen=%d cur_gen=%d",
-                    self.call_id, gen, cur_gen,
-                )
-                continue
-            try:
-                clean = sanitize_for_speech(sentence)
-                if not clean.strip():
+        # R1: track whether THIS pump owns the current SPEAKING transition,
+        # so the epilogue only unwinds transitions we actually made.
+        we_transitioned = False
+        try:
+            while True:
+                sentence = await queue.get()
+                if sentence is None:
+                    break
+                cur_gen = self.actor.speech_generation if self.actor is not None else gen
+                if gen != cur_gen:
+                    log.info(
+                        "TTS_SENTENCE_DROPPED_STALE call=%s stale_gen=%d cur_gen=%d",
+                        self.call_id, gen, cur_gen,
+                    )
                     continue
-                if first and self.actor is not None:
-                    # Mark speaking + open a new speech generation.
-                    self.actor.transition(CallState.SPEAKING)
-                    # 2026-08-13 (double-brain fix): see _speak() note.
-                    self._inflight_has_spoken = True
-                    speech_gen = self.actor.speech_generation
-                    self.actor.ledger.start_generation(speech_gen, clean)
+                try:
+                    clean = sanitize_for_speech(sentence)
+                    if not clean.strip():
+                        continue
+                    if first and self.actor is not None:
+                        # Mark speaking + open a new speech generation.
+                        self.actor.transition(CallState.SPEAKING)
+                        we_transitioned = True
+                        # 2026-08-13 (double-brain fix): see _speak() note.
+                        self._inflight_has_spoken = True
+                        speech_gen = self.actor.speech_generation
+                        self.actor.ledger.start_generation(speech_gen, clean)
+                    log.info(
+                        "TTS_SENTENCE_QUEUED call=%s gen=%d first=%s text=%r",
+                        self.call_id, gen, first, clean[:80],
+                    )
+                    await self._stream_tts_incremental(tts, clean, gen, span if first else None)
+                    first = False
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.exception("TTS_SENTENCE_FAILED: %s", e)
+        finally:
+            # R1 epilogue — mirror _speak()'s lifecycle.  Runs on
+            # normal completion, cancellation, or unexpected error.
+            actor = self.actor
+            if actor is not None and we_transitioned:
+                if actor.state == CallState.SPEAKING:
+                    actor.transition(CallState.LISTENING)
+                # Arm the idle-followup ladder so a silent caller gets
+                # nudged/hung-up eventually.  Idempotent — cancels any
+                # prior task.
+                self._arm_idle_followup()
                 log.info(
-                    "TTS_SENTENCE_QUEUED call=%s gen=%d first=%s text=%r",
-                    self.call_id, gen, first, clean[:80],
+                    "PUMP_SPEECH_COMPLETED call=%s gen=%d — SPEAKING→LISTENING",
+                    self.call_id, gen,
                 )
-                await self._stream_tts_incremental(tts, clean, gen, span if first else None)
-                first = False
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                log.exception("TTS_SENTENCE_FAILED: %s", e)
 
     async def _run_brain(self, mulaw: bytes, turn_gen: int) -> None:
         from app.routes.twilio import _mulaw_frames_to_wav
@@ -3287,6 +3392,10 @@ class TwilioActorSession:
         # write-wins in the span means subsequent frames don't overwrite.
         if self._current_turn_span is not None:
             self._current_turn_span.mark("tts_first_frame_wire")
+
+        # 2026-08-13 (R1): stamp last-wire-send so the zombie-SPEAKING
+        # watchdog can tell active speech from a stuck lifecycle.
+        self._last_wire_send_at = time.monotonic()
 
         is_browser = self.stream_sid.startswith("browser_")
 
