@@ -317,8 +317,15 @@ async def run_greeting(state: CallState, brain: ReceptionistBrain) -> str:
 async def run_user_turn(
     state: CallState, brain: ReceptionistBrain, user_text: str,
     on_delta=None,
+    on_tool_call=None,
+    on_tool_receipt=None,
 ) -> dict:
-    result = await brain.handle_user_turn(state, user_text, on_delta=on_delta)
+    result = await brain.handle_user_turn(
+        state, user_text,
+        on_delta=on_delta,
+        on_tool_call=on_tool_call,
+        on_tool_receipt=on_tool_receipt,
+    )
     sink = get_sink()
     for tool_payload in result.tool_results:
         persist_booking_from_tool(state, tool_payload)

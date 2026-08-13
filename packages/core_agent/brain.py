@@ -264,12 +264,30 @@ class ReceptionistBrain:
     async def handle_user_turn(
         self, state: CallState, user_text: str,
         on_delta=None,
+        on_tool_call=None,
+        on_tool_receipt=None,
     ) -> BrainTurnResult:
         """on_delta: optional Callable[[str], Awaitable[None]] fired for
         each streamed token from the FINAL (no-tool-calls) LLM reply.
         The caller (twilio_actor) uses this to pipe tokens into TTS as
         sentence boundaries land. When on_delta is None or the resolved
-        provider lacks stream_complete, we use the batch path."""
+        provider lacks stream_complete, we use the batch path.
+
+        on_tool_call:   optional Callable[[str], Awaitable[None]] fired
+                        once per tool the LLM dispatched — BEFORE the
+                        tool handler runs.  Payload is the tool name.
+                        Used by SpeechCommitGate to release held
+                        WAIT_PROMISE sentences once a real tool is in
+                        flight (the "one moment" is now honest).
+
+        on_tool_receipt: optional Callable[[str, bool], Awaitable[None]]
+                        fired once per tool AFTER the handler returns.
+                        Payload is (tool_name, ok).  ok=True means the
+                        tool succeeded (no error, not blocked).  Used
+                        by the gate to release ACTION_CONFIRMATION
+                        sentences ("you're booked") only after the
+                        matching receipt is real.
+        """
         state.add_turn(TranscriptTurn(role=TurnRole.USER, text=user_text))
 
         # K3+K4 (2026-08-05): classify turn intent BEFORE brain fires so
@@ -623,6 +641,19 @@ class ReceptionistBrain:
                         )
 
             for tc in response.tool_calls:
+                # SpeechCommitGate signal: notify BEFORE running the
+                # tool.  The gate uses this to release held wait
+                # promises ("one moment") the LLM emitted earlier in
+                # this turn.  Callback failures never break the tool
+                # loop — the caller's speech pipeline is best-effort.
+                if on_tool_call is not None:
+                    try:
+                        await on_tool_call(tc.name)
+                    except Exception as _cbe:
+                        import logging as _l
+                        _l.getLogger(__name__).warning(
+                            "on_tool_call(%s) raised: %s", tc.name, _cbe,
+                        )
                 # Write-guard: validate booking tool calls against the transcript
                 # before firing. Prevents the LLM from hallucinating names/phones/times
                 # into the DB. Fails open on any guard error.
@@ -677,6 +708,23 @@ class ReceptionistBrain:
                     "result": result.result,
                     "error": result.error,
                 })
+                # SpeechCommitGate signal: fire AFTER receipt.  ok=True
+                # iff no error AND (if result is a dict) not blocked
+                # and not error-shaped.  Held ACTION_CONFIRMATION
+                # sentences release on a successful matching receipt.
+                if on_tool_receipt is not None:
+                    _ok = result.error is None
+                    if _ok and isinstance(result.result, dict):
+                        if result.result.get("blocked") or result.result.get("error"):
+                            _ok = False
+                    try:
+                        await on_tool_receipt(tc.name, _ok)
+                    except Exception as _cbe:
+                        import logging as _l
+                        _l.getLogger(__name__).warning(
+                            "on_tool_receipt(%s, %s) raised: %s",
+                            tc.name, _ok, _cbe,
+                        )
                 if tc.name == "escalate_to_human":
                     escalated = True
                     state.status = CallStatus.ESCALATED

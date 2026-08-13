@@ -67,6 +67,7 @@ from packages.voice.vpl.compilers import compile_elevenlabs
 from packages.core_agent.planners import PerformancePlanner
 from packages.core_agent.planners.semantic import _infer_speech_act
 from packages.core_agent.streaming import SentenceBuffer
+from packages.core_agent.speech_commit_gate import SpeechCommitGate
 from packages.slot_parsers import (
     SlotSource,
     SlotStatus,
@@ -1702,6 +1703,22 @@ class TwilioActorSession:
             self._pump_sentence_queue(queue, turn_gen),
             name=f"tts-pump-{self.call_id}-g{turn_gen}",
         )
+
+        # SpeechCommitGate (task #368): deterministic pre-TTS gate.  All
+        # streamed sentences flow through this — SAFE ones queue
+        # immediately; WAIT_PROMISE / ACTION_CONFIRMATION are held until
+        # the matching tool signal arrives.  Kills Abdullah's regression
+        # (multi-utterance stacking when R2 rewrote a fake-wait reply
+        # AFTER early sentences were already on the wire).
+        async def _release_to_pump(sentence: str) -> None:
+            await queue.put(sentence)
+
+        gate = SpeechCommitGate(
+            release=_release_to_pump,
+            call_id=self.call_id,
+            turn_gen=turn_gen,
+        )
+
         first_delta = True
 
         async def on_delta(delta: str):
@@ -1710,7 +1727,15 @@ class TwilioActorSession:
                 span.mark("llm_first_token")
                 first_delta = False
             for sentence in buf.push(delta):
-                await queue.put(sentence)
+                await gate.on_sentence(sentence)
+
+        async def on_tool_call(tool_name: str) -> None:
+            # A real tool started → any held "one moment" is honest.
+            await gate.on_tool_call_started(tool_name)
+
+        async def on_tool_receipt(tool_name: str, ok: bool) -> None:
+            # A tool returned → releases held ACTION_CONFIRMATIONs if ok.
+            await gate.on_tool_receipt(tool_name, ok)
 
         try:
             # 2026-08-13 (N1 task #344): if the persistent OpenAI WS is
@@ -1726,14 +1751,31 @@ class TwilioActorSession:
                 payload = ws_payload
             else:
                 payload = await session_manager.run_user_turn(
-                    state, brain, transcript, on_delta=on_delta,
+                    state, brain, transcript,
+                    on_delta=on_delta,
+                    on_tool_call=on_tool_call,
+                    on_tool_receipt=on_tool_receipt,
                 )
             self._current_speech_act = _infer_speech_act_from_payload(payload)
 
             # Flush residual (text after the last sentence-ender)
             residual = buf.flush()
             if residual:
-                await queue.put(residual)
+                await gate.on_sentence(residual)
+
+            # Close the gate.  Any still-held sentence (unmet wait
+            # promise or unmet action confirmation) is DROPPED here —
+            # a WARN log records each, and the STREAM_REPLY_REPLACED
+            # path below sees a `streamed` value that omits the dropped
+            # phrases, which naturally triggers the safe rewrite when
+            # the assembled reply diverges from what actually got out.
+            dropped_by_gate = await gate.flush()
+            if dropped_by_gate:
+                log.warning(
+                    "SPEECH_GATE_DROPPED call=%s gen=%d count=%d stats=%s",
+                    self.call_id, turn_gen, len(dropped_by_gate),
+                    gate.stats.as_dict(),
+                )
 
             # Signal end-of-stream to the pumper
             await queue.put(None)
@@ -1770,13 +1812,17 @@ class TwilioActorSession:
             except Exception:
                 log.debug("streaming response-cache put skipped", exc_info=True)
 
-            # If the brain replaced the reply (fake-booking guard),
-            # payload["reply"] won't match buf.full_text. Interrupt
-            # what we sent + speak the replacement. NOTE: if buf.full_text
-            # is empty (streaming path fell through to batch inside brain),
-            # payload["reply"] holds the real reply and we speak it now.
+            # If the brain replaced the reply (fake-booking guard) OR
+            # the gate dropped held sentences that never got a signal,
+            # payload["reply"] won't match what actually reached TTS.
+            # Compare against `gate.released_text` (what crossed the
+            # gate) — NOT against buf.full_text (raw LLM stream) which
+            # may include sentences the gate dropped.  When the gate
+            # holds/drops a fake-wait, `streamed` shrinks to just the
+            # safe sentences, so the divergence check correctly re-
+            # speaks the R2 rewrite for the missing content.
             planned = (payload.get("reply") or "").strip()
-            streamed = buf.full_text.strip()
+            streamed = gate.released_text
             if not planned:
                 pass  # nothing to compare against
             elif not streamed:
