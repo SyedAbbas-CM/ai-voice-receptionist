@@ -1910,26 +1910,25 @@ class TwilioActorSession:
         await self._send_twilio_mark(mark_id)
 
     async def _stream_tts_incremental(self, tts, text: str, gen: int, span) -> None:
-        """2026-08-09: stream TTS chunks from ElevenLabs directly to Twilio.
+        """2026-08-13 (B1 task #329) rewrite: producer/consumer pipeline.
 
-        Each chunk that arrives from ElevenLabs is immediately dispatched
-        to the µ-law outbound path — no waiting for the full utterance.
-        Caller hears the first ~150-200ms of audio while the rest is
-        still being synthesized upstream.
+        Prior version called `_send_audio_frames(chunk, mime)` for every
+        ElevenLabs streaming chunk (~20-40 per sentence).  Each call
+        pre-buffered, padded to a 20ms boundary with µ-law silence
+        (0xFF), and restarted its pacing loop.  Result: dozens of
+        small paced sends with accumulated inter-chunk silence padding
+        = audible voice breakup + 81 FIRST40 marks per reply.
 
-        2026-08-12 (task #322): if ELEVENLABS_USE_WS is on AND the inner
-        provider exposes ws_stream_synthesize, use the bidirectional
-        WebSocket. Cuts first-byte ~400ms on high-RTT clients because we
-        skip the HTTP /stream request/response setup.
+        New: one producer task drains the ElevenLabs stream into a
+        bounded bytes queue.  One consumer task pulls from the queue
+        into a rolling µ-law buffer + ships continuously-paced 20ms
+        frames.  Result: one continuous audio stream per sentence, no
+        inter-chunk padding, one FIRST40 mark per sentence.
 
-        Trade-off: no full audio_bytes buffer → no ledger sizing at the
-        top (ledger entry is written when the stream completes with the
-        cumulative byte count).  Cancellation on bump_speech still works
-        because we're inside a Task registered with the actor."""
+        Cancellation semantics unchanged (Task registered with actor
+        via _pump_sentence_queue's parent context).
+        """
         import time as _t
-        first_chunk = True
-        cumulative_bytes = 0
-        chunk_count = 0
         mime = getattr(tts, "mime", "audio/x-mulaw;rate=8000")
         t_request = _t.perf_counter()
 
@@ -1941,80 +1940,228 @@ class TwilioActorSession:
             and hasattr(inner, "ws_stream_synthesize")
             and getattr(inner, "name", "") == "elevenlabs"
         )
-        stream_source = inner if use_ws else tts
-        stream_method = (
-            inner.ws_stream_synthesize(text) if use_ws
-            else tts.stream_synthesize(text)
-        )
+
+        # Browser transport still needs the per-chunk path (different
+        # framing, no µ-law pacing).  Only the Twilio phone leg gets
+        # the new continuous sender.
+        is_browser = self.stream_sid.startswith("browser_")
+
         transport = "ws" if use_ws else "http"
         log.info(
             "TTS_STREAM_START call=%s gen=%d transport=%s text=%r",
             self.call_id, gen, transport, text[:60],
         )
 
-        try:
-            async for chunk, chunk_mime in stream_method:
-                if not chunk:
-                    continue
-                if first_chunk:
-                    first_chunk = False
-                    first_byte_ms = (_t.perf_counter() - t_request) * 1000
-                    if span is not None:
-                        span.mark("tts_first_byte")
-                        self._close_turn_span()
-                    mime = chunk_mime
-                    log.info(
-                        "TTS_FIRST_BYTE call=%s gen=%d transport=%s "
-                        "first_byte_ms=%.0f mime=%s",
-                        self.call_id, gen, transport, first_byte_ms, mime,
+        # Bounded queue: keeps producer from getting too far ahead of
+        # consumer if the network stalls.  10 items ≈ several hundred
+        # ms of audio which is plenty of headroom.
+        audio_queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+        first_chunk_seen = asyncio.Event()
+        producer_mime_ref = [mime]  # mutable to escape closure
+        cumulative_bytes = 0
+
+        async def producer() -> int:
+            """Drain ElevenLabs stream into the queue.  Returns chunk_count.
+            Handles WS→HTTP fallback if WS fails before first byte."""
+            stream_method = (
+                inner.ws_stream_synthesize(text) if use_ws
+                else tts.stream_synthesize(text)
+            )
+            local_first = True
+            local_count = 0
+            try:
+                async for chunk, chunk_mime in stream_method:
+                    if not chunk:
+                        continue
+                    if local_first:
+                        local_first = False
+                        producer_mime_ref[0] = chunk_mime
+                        first_chunk_seen.set()
+                        first_byte_ms = (_t.perf_counter() - t_request) * 1000
+                        if span is not None:
+                            span.mark("tts_first_byte")
+                            self._close_turn_span()
+                        log.info(
+                            "TTS_FIRST_BYTE call=%s gen=%d transport=%s "
+                            "first_byte_ms=%.0f mime=%s",
+                            self.call_id, gen, transport, first_byte_ms,
+                            chunk_mime,
+                        )
+                    local_count += 1
+                    await audio_queue.put(chunk)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if use_ws and local_first:
+                    log.warning(
+                        "TTS_STREAM_FALLBACK call=%s gen=%d ws→http err=%s",
+                        self.call_id, gen, e,
                     )
-                chunk_count += 1
-                cumulative_bytes += len(chunk)
-                await self._send_audio_frames(chunk, mime)
+                    try:
+                        async for chunk, chunk_mime in tts.stream_synthesize(text):
+                            if not chunk:
+                                continue
+                            if local_first:
+                                local_first = False
+                                producer_mime_ref[0] = chunk_mime
+                                first_chunk_seen.set()
+                                first_byte_ms = (_t.perf_counter() - t_request) * 1000
+                                if span is not None:
+                                    span.mark("tts_first_byte")
+                                    self._close_turn_span()
+                                log.info(
+                                    "TTS_FIRST_BYTE call=%s gen=%d transport=http-fallback "
+                                    "first_byte_ms=%.0f mime=%s",
+                                    self.call_id, gen, first_byte_ms, chunk_mime,
+                                )
+                            local_count += 1
+                            await audio_queue.put(chunk)
+                    except Exception as e2:
+                        log.exception("TTS_STREAM_FALLBACK_FAILED: %s", e2)
+                else:
+                    log.exception(
+                        "TTS_STREAM_FAILED call=%s gen=%d transport=%s err=%s",
+                        self.call_id, gen, transport, e,
+                    )
+            finally:
+                # Signal end-of-stream to the consumer.  Also unblock
+                # first_chunk_seen if nothing ever arrived — consumer
+                # will just drain nothing and return.
+                first_chunk_seen.set()
+                await audio_queue.put(None)
+            return local_count
+
+        async def consumer() -> int:
+            """Continuous µ-law sender.  Accumulates chunks into a
+            rolling buffer + ships 20ms frames at real-time pace.
+            One FIRST40 mark for the whole sentence."""
+            nonlocal cumulative_bytes
+            # Wait until we have at least one chunk so producer_mime_ref
+            # is populated.
+            await first_chunk_seen.wait()
+            if self._ducked:
+                # Nothing to do — drain queue.
+                while True:
+                    item = await audio_queue.get()
+                    if item is None:
+                        return 0
+                return 0
+            if is_browser:
+                # Fall back to per-chunk path for browser leg.
+                sent = 0
+                while True:
+                    item = await audio_queue.get()
+                    if item is None:
+                        break
+                    sent += 1
+                    cumulative_bytes += len(item)
+                    await self._send_browser_pcm_frames(item, producer_mime_ref[0])
+                return sent
+
+            # ---- Twilio path: single continuous µ-law sender ----
+            if self._current_turn_span is not None:
+                self._current_turn_span.mark("tts_first_frame_wire")
+            gain_db = settings.telephony_output_gain_db
+            frame_bytes = int(TWILIO_SAMPLE_RATE * (TWILIO_FRAME_MS / 1000))
+            BATCH_FRAMES = 10
+            batch_duration_s = BATCH_FRAMES * TWILIO_FRAME_MS / 1000.0
+            buf = bytearray()
+            frames_in_batch = 0
+            batch_start = _t.monotonic()
+            sent_chunks = 0
+            first40_sent = False
+
+            async def _ship_frame(chunk_bytes: bytes) -> None:
+                await self.ws.send_text(json.dumps({
+                    "event": "media",
+                    "streamSid": self.stream_sid,
+                    "media": {"payload": base64.b64encode(chunk_bytes).decode("ascii")},
+                }))
+
+            while True:
+                item = await audio_queue.get()
+                if item is None:
+                    # Flush any remaining buffered audio (pad the tail
+                    # once here, not per-chunk).
+                    if buf:
+                        pad = (-len(buf)) % frame_bytes
+                        if pad:
+                            buf.extend(b"\xff" * pad)
+                        if abs(gain_db) > 0.01:
+                            padded = _apply_mulaw_gain(bytes(buf), gain_db)
+                        else:
+                            padded = bytes(buf)
+                        for j in range(0, len(padded), frame_bytes):
+                            frame = padded[j:j + frame_bytes]
+                            await _ship_frame(frame)
+                            frames_in_batch += 1
+                            if not first40_sent and (j // frame_bytes) + 1 >= 2:
+                                await self._send_first40_mark_inline()
+                                first40_sent = True
+                            if frames_in_batch >= BATCH_FRAMES:
+                                elapsed = _t.monotonic() - batch_start
+                                to_sleep = batch_duration_s - elapsed
+                                if to_sleep > 0:
+                                    await asyncio.sleep(to_sleep)
+                                frames_in_batch = 0
+                                batch_start = _t.monotonic()
+                        cumulative_bytes += len(padded)
+                    return sent_chunks
+                sent_chunks += 1
+                # Apply gain lazily per chunk (cheap in µ-law) then ship
+                # complete frames out of the rolling buffer.
+                if abs(gain_db) > 0.01:
+                    buf.extend(_apply_mulaw_gain(item, gain_db))
+                else:
+                    buf.extend(item)
+                # Send every complete 20ms frame we have.
+                while len(buf) >= frame_bytes:
+                    frame = bytes(buf[:frame_bytes])
+                    del buf[:frame_bytes]
+                    await _ship_frame(frame)
+                    frames_in_batch += 1
+                    if not first40_sent:
+                        # After the second complete frame lands (40ms),
+                        # ship one FIRST40 mark for the WHOLE sentence.
+                        # Previous code shipped one per _send_audio_frames
+                        # call — 20-40 per sentence.
+                        # We approximate "after 2nd frame" by
+                        # frames_in_batch >= 2 on this first burst.
+                        if frames_in_batch >= 2:
+                            await self._send_first40_mark_inline()
+                            first40_sent = True
+                    if frames_in_batch >= BATCH_FRAMES:
+                        elapsed = _t.monotonic() - batch_start
+                        to_sleep = batch_duration_s - elapsed
+                        if to_sleep > 0:
+                            await asyncio.sleep(to_sleep)
+                        frames_in_batch = 0
+                        batch_start = _t.monotonic()
+                cumulative_bytes = cumulative_bytes  # updated in flush path
+            return sent_chunks
+
+        prod_task = asyncio.create_task(producer(), name=f"tts-prod-{self.call_id}-g{gen}")
+        cons_task = asyncio.create_task(consumer(), name=f"tts-cons-{self.call_id}-g{gen}")
+        chunk_count = 0
+        try:
+            chunk_count, _consumed = await asyncio.gather(prod_task, cons_task)
         except asyncio.CancelledError:
+            for t in (prod_task, cons_task):
+                if not t.done():
+                    t.cancel()
             log.info(
-                "TTS_STREAM_CANCELLED call=%s gen=%d transport=%s "
-                "chunks=%d bytes=%d",
-                self.call_id, gen, transport, chunk_count, cumulative_bytes,
+                "TTS_STREAM_CANCELLED call=%s gen=%d transport=%s bytes=%d",
+                self.call_id, gen, transport, cumulative_bytes,
             )
             raise
         except Exception as e:
-            log.exception(
-                "TTS_STREAM_FAILED call=%s gen=%d transport=%s err=%s",
-                self.call_id, gen, transport, e,
-            )
-            # If WS failed before the first byte, fall back to HTTP so we
-            # don't leave the caller in silence. After first_byte we've
-            # already committed audio to the wire — safer to bail.
-            if use_ws and first_chunk:
-                log.warning(
-                    "TTS_STREAM_FALLBACK call=%s gen=%d ws→http",
-                    self.call_id, gen,
-                )
-                try:
-                    async for chunk, chunk_mime in tts.stream_synthesize(text):
-                        if not chunk:
-                            continue
-                        if first_chunk:
-                            first_chunk = False
-                            first_byte_ms = (_t.perf_counter() - t_request) * 1000
-                            if span is not None:
-                                span.mark("tts_first_byte")
-                                self._close_turn_span()
-                            mime = chunk_mime
-                            log.info(
-                                "TTS_FIRST_BYTE call=%s gen=%d transport=http-fallback "
-                                "first_byte_ms=%.0f mime=%s",
-                                self.call_id, gen, first_byte_ms, mime,
-                            )
-                        chunk_count += 1
-                        cumulative_bytes += len(chunk)
-                        await self._send_audio_frames(chunk, mime)
-                except Exception as e2:
-                    log.exception("TTS_STREAM_FALLBACK_FAILED: %s", e2)
-                    return
-            else:
-                return
+            log.exception("TTS_STREAM_PIPELINE_FAILED call=%s gen=%d: %s",
+                          self.call_id, gen, e)
+            for t in (prod_task, cons_task):
+                if not t.done():
+                    t.cancel()
+            return
+        mime = producer_mime_ref[0]
 
         total_ms = (_t.perf_counter() - t_request) * 1000
         log.info(
@@ -3336,17 +3483,15 @@ class TwilioActorSession:
             batch_duration_s = BATCH_FRAMES * TWILIO_FRAME_MS / 1000.0
             frames_in_batch = 0
             batch_start = time.monotonic()
-            # 2026-08-13 (M1 task #343): the FIRST40 mark goes right
-            # after the first 2 frames (40ms) of audio.  Twilio fires
-            # `mark` when preceding audio has played out, so ack-wall
-            # minus send-wall is the true wire-to-ear latency for THIS
-            # reply.  Sent once per _send_audio_frames call — this is
-            # the natural "start of a reply" boundary the caller cares
-            # about.  See docs/rnd-2026-08/54-chatgpt-audit-response.md
-            # (audit #3): "make cached reply the first 40 ms + mark".
+            # 2026-08-13 (M1 task #343 → B1 task #329): the FIRST40 mark
+            # used to fire from here per-call.  Now the streaming path
+            # sends it inline via _send_first40_mark_inline (once per
+            # sentence, not per chunk).  Non-streaming path (cached
+            # replies, fastpath, ledger-triggered speaks) still needs
+            # a mark for wire-to-ear measurement — send it after the
+            # first 40ms lands.
             first40_sent = False
             first40_frames_needed = 2  # 2 * 20ms = 40ms
-            first40_mark_id: Optional[str] = None
             for i in range(0, len(mulaw), frame_bytes):
                 chunk = mulaw[i:i + frame_bytes]
                 await self.ws.send_text(json.dumps({
@@ -3355,22 +3500,11 @@ class TwilioActorSession:
                     "media": {"payload": base64.b64encode(chunk).decode("ascii")},
                 }))
                 frames_in_batch += 1
-                # Send the FIRST40 mark after the second frame lands.
                 if (
                     not first40_sent
                     and (i // frame_bytes) + 1 >= first40_frames_needed
                 ):
-                    self._first40_counter += 1
-                    first40_mark_id = f"FIRST40_{self._first40_counter}"
-                    self._first40_send_wall[first40_mark_id] = time.monotonic()
-                    try:
-                        await self.ws.send_text(json.dumps({
-                            "event": "mark",
-                            "streamSid": self.stream_sid,
-                            "mark": {"name": first40_mark_id},
-                        }))
-                    except Exception:
-                        log.debug("FIRST40 mark send failed", exc_info=True)
+                    await self._send_first40_mark_inline()
                     first40_sent = True
                 if frames_in_batch >= BATCH_FRAMES:
                     # Pace to real audio duration.  Uses monotonic wall
@@ -3411,6 +3545,26 @@ class TwilioActorSession:
                     },
                 }))
             await asyncio.sleep(0.04)
+
+    async def _send_first40_mark_inline(self) -> None:
+        """2026-08-13 (B1 task #329): ship one FIRST40 mark from inside
+        the continuous µ-law sender.  Called once per sentence after
+        the 40ms boundary, not once per _send_audio_frames call.
+
+        Records the send wall time keyed by generated mark id; on the
+        matching Twilio `mark` ack we log wire-to-ear latency.
+        """
+        self._first40_counter += 1
+        mark_id = f"FIRST40_{self._first40_counter}"
+        self._first40_send_wall[mark_id] = time.monotonic()
+        try:
+            await self.ws.send_text(json.dumps({
+                "event": "mark",
+                "streamSid": self.stream_sid,
+                "mark": {"name": mark_id},
+            }))
+        except Exception:
+            log.debug("FIRST40 mark send failed", exc_info=True)
 
     async def _send_twilio_mark(self, mark_id: str) -> None:
         """Ask Twilio to fire a mark event when this point in the stream
