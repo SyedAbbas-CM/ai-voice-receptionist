@@ -101,11 +101,11 @@ Independent. Write `docs/decisions/2026-08-14-client-vs-architecture.md` with th
 | Branch | Head | Purpose | Merge state |
 |---|---|---|---|
 | `main` | old | Untouched | — |
-| `feat/architectural-networking` | `edacdec` | R1-R5 + R3 + gate + lock + phone precondition + R7 + SOAK | This is the working base. All ratified reliability code lives here. |
+| `feat/architectural-networking` | `f863d5a` | R1-R5 + R3 + gate + lock + phone precondition + R7 + SOAK + PROJECT-LAUNCH-CHECKLIST | This is the working base. All ratified reliability code lives here. |
 | `feat/r6-prebuffer-backpressure` | `36e9652` | AudioPipeline module + 10 tests | HOLD — do not merge until Phase 0 soak proves base is stable without it |
-| `feat/r7-arrival-observability` | `e41c4fc` | Same as merged into base (commit `7888385`) | Can be deleted post-Phase-0 |
-| `chore/soak-harness` | `b56524d` | Same as merged into base (commit `edacdec`) | Can be deleted post-Phase-0 |
 | `feat/phase2-kernel-wire` | `6ffaa70` | Kernel shadow observer scaffold | HOLD — merge only after Phase 0 baseline established |
+
+(Branches `feat/r7-arrival-observability` and `chore/soak-harness` were fully merged and safely deleted with `git branch -d` at end of session — their content lives on base at commits `7888385` and `edacdec`.)
 
 ---
 
