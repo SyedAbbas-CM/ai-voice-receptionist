@@ -4312,8 +4312,22 @@ async def handle_twilio_stream_via_actor(
     `settings.twilio_use_actor` is true.  Same wire protocol, same
     events; internally routes through the CallActor kernel."""
     from starlette.websockets import WebSocketDisconnect
+    # R7 (task #355): arrival observability.  Emit WEBSOCKET_CONNECTED
+    # the instant we enter this handler.  If the trail cuts off here
+    # (no TWILIO_START ever follows), Twilio opened the WS but never
+    # sent `start` — usually a TwiML issue.
+    from packages.observability import arrival_events as _arr
+    _r7_session_key = _arr.new_session_key()
+    _r7_remote_ip = ""
+    try:
+        if getattr(ws, "client", None) is not None:
+            _r7_remote_ip = ws.client.host or ""
+    except Exception:
+        pass
+    _arr.websocket_connected(_r7_session_key, remote_ip=_r7_remote_ip)
 
     session: Optional[TwilioActorSession] = None
+    _r7_first_media_seen = False
     try:
         while True:
             raw = await ws.receive_text()
@@ -4338,6 +4352,17 @@ async def handle_twilio_stream_via_actor(
                 caller_number = (custom.get("from") or "").strip()
                 dialed_number = (custom.get("to") or "").strip()
                 caller_name = (custom.get("callerName") or "").strip()
+                # R7: emit TWILIO_START.  Binds session_key -> CallSid
+                # so log searches by CallSid can walk back through the
+                # arrival chain.
+                _arr.twilio_start(
+                    _r7_session_key,
+                    call_sid=call_sid,
+                    stream_sid=stream_sid,
+                    account_sid=start_payload.get("accountSid") or "",
+                    from_number=caller_number,
+                    to_number=dialed_number,
+                )
                 session = TwilioActorSession(
                     ws=ws,
                     stream_sid=stream_sid,
@@ -4359,6 +4384,17 @@ async def handle_twilio_stream_via_actor(
 
             if kind == "media" and session is not None:
                 mulaw = base64.b64decode(event["media"]["payload"])
+                # R7 (task #355): FIRST_MEDIA on the very first frame.
+                # If this NEVER fires despite TWILIO_START, mic is
+                # muted or Media Streams region can't reach the carrier.
+                if not _r7_first_media_seen:
+                    _r7_first_media_seen = True
+                    _arr.first_media(
+                        _r7_session_key,
+                        call_sid=session.call_id,
+                        stream_sid=session.stream_sid,
+                        frame_bytes=len(mulaw),
+                    )
                 # 2026-08-13 (M1 task #343): honest cadence-skew metric.
                 # cadence_skew_ms = local_elapsed - twilio_elapsed
                 # where both elapsed values are measured against the same
