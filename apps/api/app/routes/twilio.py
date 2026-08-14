@@ -173,15 +173,56 @@ async def _verify_twilio_signature(request: Request) -> None:
 
 @router.post("/twilio/voice")
 async def twilio_voice_webhook(request: Request) -> Response:
-    await _verify_twilio_signature(request)
+    # R7 (task #355): arrival observability.  Emit VOICE_WEBHOOK_RECEIVED
+    # before signature verify so signature failures still leave a trail.
+    # The session_key correlates the pre-CallSid arrival chain.
+    from packages.observability import arrival_events as _arr
+    session_key = _arr.new_session_key()
+    # Stash on request state so the WS handler can find the matching
+    # arrival trail — Twilio doesn't propagate our key, so this is
+    # best-effort log correlation via IP + wall-clock proximity.
+    remote_ip = ""
+    if request.client is not None:
+        remote_ip = request.client.host or ""
+    signature_ok: Optional[bool] = None
+    try:
+        await _verify_twilio_signature(request)
+        signature_ok = True
+    except HTTPException:
+        signature_ok = False
+        _arr.voice_webhook_received(
+            session_key, remote_ip=remote_ip, signature_ok=False,
+        )
+        _arr.arrival_error(
+            session_key,
+            at_stage="webhook_signature",
+            error="invalid Twilio signature",
+        )
+        raise
+    _arr.voice_webhook_received(
+        session_key, remote_ip=remote_ip, signature_ok=signature_ok,
+    )
     public = settings.twilio_public_url or ""
     if not public:
+        _arr.arrival_error(
+            session_key,
+            at_stage="twiml_render",
+            error="TWILIO_PUBLIC_URL not configured",
+        )
         return Response(
             content="""<?xml version="1.0" encoding="UTF-8"?>
 <Response><Say>Sorry, this number is not configured. Please set TWILIO_PUBLIC_URL.</Say><Hangup/></Response>""",
             media_type="application/xml",
         )
-    return Response(content=_twiml_stream_response(public), media_type="application/xml")
+    twiml = _twiml_stream_response(public)
+    ws_url = (
+        public.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
+        + "/twilio/stream"
+    )
+    _arr.stream_twiml_returned(
+        session_key, ws_url=ws_url, twiml_bytes=len(twiml),
+    )
+    return Response(content=twiml, media_type="application/xml")
 
 
 def _mulaw_frames_to_wav(mulaw: bytes, sample_rate: int = TWILIO_SAMPLE_RATE) -> bytes:
