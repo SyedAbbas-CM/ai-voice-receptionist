@@ -56,6 +56,13 @@ Read these three, in order. Total ~10 min.
 2. **`docs/rnd-2026-08/59-phase0-validation-plan.md`** — the 5-box sanity gate. Everything downstream blocks on this.
 3. **`~/.claude/projects/-Users-az-Desktop-Receptionist-Agent/memory/reliability-shipped-2026-08-14.md`** — reference card of ratified additions (SpeechCommitGate, one-gen lock, phone precondition) that MUST survive future refactors.
 
+**For per-branch merge workflow:**
+- `docs/superpowers/plans/2026-08-15-branch-validation-playbook.md` — the 5-step loop for testing every branch before merging.
+- `docs/superpowers/plans/2026-08-15-soak-tooling.md` — the diff/aggregate/synth-fixture scripts to build post-reset (task #390).
+
+**For scale conversations:**
+- `docs/rnd-2026-08/61-scale-tiers-reference.md` — Tier 1-4 with provider limits + code changes + costs. Decision recorded: default Tier 1, revisit at first signed client.
+
 ---
 
 ## First substantive move: Phase 0 validation
