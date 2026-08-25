@@ -75,7 +75,12 @@ class ElevenLabsTTS(TTSProvider):
         payload = {
             "text": text,
             "model_id": self.model,
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+            "voice_settings": {
+                "stability": 0.40,
+                "similarity_boost": 0.75,
+                "style": 0.0,
+                "use_speaker_boost": False,
+            },
         }
         client = self._get_client()
         resp = await client.post(
@@ -107,7 +112,12 @@ class ElevenLabsTTS(TTSProvider):
         payload = {
             "text": text,
             "model_id": self.model,
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+            "voice_settings": {
+                "stability": 0.40,
+                "similarity_boost": 0.75,
+                "style": 0.0,
+                "use_speaker_boost": False,
+            },
         }
         client = self._get_client()
         async with client.stream(
@@ -182,8 +192,16 @@ class ElevenLabsTTS(TTSProvider):
             init_msg = json.dumps({
                 "text": text + " ",
                 "voice_settings": {
-                    "stability": 0.5,
+                    # 2026-08-23: aligned with HTTP path (0.40 not 0.50).
+                    # Two-variable trap flagged by ChatGPT audit — WS path
+                    # currently unused (elevenlabs_use_ws=false) but P1
+                    # multi-context WS will flip it on. Keep both paths
+                    # identical so A/B compares WS vs HTTP transport, not
+                    # transport-plus-voice-settings drift.
+                    "stability": 0.40,
                     "similarity_boost": 0.75,
+                    "style": 0.0,
+                    "use_speaker_boost": False,
                 },
             })
             t_send = _t.perf_counter()

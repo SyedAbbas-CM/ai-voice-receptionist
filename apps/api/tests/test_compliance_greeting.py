@@ -41,19 +41,56 @@ async def _null_tool_handler(call: ToolCall) -> ToolResult:
 # ---- Greeting composition ----
 
 @pytest.mark.asyncio
-async def test_greeting_includes_ai_disclosure_by_default():
-    brain = ReceptionistBrain(llm=_NullLLM(), business=_biz(), tools=[], tool_handler=_null_tool_handler)
+async def test_greeting_ai_disclosure_when_enabled():
+    """Default is OFF (2026-08-10 speed decision) — tenants must
+    opt in explicitly.  When enabled, greeting mentions automation
+    without the flat 'I'm an AI' wording (see prompt.py identity rule).
+    """
+    brain = ReceptionistBrain(
+        llm=_NullLLM(),
+        business=_biz(ai_disclosure_enabled=True),
+        tools=[], tool_handler=_null_tool_handler,
+    )
     state = CallState(session_id="s1", business_id="biz1")
     r = await brain.greet(state)
-    assert "AI assistant" in r.reply, f"disclosure missing: {r.reply!r}"
+    assert "automated receptionist" in r.reply.lower(), (
+        f"disclosure missing: {r.reply!r}"
+    )
 
 
 @pytest.mark.asyncio
-async def test_greeting_includes_recording_notice_by_default():
-    brain = ReceptionistBrain(llm=_NullLLM(), business=_biz(), tools=[], tool_handler=_null_tool_handler)
+async def test_greeting_recording_notice_when_enabled():
+    """Default is OFF — must be opted into per business profile.
+    Wording must include 'recorded' so it counts as legal notice in
+    two-party consent states (see jurisdiction.py)."""
+    brain = ReceptionistBrain(
+        llm=_NullLLM(),
+        business=_biz(recording_notice_enabled=True),
+        tools=[], tool_handler=_null_tool_handler,
+    )
     state = CallState(session_id="s1", business_id="biz1")
     r = await brain.greet(state)
-    assert "recorded" in r.reply.lower(), f"recording notice missing: {r.reply!r}"
+    assert "recorded" in r.reply.lower(), (
+        f"recording notice missing: {r.reply!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_greeting_defaults_are_off():
+    """Speed decision 2026-08-10: neither disclosure defaults to on.
+    Tenants in two-party consent states MUST opt in via profile —
+    boot-time compliance audit (jurisdiction.py) warns loudly when
+    they don't."""
+    brain = ReceptionistBrain(
+        llm=_NullLLM(), business=_biz(),
+        tools=[], tool_handler=_null_tool_handler,
+    )
+    state = CallState(session_id="s1", business_id="biz1")
+    r = await brain.greet(state)
+    assert "AI assistant" not in r.reply
+    assert "automated receptionist" not in r.reply.lower()
+    assert "recorded" not in r.reply.lower()
+    assert "Riverside Family Clinic" in r.reply
 
 
 @pytest.mark.asyncio

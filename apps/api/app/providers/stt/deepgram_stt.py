@@ -115,6 +115,13 @@ class DeepgramSTT(STTProvider):
             ("smart_format", "true"),
             ("punctuate", "true"),
             ("interim_results", "true"),
+            # 2026-08-18: force digit output on numeric sequences.
+            # smart_format spells short numbers ("one two three") and
+            # occasionally truncates long ones — PK caller Aug 18 said
+            # 03303172789 and STT delivered "033031727." (lost last two
+            # digits + added a period).  `numerals=true` keeps everything
+            # as digits so phone/CC/address capture doesn't lose bytes.
+            ("numerals", "true"),
             # 2026-08-13: back to 150ms after adding transcript-superset
             # dedupe in twilio_actor._run_brain_from_text.  The dedupe
             # catches the "Yeah. Can you tell me about" → "...about tooth
@@ -130,6 +137,13 @@ class DeepgramSTT(STTProvider):
             # fires — and if silence isn't ever detected we sit for
             # 20-40s waiting.  1000ms UtteranceEnd = "if I haven't
             # seen a speech_final in 1s of continuous audio, force one."
+            # 2026-08-20 SPEED: 1000 → 1000ms. Tried 200ms/400ms —
+            # Deepgram's WebSocket rejected the handshake with HTTP 400
+            # because the API enforces a MINIMUM of 1000ms on this
+            # parameter (verified live on CA14469f0). Do NOT lower this
+            # below 1000. To get faster end-of-turn: rely on
+            # `endpointing=150` (which we already have) + smart-turn-v3
+            # prosodic EOT (which vetoes/confirms independently).
             ("utterance_end_ms", "1000"),
             ("vad_events", "true"),
             ("language", self.language),

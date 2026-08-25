@@ -32,12 +32,23 @@ log = logging.getLogger(__name__)
 # Short, natural, verb-tense-neutral so they slot before any tool.
 # Order matters — first phrase is picked when random module can't be trusted
 # (rare, but explicit).
+#
+# 2026-08-18: expanded from 5 → 12 for variety on longer calls where the
+# same "Okay, just a moment." was firing back-to-back.  All ≤4 syllables
+# so the filler ends before the real reply's first byte lands.
 DEFAULT_FILLERS = [
-    "One sec.",
+    "One second.",
     "Let me check that.",
     "Okay, just a moment.",
     "Mhm, checking now.",
     "Alright, one second.",
+    "Gotcha.",
+    "Yep, on it.",
+    "Sure, hold on.",
+    "Right, let me see.",
+    "Okay.",
+    "Hmm, one moment.",
+    "Let's see.",
 ]
 
 
@@ -53,6 +64,12 @@ class FillerPool:
     phrases: list[str] = field(default_factory=lambda: list(DEFAULT_FILLERS))
     clips: list[FillerClip] = field(default_factory=list)
     _last_index: int = -1
+    # 2026-08-18: track the last N picked indices so pick() can avoid
+    # repeating any of them.  Previously the round-robin-with-offset
+    # could hit the same clip within 2-3 turns; users perceived that as
+    # "the agent keeps saying 'okay just a moment' over and over."
+    _recent_indices: list[int] = field(default_factory=list)
+    _recent_window: int = 3
 
     async def warm(self, tts: "TTSProvider", voice: Optional[str] = None) -> int:
         """Pre-synthesize every filler phrase. Returns count of successful
@@ -70,14 +87,26 @@ class FillerPool:
         return len(self.clips)
 
     def pick(self) -> Optional[FillerClip]:
-        """Round-robin pick to avoid repeating the same filler on back-to-back
-        tool calls. Returns None if pool is empty."""
+        """Random-with-recency-avoidance.  Never returns a clip whose
+        index appears in the last `_recent_window` picks (as long as the
+        pool is large enough to satisfy that)."""
         if not self.clips:
             return None
-        # Round-robin with a tiny random offset so it doesn't feel mechanical.
-        offset = random.choice([1, 2]) if len(self.clips) > 2 else 1
-        self._last_index = (self._last_index + offset) % len(self.clips)
-        return self.clips[self._last_index]
+        n = len(self.clips)
+        # Avoid the last `_recent_window` picks; if the pool is smaller
+        # than the window+1, avoid whatever we can.
+        avoid_count = min(self._recent_window, max(0, n - 1))
+        avoid = set(self._recent_indices[-avoid_count:]) if avoid_count > 0 else set()
+        candidates = [i for i in range(n) if i not in avoid]
+        if not candidates:
+            candidates = list(range(n))
+        idx = random.choice(candidates)
+        self._last_index = idx
+        self._recent_indices.append(idx)
+        # Bound the recency buffer so it doesn't grow unbounded.
+        if len(self._recent_indices) > self._recent_window * 2:
+            self._recent_indices = self._recent_indices[-self._recent_window:]
+        return self.clips[idx]
 
     def is_warm(self) -> bool:
         return bool(self.clips)

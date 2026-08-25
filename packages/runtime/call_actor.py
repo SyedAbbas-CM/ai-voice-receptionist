@@ -216,8 +216,17 @@ class CallActor:
         self.turn_generation += 1
         self.speech_generation += 1  # any queued speech is invalidated too
         self._cancel_supervised_below(self.turn_generation)
-        log.debug("call_id=%s turn_generation=%d speech_generation=%d",
-                  self.call_id, self.turn_generation, self.speech_generation)
+        # 2026-08-21 NET (Ship 1): promoted DEBUG→INFO.  Barge/interruption
+        # investigations (CA1f11caf57 gen=2→3 race) had zero visibility
+        # into when the actor bumped generations vs when brain jobs
+        # fired, forcing us to infer causation from downstream side-
+        # effects.  One line per bump is cheap and unblocks future
+        # race triage.
+        log.info(
+            "BUMP_TURN call_id=%s reason=%s turn_generation=%d speech_generation=%d",
+            self.call_id, reason,
+            self.turn_generation, self.speech_generation,
+        )
         return self.turn_generation
 
     async def bump_speech(self, reason: str = "new-response") -> int:
@@ -225,6 +234,13 @@ class CallActor:
         task.  Sprint 12 Track A: no mailbox drain."""
         await self._cancel_current_speech(reason=f"bump-speech:{reason}")
         self.speech_generation += 1
+        # 2026-08-21 NET (Ship 1): same rationale as bump_turn — INFO
+        # so orphan-pump-task investigations can see when speech gens
+        # actually advance.
+        log.info(
+            "BUMP_SPEECH call_id=%s reason=%s speech_generation=%d",
+            self.call_id, reason, self.speech_generation,
+        )
         return self.speech_generation
 
     def spawn_supervised(

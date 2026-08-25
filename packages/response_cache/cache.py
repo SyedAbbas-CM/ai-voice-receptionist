@@ -59,6 +59,10 @@ _LEADING_FILLERS = re.compile(
 )
 _TRAILING_POLITENESS = re.compile(r"\s+(?:please|thanks|thank you)[.?!]*$", re.I)
 _TRAILING_PUNCT = re.compile(r"[.?!,;:]+$")
+# 2026-08-21: strip INTERNAL punctuation too. Flux's transcripts contain
+# periods inside utterances ("Hello. Can you hear me?") where Nova-3 used
+# commas. Without this, cache lookups miss on every Flux transcript.
+_INTERNAL_PUNCT = re.compile(r"[,;!?.]")
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -86,6 +90,7 @@ def normalize_input(text: str) -> str:
 
     s = _TRAILING_POLITENESS.sub("", s)
     s = _TRAILING_PUNCT.sub("", s)
+    s = _INTERNAL_PUNCT.sub(" ", s)
     s = _WHITESPACE.sub(" ", s).strip()
 
     # Short/trivial acknowledgements → don't cache
@@ -224,6 +229,45 @@ class ResponseCache:
             (reply_text, tts_cache_key, key, reply_text),
         )
         return key
+
+    # 2026-08-24 (CAff590033 dead-air fix): sync SQLite writes on the
+    # asyncio event loop were blocking for 12+ seconds on real calls
+    # (EVENT_LOOP_LAG 12914ms in uvicorn-2026-08-24_020332.log). That
+    # kills every concurrent task — STT input, TTS output, Deepgram
+    # events, timers — for the duration. AUDIT-S5 from the earlier
+    # ChatGPT audit called this out and it never shipped. Adding
+    # async wrappers that dispatch to a thread pool via asyncio.to_thread.
+    # Callers in twilio_actor.py should switch from `.get()` / `.put()`
+    # to `await .aget()` / `await .aput()` to avoid the block.
+    # The sync methods stay for warmup + non-async paths.
+    async def aget(
+        self,
+        business_id: str,
+        tenant_id: str,
+        input_text: str,
+    ) -> Optional[ResponseCacheEntry]:
+        """Async version of .get() — offloads the SQLite read/UPDATE to
+        a thread pool so the event loop isn't blocked."""
+        import asyncio as _asyncio
+        return await _asyncio.to_thread(
+            self.get, business_id, tenant_id, input_text,
+        )
+
+    async def aput(
+        self,
+        business_id: str,
+        tenant_id: str,
+        input_text: str,
+        reply_text: str,
+        tts_cache_key: Optional[str] = None,
+    ) -> Optional[str]:
+        """Async version of .put() — offloads the SQLite INSERT + UPDATE
+        to a thread pool so the event loop isn't blocked."""
+        import asyncio as _asyncio
+        return await _asyncio.to_thread(
+            self.put, business_id, tenant_id, input_text,
+            reply_text, tts_cache_key,
+        )
 
     def invalidate_business(self, business_id: str, tenant_id: str) -> int:
         """Drop all cached entries for a business (e.g. on profile change).

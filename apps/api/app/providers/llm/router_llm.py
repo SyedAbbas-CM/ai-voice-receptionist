@@ -485,17 +485,70 @@ class RouterLLM(LLMProvider):
             try:
                 if has_native_stream:
                     # True SSE streaming path.
-                    async for kind, payload, is_final in provider.stream_complete(
+                    # 2026-08-21 NET (streaming timeout fallback):
+                    # Wrap the FIRST-byte wait in asyncio.wait_for with
+                    # self.timeout_s.  Rationale: on CAb57ea094 (2026-08-21
+                    # 04:18) OpenAI Fast tier held the SSE connection open
+                    # for 17.7s before sending the first token — router had
+                    # no timeout on the streaming path (batch path did),
+                    # so the caller heard 25s of silence.  Once first byte
+                    # arrives we stream freely (per-turn max_tokens caps
+                    # runtime; observed good calls stream <300ms after
+                    # first-byte).  Since we time out BEFORE any yield
+                    # downstream, cancelling this provider is safe — the
+                    # brain hasn't seen any tokens yet, we can fall over
+                    # to the next provider cleanly.
+                    _ait = provider.stream_complete(
                         messages, temperature=temperature, max_tokens=max_tokens,
                         tools=tools,
-                    ):
-                        if first_ms is None and (payload or kind == "tool_call"):
-                            first_ms = (time.perf_counter() - _call_started) * 1000
-                            log.info(
-                                "LLM_STREAM_CALL site=brain.reply provider=%s model=%s "
-                                "first_kind=%s first_ms=%.0f transport=sse",
-                                name, model_name, kind, first_ms,
-                            )
+                    ).__aiter__()
+                    try:
+                        first_item = await asyncio.wait_for(
+                            _ait.__anext__(), timeout=self.timeout_s,
+                        )
+                    except asyncio.TimeoutError:
+                        # Cancel the underlying request-in-flight.  httpx
+                        # streaming iterators respect asyncio cancellation.
+                        try:
+                            await _ait.aclose()
+                        except Exception:
+                            pass
+                        elapsed = (time.perf_counter() - _call_started) * 1000
+                        log.warning(
+                            "LLM_STREAM_TIMEOUT site=brain.reply provider=%s "
+                            "model=%s waited_ms=%.0f timeout_s=%.1f — trying next provider",
+                            name, model_name, elapsed, self.timeout_s,
+                        )
+                        errors.append(f"{name}=first_byte_timeout({elapsed:.0f}ms)")
+                        self._mark_failed(name, f"first_byte_timeout({elapsed:.0f}ms)")
+                        continue
+                    except StopAsyncIteration:
+                        # Provider yielded nothing at all — treat as failure.
+                        elapsed = (time.perf_counter() - _call_started) * 1000
+                        log.warning(
+                            "LLM_STREAM_EMPTY site=brain.reply provider=%s model=%s "
+                            "elapsed_ms=%.0f — trying next provider",
+                            name, model_name, elapsed,
+                        )
+                        errors.append(f"{name}=empty_stream")
+                        self._mark_failed(name, "empty_stream")
+                        continue
+
+                    # First byte arrived within budget — log + yield it,
+                    # then stream the rest normally (no further timeout).
+                    kind, payload, is_final = first_item
+                    first_ms = (time.perf_counter() - _call_started) * 1000
+                    log.info(
+                        "LLM_STREAM_CALL site=brain.reply provider=%s model=%s "
+                        "first_kind=%s first_ms=%.0f transport=sse",
+                        name, model_name, kind, first_ms,
+                    )
+                    yield kind, payload, is_final
+                    if is_final:
+                        self._mark_ok(name)
+                        return
+
+                    async for kind, payload, is_final in _ait:
                         yield kind, payload, is_final
                         if is_final:
                             self._mark_ok(name)

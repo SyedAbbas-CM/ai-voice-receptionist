@@ -17,9 +17,24 @@ class GroqLLM(LLMProvider):
     2026-07-31: when constructed by RouterLLM, pass raise_on_rate_limit=True to
     disable this class's own cross-provider fallback ladder — the router owns
     fallover in that mode.  When used standalone (LLM_PROVIDER=groq) the
-    legacy fallback ladder still fires."""
+    legacy fallback ladder still fires.
+
+    2026-08-20: shared HTTP/2 keep-alive client at class level.  Previously
+    every request created a fresh AsyncClient (line 94 pre-refactor), paying
+    ~500ms TLS handshake per call and defeating the point of using a
+    lower-latency provider.  Also adds native `stream_complete` so the
+    router doesn't fall back to buffered `complete()` and emit the whole
+    reply as one chunk.  Streaming from Groq via SSE is what actually makes
+    Groq's ~200ms TTFT visible to the caller."""
 
     name = "groq"
+
+    # Class-level shared HTTP/2 client with keep-alive.  Lazy-init in
+    # `_get_client` so tests that never construct the class don't open
+    # a real socket, and so the loop is bound at first use (not at
+    # import time — which would fail because there's no running loop
+    # in module scope).
+    _shared_client: Optional[httpx.AsyncClient] = None
 
     def __init__(
         self,
@@ -38,6 +53,22 @@ class GroqLLM(LLMProvider):
         self.model = model or settings.groq_model or "llama-3.3-70b-versatile"
         self.base_url = "https://api.groq.com/openai/v1"
         self.raise_on_rate_limit = raise_on_rate_limit
+
+    @classmethod
+    def _get_client(cls) -> httpx.AsyncClient:
+        cli = cls._shared_client
+        if cli is None or cli.is_closed:
+            cli = httpx.AsyncClient(
+                http2=True,
+                timeout=httpx.Timeout(90.0, connect=5.0),
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                    keepalive_expiry=300.0,
+                ),
+            )
+            cls._shared_client = cli
+        return cli
 
     async def complete(
         self,
@@ -90,13 +121,13 @@ class GroqLLM(LLMProvider):
         original_model = payload["model"]
         current_model = original_model
         max_retries = 8   # was 3 — TPD retry-after can be 30-60s per hit
+        client = self._get_client()
         for attempt in range(max_retries + 1):
-            async with httpx.AsyncClient(timeout=90) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=payload,
-                )
+            resp = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+            )
             if resp.status_code == 429 and attempt < max_retries:
                 # Honor retry-after up to 5 min per attempt (TPD resets can
                 # legitimately take that long during heavy harness runs).
@@ -208,6 +239,100 @@ class GroqLLM(LLMProvider):
             raw=data,
         )
 
+    async def stream_complete(
+        self,
+        messages: list[dict],
+        temperature: float = 0.3,
+        max_tokens: int = 1024,
+        tools: Optional[list[ToolDefinition]] = None,
+    ):
+        """2026-08-20: native SSE streaming.  Groq is OpenAI-compatible on
+        the wire, so this mirrors OpenAILLM.stream_complete exactly.
+
+        Yields (kind, payload, is_final):
+          - kind="text",      payload=delta_str,  is_final=bool
+          - kind="tool_call", payload=partial_tool_call_dict, is_final=bool
+
+        Prior to 2026-08-20 GroqLLM had NO stream_complete, so
+        RouterLLM.stream_complete fell back to buffered .complete() and
+        emitted the whole reply as a single chunk (defeating the point of
+        streaming to TTS sentence-by-sentence).  With this method wired
+        the router's streaming path routes tokens straight through — the
+        caller hears the first sentence as soon as Groq generates it.
+
+        Rate-limit handling: on 429, we raise HTTPStatusError so the
+        RouterLLM's provider-failover picks the next candidate.  Cross-
+        provider fallback (Gemini/OpenRouter/NVIDIA) is not attempted
+        here — that's the batch `complete()` path's responsibility, and
+        those helpers don't emit streaming tokens anyway.  Streaming
+        callers who want fallback should catch the HTTP error and
+        retry on `complete()`.
+        """
+        if not self.api_key:
+            raise RuntimeError("GROQ_API_KEY not set")
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = [t.to_openai_format() for t in tools]
+            payload["tool_choice"] = "auto"
+
+        # Accumulate tool_calls across chunks (OpenAI-compatible format).
+        tool_calls_acc: dict[int, dict] = {}
+        client = self._get_client()
+
+        async with client.stream(
+            "POST", f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+            json=payload,
+        ) as resp:
+            if resp.status_code == 429:
+                # Let the router failover pick next provider.  We do not
+                # attempt the cross-provider fallback ladder here because
+                # our helpers are batch-only (no streaming).
+                resp.raise_for_status()
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    for tc in tool_calls_acc.values():
+                        yield "tool_call", tc, True
+                    yield "text", "", True
+                    return
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                text = delta.get("content")
+                if text:
+                    yield "text", text, False
+                for tc_delta in (delta.get("tool_calls") or []):
+                    idx = tc_delta.get("index", 0)
+                    acc = tool_calls_acc.setdefault(idx, {
+                        "id": None, "name": None, "arguments": "",
+                    })
+                    if tc_delta.get("id"):
+                        acc["id"] = tc_delta["id"]
+                    fn = tc_delta.get("function") or {}
+                    if fn.get("name"):
+                        acc["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        acc["arguments"] += fn["arguments"]
+
     async def _gemini_fallback(
         self,
         api_key: str,
@@ -238,17 +363,19 @@ class GroqLLM(LLMProvider):
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
 
-        async with httpx.AsyncClient(timeout=45) as client:
-            resp = await client.post(
-                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        # 2026-08-20: share the class-level HTTP/2 keep-alive client.
+        # Previously opened a fresh AsyncClient per fallback call.
+        client = self._get_client()
+        resp = await client.post(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         choice = data["choices"][0]
         msg = choice["message"]
@@ -290,17 +417,18 @@ class GroqLLM(LLMProvider):
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://integrate.api.nvidia.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        # 2026-08-20: share the class-level HTTP/2 keep-alive client.
+        client = self._get_client()
+        resp = await client.post(
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         choice = data["choices"][0]
         msg = choice["message"]
@@ -344,17 +472,18 @@ class GroqLLM(LLMProvider):
             payload["tools"] = [t.to_openai_format() for t in tools]
             payload["tool_choice"] = "auto"
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "X-Title": "voiceops-ai-agent",
-                },
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        # 2026-08-20: share the class-level HTTP/2 keep-alive client.
+        client = self._get_client()
+        resp = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "X-Title": "voiceops-ai-agent",
+            },
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         choice = data["choices"][0]
         msg = choice["message"]

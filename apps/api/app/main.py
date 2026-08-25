@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.db.session import init_db
-from app.routes import admin, channels, chat, debug, elevenlabs_compat, outbound, plivo, sessions, signalwire, telnyx, twilio, vapi, voice
+from app.routes import admin, channels, chat, dashboard, debug, elevenlabs_compat, outbound, plivo, sessions, signalwire, telnyx, twilio, vapi, voice
 from packages.observability.structured_log import maybe_install as maybe_install_json_logs
 
 
@@ -112,8 +112,24 @@ def create_app() -> FastAPI:
     app.include_router(telnyx.router)
     app.include_router(plivo.router)
     app.include_router(outbound.router)
-    app.include_router(debug.router)
+    # 2026-08-25 P0.2: /debug/* exposes traces + per-call timelines + a
+    # live WebSocket call-event stream — cross-tenant call content.
+    # Now requires auth (removed from _PUBLIC_PATH_PREFIXES in auth.py)
+    # AND in production is only mounted when explicitly opted in via
+    # OBSERVABILITY_API_ENABLED=true.  Dev/staging always mount so the
+    # dashboards keep working — an authed API key is still required.
+    import os as _os
+    _env = _os.environ.get("ENVIRONMENT", "development").lower()
+    if _env != "production" or settings.observability_api_enabled:
+        app.include_router(debug.router)
+    else:
+        _logging.getLogger(__name__).info(
+            "AUTH: /debug/* NOT mounted (ENVIRONMENT=production and "
+            "OBSERVABILITY_API_ENABLED=false).  Set OBSERVABILITY_API_ENABLED=true "
+            "for the incident window if you need live debug routes."
+        )
     app.include_router(admin.router)
+    app.include_router(dashboard.router)
 
     # Sprint 9b: /metrics scrape endpoint for turn-latency histograms,
     # barge-in counters, provider fallback counts, ledger heard/generated
@@ -142,6 +158,24 @@ def create_app() -> FastAPI:
             print(f"[startup] filler warmup skipped: {e}")
 
     @app.on_event("startup")
+    async def _compliance_audit_boot() -> None:
+        """Run compliance audit on the loaded business profile at boot.
+
+        Surfaces two-party-state recording-consent gaps + missing AI
+        disclosure as WARNING log lines so ops sees them before the
+        first call.  Non-fatal — bad profile just yields notes, not a
+        crash.  See packages/compliance/jurisdiction.py for the state
+        list + statute cites.
+        """
+        try:
+            from app.core.session_manager import load_business
+            from packages.compliance import log_compliance_audit
+            business = load_business()
+            log_compliance_audit(business, source="boot")
+        except Exception as e:
+            print(f"[startup] compliance audit skipped: {e}")
+
+    @app.on_event("startup")
     async def _warm_greeting_cache() -> None:
         """Pre-synthesize the greeting for the currently-loaded business
         profile. Kills the 2-3s TTS cold-start on turn 1 of every call.
@@ -164,11 +198,13 @@ def create_app() -> FastAPI:
             else:
                 # 2026-08-10: MUST stay in sync with ReceptionistBrain.greet().
                 # Kept short — 3-sentence greetings burn 7-15 sec of µ-law audio.
+                # 2026-08-25: reworded disclosure to "automated receptionist"
+                # (see brain.py greet() — keep IN SYNC with that string).
                 include_disclosure = getattr(business, "ai_disclosure_enabled", False)
                 include_recording = getattr(business, "recording_notice_enabled", False)
                 parts = [f"Thanks for calling {business.name}, how can I help?"]
                 if include_disclosure:
-                    parts.append("I'm an AI assistant.")
+                    parts.append("You're speaking with our automated receptionist.")
                 if include_recording:
                     parts.append("This call may be recorded.")
                 text = " ".join(parts)
@@ -255,6 +291,69 @@ def create_app() -> FastAPI:
             print(f"[startup] conv-control fastpath skipped: {e}")
 
     @app.on_event("startup")
+    async def _warm_response_cache() -> None:
+        """2026-08-19: seed the response cache with per-business FAQ
+        turns so the FIRST caller who asks 'do you take Delta Dental?'
+        gets a ~250ms reply from cache instead of a ~2s LLM call.
+
+        Previously the response cache was cold on every boot — it only
+        accumulated entries after the LLM answered a NON-tool question
+        AND a second caller asked the exact same thing.  For a demo
+        that's zero hits.
+
+        We also pre-generate the TTS bytes for each reply into the
+        disk cache so the fastpath is disk-only end-to-end.
+        """
+        if settings.tts_provider == "qwen3":
+            print("[startup] response cache warmup skipped (Qwen3-TTS too slow)")
+            return
+        try:
+            from app.core import session_manager
+            from packages.response_cache import get_shared_response_cache
+            from packages.response_cache.common_turns import common_turns_for
+            business = session_manager.load_business()
+            pairs = common_turns_for(business)
+            if not pairs:
+                print(f"[startup] response cache warmup: 0 pairs for vertical={business.vertical!r}")
+                return
+
+            cache = get_shared_response_cache()
+            n_seeded = 0
+            for input_text, reply_text in pairs:
+                try:
+                    cache.put(business.id, "default", input_text, reply_text)
+                    n_seeded += 1
+                except Exception as _e:
+                    print(f"[startup] response cache put failed for {input_text!r}: {_e}")
+
+            # Pre-generate TTS bytes for each UNIQUE reply so the disk
+            # cache is hot when the fastpath speaks.
+            n_tts = 0
+            unique_replies = sorted({r for _, r in pairs})
+            try:
+                from app.routes.twilio import _get_telephony_tts
+                from packages.tts_cache import TTSCacheWrapper
+                from packages.tts_cache.cache import get_shared_cache
+                telephony = _get_telephony_tts()
+                if not isinstance(telephony, TTSCacheWrapper):
+                    telephony = TTSCacheWrapper(telephony, cache=get_shared_cache())
+                    import app.routes.twilio as _tw
+                    _tw._telephony_tts_singleton = telephony
+                for reply in unique_replies:
+                    try:
+                        await telephony.synthesize(reply)
+                        n_tts += 1
+                    except Exception as _e:
+                        print(f"[startup] response cache tts warm failed for {reply[:40]!r}: {_e}")
+            except Exception as _e:
+                print(f"[startup] response cache tts warm skipped: {_e}")
+
+            print(f"[startup] response cache warmed: {n_seeded} pairs, "
+                  f"{n_tts}/{len(unique_replies)} unique replies pre-TTS'd")
+        except Exception as e:
+            print(f"[startup] response cache warmup skipped: {e}")
+
+    @app.on_event("startup")
     async def _warm_smart_turn() -> None:
         """S13-A: pre-warm the smart-turn ONNX model + prime the
         inference cache.  Cold first-call is ~450ms which was
@@ -327,37 +426,147 @@ def create_app() -> FastAPI:
         """2026-08-08: pre-warm the LLM router's HTTP clients + TLS session.
         2026-08-11: also send a WITH-TOOLS call so the router's
         capability-aware routing picks the SAME provider+model that
-        real brain calls will use.  Previously we warmed with tools=None
-        which selected a different (smaller) model on some providers;
-        the first real call still had to cold-start the primary tools
-        model.  Now the first real call hits an already-warm socket AND
-        model.  Uses one dummy tool so the shape matches production."""
+        real brain calls will use.
+        2026-08-20 (SPEED-EXTRA-D): warm with the FULL production tool
+        schema — including `emit_semantic_plan` (T-SP1) and the vertical
+        tools for the tenant's business.  OpenAI compiles JSON schemas
+        into constrained grammars on first use, adding 200-400ms to
+        the first real caller's TTFT.  Warming here shifts that cost
+        to boot.  See docs/openai-speed-research-2026-08-20.md lever 8."""
         try:
-            # 2026-08-13 (ChatGPT audit fix): use the SHARED get_llm()
-            # instance, NOT a fresh RouterLLM().  Warming a throwaway
-            # object leaves the real call's HTTP client cold.
+            from app.core import session_manager
             from app.providers import get_llm
-            from packages.schemas import ToolDefinition
+            from packages.core_agent.plan_realizer import (
+                semantic_plan_tool_definition,
+            )
+            from packages.integrations import build_tools_for_vertical
+
             router = get_llm()
-            dummy_tools = [ToolDefinition(
-                name="check_hours",
-                description="Check business hours.",
-                parameters={"type": "object", "properties": {}, "required": []},
-            )]
-            # Match production call shape: tools=list, messages incl. system+user.
+
+            # Build the REAL production tool list so schema-compile
+            # happens against real schemas, not a fake `check_hours` stub.
+            try:
+                business = session_manager.load_business()
+                calendar = session_manager.get_calendar()
+                real_tools, _handler = build_tools_for_vertical(
+                    business, calendar, retriever=None, shaper_llm=None,
+                )
+                # ReceptionistBrain adds emit_semantic_plan at __init__;
+                # mirror that here.
+                real_tools = list(real_tools) + [semantic_plan_tool_definition()]
+            except Exception as _e:
+                print(f"[startup] llm warmup: couldn't build real tools ({_e}) "
+                      f"— falling back to dummy tool")
+                from packages.schemas import ToolDefinition
+                real_tools = [ToolDefinition(
+                    name="check_hours",
+                    description="Check business hours.",
+                    parameters={"type": "object", "properties": {}, "required": []},
+                )]
+
             resp = await router.complete(
                 messages=[
                     {"role": "system", "content": "You are a helper. Reply 'ok'."},
                     {"role": "user", "content": "hi"},
                 ],
-                tools=dummy_tools,
+                tools=real_tools,
                 temperature=0.0,
                 max_tokens=60,  # reasoning models (gpt-oss-120b) burn tokens on internal thinking; must be > 20 or content=null
                 site="brain.warmup",
             )
-            print(f"[startup] llm router warmed (with tools): reply={resp.text[:20]!r}")
+            print(f"[startup] llm router warmed (with {len(real_tools)} real tools): "
+                  f"reply={resp.text[:20]!r}")
         except Exception as e:
             print(f"[startup] llm router warmup skipped: {e}")
+
+    @app.on_event("startup")
+    async def _warm_llm_prompt_cache() -> None:
+        """2026-08-21: warm OpenAI's `prompt_cache_key` slot with the
+        REAL production system prompt (~14-17k chars) so the first real
+        caller's turn 0 hits a warm cache instead of paying the full
+        prefill cost.
+
+        The existing `brain.warmup` (above) uses a dummy 30-char system
+        prompt so it warms tool-schema JIT but NOT the real prompt-cache
+        slot. This second call fires the same shape as real brain
+        traffic (real system prompt + real biz-<hash> cache key), which
+        populates the actual cache slot the runtime hits on turn 0.
+
+        Expected saving: 500-700ms off first-caller turn-0 first-token
+        latency (previously observed ~1500ms cold, ~800ms warm). Cost:
+        one billed API request per startup, ~4k input tokens.
+
+        Runs AFTER the tool-schema warmup so if this one fails we still
+        have the tool JIT primed."""
+        try:
+            from app.core import session_manager
+            from app.core.config import settings
+            from app.providers import get_llm
+            from packages.core_agent.prompt import build_system_prompt
+            from packages.core_agent.plan_realizer import (
+                semantic_plan_tool_definition,
+            )
+            from packages.integrations import build_tools_for_vertical
+
+            business = session_manager.load_business()
+            calendar = session_manager.get_calendar()
+            real_tools, _handler = build_tools_for_vertical(
+                business, calendar, retriever=None, shaper_llm=None,
+            )
+            real_tools = list(real_tools) + [semantic_plan_tool_definition()]
+
+            # Assemble the SAME system prompt build_system_prompt yields
+            # at runtime. Byte-for-byte match matters because
+            # openai_llm._derive_cache_key hashes the exact string.
+            system_prompt = build_system_prompt(business)
+
+            router = get_llm()
+            resp = await router.complete(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "hi"},
+                ],
+                tools=real_tools,
+                temperature=0.0,
+                max_tokens=8,
+                site="brain.cache_warmup",
+            )
+            print(
+                f"[startup] prompt-cache warmed: {len(system_prompt)} char prompt, "
+                f"{len(real_tools)} tools, reply={resp.text[:20]!r}"
+            )
+
+            # 2026-08-22 NET Ship 4: fire a SECOND warmup ~2s after the
+            # first.  OpenAI Fast tier appears to route requests via a
+            # consistent-hashing scheme where the `prompt_cache_key`
+            # picks a backend — but two consecutive requests with the
+            # same key can land on DIFFERENT backends until the routing
+            # tier converges.  A single warmup only populates ONE
+            # backend's cache slot.  On CAa7effd6273 turn 0 saw a
+            # 3.2-second first-token even with prompt-cache prewarm
+            # shipped — the caller's request hit a "second backend"
+            # that had never seen the key.  Two consecutive warms
+            # increase the odds both backends are primed.  Cost: one
+            # additional billed API request per startup, ~4k input
+            # tokens.  Cheap for the resilience.
+            import asyncio as _aio
+            await _aio.sleep(2.0)
+            resp2 = await router.complete(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "hi"},
+                ],
+                tools=real_tools,
+                temperature=0.0,
+                max_tokens=8,
+                site="brain.cache_warmup_2",
+            )
+            print(
+                f"[startup] prompt-cache warmed (2nd fire): "
+                f"reply={resp2.text[:20]!r} — populates alt backend cache slot"
+            )
+        except Exception as e:
+            print(f"[startup] prompt-cache warmup skipped: {e}")
 
     @app.on_event("startup")
     async def _warm_deepgram_dns() -> None:

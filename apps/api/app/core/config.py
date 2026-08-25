@@ -138,6 +138,17 @@ class Settings(BaseSettings):
     tracer_kind: str = "noop"
     tracer_service_name: str = "voiceops-ai-agent"
 
+    # 2026-08-25 P0.2 (BACKEND-AUDIT-2026-08-25-CHATGPT.md#2):
+    # /debug/* mounts traces, per-call timelines, error taxonomies, and
+    # a live WebSocket call-event stream.  In production these expose
+    # cross-tenant call content and must not be reachable at all — even
+    # authenticated, because a compromised admin bearer would still leak
+    # every tenant's calls.  When ENVIRONMENT=production the debug
+    # router is only mounted if this flag is true (explicit opt-in per
+    # incident).  In dev the router mounts unconditionally, but auth is
+    # still required — /debug/ is no longer in the public prefix list.
+    observability_api_enabled: bool = False
+
     # RAG for voice-agent knowledge lookups.
     # rag_retriever: "sqlite" (default, zero-config), "noop" (off),
     #   "supabase" (Postgres+pgvector, coming later), "langchain" (adapter).
@@ -163,13 +174,39 @@ class Settings(BaseSettings):
     # Flux turn-taking tuning.  eot_threshold is model confidence
     # required to commit an end-of-turn.  Higher = less false-EOTs
     # (safer but slower), lower = snappier turns (more false-cuts).
+    # 2026-08-23: ChatGPT audit — per Deepgram's own "low-latency
+    # configuration" docs, Eager=0.4 + Final=0.7 is the recommended
+    # snappy-but-safe combo.  Dropping Eager .5→.4 lets speculative
+    # brain fire earlier on likely end-of-turn moments while keeping
+    # the final commit conservative.  Deepgram data suggests
+    # hundreds-of-ms savings on turns where speculation wins, with
+    # 50-70% more speculative fires (cost is discarded LLM tokens,
+    # not caller-heard latency).  Do NOT drop Final below 0.7 —
+    # false-EOTs cut the caller off mid-sentence.
     deepgram_flux_eot_threshold: float = 0.7
-    deepgram_flux_eager_eot_threshold: float = 0.5
-    deepgram_flux_eot_timeout_ms: int = 3000
+    deepgram_flux_eager_eot_threshold: float = 0.4
+    # 2026-08-24: dropped 3000 → 1500 → 1000 iteratively. Trace on
+    # CA3c9daf0658 (eot=3000) showed 1058ms Flux endpointing tax on a
+    # finished 5-word phrase. On CA837b6781 (eot=1500) Flux fired
+    # STT_FINAL ~3ms after last STT_PARTIAL — Flux itself is fast,
+    # the timeout was the ceiling. User reported 3s felt latency
+    # dropped noticeably but wanted more. Dropping to 1000ms should
+    # catch another 200-500ms on any turn where the caller had a
+    # brief natural pause after their last word.
+    # Risk: false-cut on mid-sentence pause ("I want to book... um
+    # ...tomorrow"). Bounded by:
+    #   1. Flux TurnResumed on continuation → gets merged next turn
+    #   2. 500ms structured-input cooldown for phone/name/address
+    #   3. Application-level continuation-merge window
+    # If false-cuts become a real problem, revert to 1500ms.
+    deepgram_flux_eot_timeout_ms: int = 1000
 
     elevenlabs_api_key: Optional[str] = None
     elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM"
-    elevenlabs_model: Optional[str] = "eleven_turbo_v2_5"
+    # 2026-08-18: default flipped Turbo v2.5 → Flash v2.5 (~75ms).
+    # .env already overrides to eleven_flash_v2_5; this brings the
+    # code-default in line so a fresh env doesn't quietly regress.
+    elevenlabs_model: Optional[str] = "eleven_flash_v2_5"
     # 2026-08-12 (task #322): WebSocket /stream-input transport.
     # Bench (PK→US): HTTP /stream first_byte=316ms, WS=1601ms for
     # single-shot full-text sends — WS is SLOWER because it optimizes
@@ -187,7 +224,10 @@ class Settings(BaseSettings):
 
     cartesia_api_key: Optional[str] = None
     cartesia_voice_id: Optional[str] = None
-    cartesia_model: Optional[str] = "sonic-2"
+    # 2026-08-18: sonic-2 was deprecated / no longer served as of
+    # 2026-06-01 per Cartesia's docs.  .env already overrides to
+    # sonic-3; brought the code-default in line.
+    cartesia_model: Optional[str] = "sonic-3"
 
     local_whisper_model: Optional[str] = "base.en"
     local_whisper_compute: Optional[str] = "int8"
@@ -242,7 +282,32 @@ class Settings(BaseSettings):
     google_sheet_id: Optional[str] = None
     google_sheet_tab: str = "calls"
 
-    crm_sink: str = "none"  # none | ghl | sheets | ghl+sheets
+    # 2026-08-24 — HubSpot v3 CRM integration.  Free-tier friendly.
+    # Owner generates a Private App token under Settings → Integrations
+    # → Private Apps with scopes:
+    #   crm.objects.contacts.read, crm.objects.contacts.write,
+    #   crm.objects.notes.write, crm.objects.deals.write (optional).
+    # portal_id is the numeric ID after "app.hubspot.com/contacts/"
+    # in tenant's URL — used to build clickable note links (future).
+    # pipeline_id + stage_id are only needed if create_deals=True.
+    hubspot_access_token: Optional[str] = None
+    hubspot_portal_id: Optional[str] = None
+    hubspot_pipeline_id: Optional[str] = None
+    hubspot_stage_id: Optional[str] = None
+    hubspot_create_deals: bool = False
+
+    crm_sink: str = "none"  # none | ghl | sheets | hubspot | followup | combos with '+'
+
+    # 2026-08-24 — Post-booking follow-up (SMS to caller, email to owner).
+    # Uses existing sms_sender.py (Twilio Messages) + email_sender.py
+    # (SendGrid preferred, SMTP fallback).  Zero new provider deps.
+    # Business info comes from the loaded BusinessProfile in production;
+    # these env fields are for demos / overrides.
+    followup_business_name: Optional[str] = None
+    followup_business_address: Optional[str] = None
+    followup_owner_email: Optional[str] = None
+    followup_sms_caller: bool = True
+    followup_email_owner: bool = True
 
     calendar_backend: str = "fake"  # fake | google
 
@@ -345,6 +410,13 @@ class Settings(BaseSettings):
     # OpenAI Fast tier — lower + more predictable latency for eligible
     # models.  Ignored if the model doesn't support it.
     openai_persistent_ws_service_tier: str = ""
+    # 2026-08-20: OpenAI Fast processing tier for the normal (HTTP,
+    # non-persistent-WS) LLM client.  Bench (`docs/llm-ttft-bench-*.md`)
+    # showed ~2x TTFT improvement on the full 24k-char production system
+    # prompt (1534ms → 772ms median).  Empty string = default (no tier
+    # override).  Set to "fast" via env `OPENAI_SERVICE_TIER=fast`.
+    # Docs: https://developers.openai.com/api/docs/guides/fast-mode
+    openai_service_tier: str = ""
 
     # 2026-08-13 (P0-startup): silence-pump fed fake µ-law into Deepgram
     # while the greeting was playing.  Root-cause fix (non-blocking
@@ -383,6 +455,13 @@ class Settings(BaseSettings):
     tts_cache_max_mb: int = 30
     tts_cache_warm_on_boot: bool = True
 
+    # 2026-08-20: testing switch.  When True, RESPONSE_CACHE and the
+    # conv-control fastpath both fail-through — every turn hits the real
+    # LLM.  Prerequisite for humanness testing: with cache/fastpath
+    # in play we hear canned strings and can't tell if prompt work
+    # actually landed.  DO NOT enable in prod — kills the p50.
+    response_cache_bypass: bool = False
+
     # Task B (2026-08-06): reactive+committed brain.  Shadow build,
     # OFF by default.  When on, brain returns structured JSON with
     # should_speak/backchannel/committed_reply and can decide to
@@ -394,6 +473,15 @@ class Settings(BaseSettings):
     calendar_path: Optional[str] = None
 
     cors_origins: str = "*"
+
+    # 2026-08-24 (A1 wiring): gate for NextActionPolicy deterministic
+    # post-tool renderer.  When True, brain.py skips the 2nd LLM call on
+    # booking-confirmation turns if next_action_synthesizer can produce
+    # a valid reply from tool_results + known_slots.  Default False so
+    # ship-vs-activate is a separate flip.  Expected saving on booking-
+    # confirm turns: 600-1200ms.  See VOICE-AGENT-SUB-1.5S-RD-ROADMAP
+    # -2026-08-23.md §A1/§A2.
+    next_action_policy_enabled: bool = False
 
     def model_post_init(self, __context) -> None:
         if not self.database_url:

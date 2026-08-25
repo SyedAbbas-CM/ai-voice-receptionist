@@ -86,3 +86,10 @@ docs/rnd-2026-08/
 .env.bak
 *.bak
 .github/workflows/
+
+# 2026-08-25 (security-review): Claude Code's per-project state includes
+# permission rules with baked-in bearer tokens in curl commands.  A live
+# Vapi token leaked via .claude/settings.local.json during a codebase
+# bundle for audit; excluding here at the git layer is the same fix at
+# a different boundary.
+.claude/

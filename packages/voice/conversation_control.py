@@ -38,7 +38,11 @@ _TRAILING_POLITENESS = re.compile(r"\s+(?:please|thanks|thank you)[.?!]*$", re.I
 _TRAILING_PUNCT = re.compile(r"[.?!,;:]+$")
 # Kill internal punctuation that Deepgram inserts naturally in
 # "Hello, can you hear me" without breaking phrase matches.
-_INTERNAL_PUNCT = re.compile(r"[,;!?]")
+# 2026-08-21: added period. Flux writes "Hello. Can you hear me?"
+# where Nova-3 wrote "Hello, can you hear me?" — the period broke
+# fastpath matching, forcing every "hello can you hear me" through
+# the LLM (verified on CAb499d5f, +1348ms first_token latency).
+_INTERNAL_PUNCT = re.compile(r"[,;!?.]")
 _WHITESPACE = re.compile(r"\s+")
 
 

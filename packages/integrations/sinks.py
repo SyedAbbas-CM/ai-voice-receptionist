@@ -8,12 +8,51 @@ Each sink swallows its own errors so a broken CRM never crashes the call flow.
 """
 from __future__ import annotations
 
+import html as _html
 import logging
+import re as _re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Optional
 
 from packages.schemas import CallState
+
+
+# 2026-08-25 (security-review finding): caller-controlled fields
+# (caller_name, caller_phone, service, etc.) come from tool arguments
+# populated by the LLM from CALLER SPEECH.  They must never be
+# interpolated raw into HTML (email body → stored XSS in Gmail/Outlook)
+# or into an email Subject line (\r\n → header injection: attacker
+# adds a Bcc: header that copies the booking notification elsewhere).
+#
+# Every string that flows from a tool argument into HTML MUST pass
+# through _safe_html().  Every string that flows into an email header
+# MUST pass through _safe_header().
+def _safe_html(value: object) -> str:
+    """HTML-escape any value for safe inclusion in an HTML email body.
+    None → empty string."""
+    if value is None:
+        return ""
+    return _html.escape(str(value), quote=True)
+
+
+# Match all ASCII control characters — CR, LF, NUL, and other C0 control
+# codes.  An email header containing any of these can smuggle new
+# headers or terminate the header block early.
+_HEADER_CONTROL_CHARS = _re.compile(r"[\x00-\x1F\x7F]")
+
+
+def _safe_header(value: object, *, max_len: int = 200) -> str:
+    """Strip control characters (CR/LF/NUL) from a value destined for
+    an email Subject or other header.  Also truncates to `max_len` so
+    an unbounded caller string can't bloat the header past MTA limits.
+    """
+    if value is None:
+        return ""
+    cleaned = _HEADER_CONTROL_CHARS.sub("", str(value))
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len]
+    return cleaned
 
 
 log = logging.getLogger(__name__)
@@ -165,8 +204,329 @@ class SheetsSink(CRMSink):
             log.warning("sheets append_call failed: %s", e)
 
 
+class HubSpotSink(CRMSink):
+    """Upsert contact + add note + optionally create a deal on HubSpot.
+
+    Free-tier friendly: contact upsert + note engagement work on
+    HubSpot Free.  Deal creation requires a pipeline + stage — off by
+    default; enable via settings.hubspot_create_deals + configure
+    hubspot_pipeline_id + hubspot_stage_id.
+
+    Failure policy: mirrors GHLSink — swallow at sink boundary, log
+    warnings.  A broken CRM must never crash the call.
+    """
+
+    name = "hubspot"
+
+    def __init__(self, client) -> None:
+        self.client = client  # HubSpotClient
+
+    @staticmethod
+    def _split_name(full: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+        if not full:
+            return None, None
+        parts = full.strip().split(maxsplit=1)
+        return parts[0], parts[1] if len(parts) > 1 else None
+
+    async def on_booking(self, state: CallState, booking: dict) -> None:
+        args = booking.get("arguments") or {}
+        result = booking.get("result") or {}
+        # Booking tool signals success either as {"booked": True} (GHL
+        # calendar path) or {"ok": True} (local calendar).  Accept
+        # either — the sink is transport-agnostic.
+        if not (result.get("booked") or result.get("ok")):
+            return
+        # Prefer the tool's own arguments (canonical, already validated)
+        # over the extractor's fields.  Fall back to extracted when the
+        # LLM booked using data from earlier in the conversation.
+        extracted = state.extracted
+        phone = (
+            args.get("phone")
+            or (extracted.phone if extracted else None)
+        )
+        if not phone:
+            return
+        caller_name = (
+            args.get("caller_name")
+            or (extracted.caller_name if extracted else None)
+        )
+        first, last = self._split_name(caller_name)
+        email = args.get("email") or None
+
+        # Tags: single global tag + intent so downstream reports can
+        # bucket by "AI receptionist" and by "booking vs enquiry".
+        tags = ["voiceops-ai-agent"]
+        if extracted and extracted.intent:
+            tags.append(extracted.intent.value)
+
+        try:
+            contact = await self.client.upsert_contact(
+                phone=phone,
+                first_name=first,
+                last_name=last,
+                email=email,
+                tags=tags,
+            )
+        except Exception as e:
+            log.warning("hubspot upsert_contact failed: %s", e)
+            return
+
+        contact_id = contact.get("id")
+        if not contact_id:
+            return
+
+        # Note engagement — the human-readable record of what got booked.
+        summary = extracted.summary if extracted else ""
+        note_lines = [
+            "Booked via AI receptionist.",
+            "",
+            f"Service: {args.get('service', '?')}",
+            f"When: {args.get('start_iso') or args.get('date') + ' ' + args.get('time', '') if args.get('date') else '?'}",
+            f"Phone: {phone}",
+        ]
+        if summary:
+            note_lines.append("")
+            note_lines.append(f"Summary: {summary}")
+        try:
+            await self.client.add_note(contact_id, "\n".join(note_lines))
+        except Exception as e:
+            log.warning("hubspot add_note failed: %s", e)
+
+        # Deal creation is optional and gated by client config.
+        try:
+            deal_name = (
+                f"{args.get('service', 'Appointment')} — {caller_name or phone}"
+            )
+            await self.client.create_deal(
+                contact_id=contact_id,
+                deal_name=deal_name,
+            )
+        except Exception as e:
+            log.warning("hubspot create_deal failed: %s", e)
+
+    async def on_call_end(self, state: CallState) -> None:
+        """Log a note on every call end so tenants see missed calls +
+        enquiries too, not only successful bookings."""
+        if not state.extracted or not state.extracted.phone:
+            return
+        first, last = self._split_name(state.extracted.caller_name)
+        try:
+            contact = await self.client.upsert_contact(
+                phone=state.extracted.phone,
+                first_name=first,
+                last_name=last,
+                tags=["voiceops-ai-agent"],
+            )
+        except Exception as e:
+            log.warning("hubspot upsert_contact (call_end) failed: %s", e)
+            return
+
+        contact_id = contact.get("id")
+        if not contact_id:
+            return
+
+        status = (
+            state.status.value
+            if hasattr(state.status, "value") else str(state.status)
+        )
+        note_lines = [
+            f"Call ended — status: {status}",
+            f"Session: {state.session_id}",
+            f"Intent: {state.extracted.intent.value}",
+            f"Urgency: {state.extracted.urgency.value}",
+            f"Lead score: {state.extracted.lead_score}",
+        ]
+        if state.extracted.summary:
+            note_lines.append("")
+            note_lines.append(f"Summary: {state.extracted.summary}")
+        try:
+            await self.client.add_note(contact_id, "\n".join(note_lines))
+        except Exception as e:
+            log.warning("hubspot add_note (call_end) failed: %s", e)
+
+
+class FollowupSink(CRMSink):
+    """Fire caller SMS + owner email on successful bookings.
+
+    Design (2026-08-24):
+      - Caller gets an SMS confirmation immediately after booking success.
+        Real receptionists confirm verbally + follow up with text; this
+        matches that expectation.
+      - Owner gets an email with the booking details.  Owner's email
+        comes from `business.email` or env `OWNER_EMAIL_OVERRIDE`.
+      - Both are best-effort: SMS credit exhausted / SMTP down never
+        crashes the call.
+
+    Compliance:
+      - SMS body includes "Reply STOP to unsubscribe" via
+        `render_confirmation` (TCPA + Twilio AUP).
+      - Email includes ICS attachment so caller can add appointment
+        to their calendar.
+
+    Not fired on `on_call_end` — that's for owner-side call summaries.
+    We'd want a separate "call summary email" hook there once the
+    schema for CallEndEvent lands.  For now `on_call_end` is a no-op.
+    """
+
+    name = "followup"
+
+    def __init__(
+        self,
+        business_name: str,
+        owner_email: Optional[str],
+        location: Optional[str] = None,
+        send_sms_to_caller: bool = True,
+        send_email_to_owner: bool = True,
+    ) -> None:
+        self.business_name = business_name
+        self.owner_email = owner_email
+        self.location = location
+        self.send_sms_to_caller = send_sms_to_caller
+        self.send_email_to_owner = send_email_to_owner
+
+    @staticmethod
+    def _when_human(args: dict) -> Optional[str]:
+        """Render 'Tuesday, August 26 at 2:30 PM' from booking args."""
+        start_iso = args.get("start_iso") or args.get("start")
+        if start_iso and isinstance(start_iso, str):
+            try:
+                dt = datetime.fromisoformat(start_iso.rstrip("Z"))
+                return dt.strftime("%A, %B %d at %I:%M %p").lstrip("0")
+            except (TypeError, ValueError):
+                pass
+        # Fall back to date + time as-supplied.
+        date = args.get("date") or ""
+        time = args.get("time") or ""
+        if date and time:
+            return f"{date} at {time}"
+        return date or time or None
+
+    @staticmethod
+    def _parse_start(args: dict) -> Optional[datetime]:
+        start_iso = args.get("start_iso") or args.get("start")
+        if start_iso and isinstance(start_iso, str):
+            try:
+                return datetime.fromisoformat(start_iso.rstrip("Z"))
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    async def on_booking(self, state: CallState, booking: dict) -> None:
+        args = booking.get("arguments") or {}
+        result = booking.get("result") or {}
+        if not (result.get("booked") or result.get("ok")):
+            return
+
+        service = args.get("service") or "your appointment"
+        when_human = self._when_human(args)
+        caller_phone = args.get("phone") or (
+            state.extracted.phone if state.extracted else None
+        )
+        caller_email = args.get("email") or None
+
+        # ── Caller SMS ────────────────────────────────────────────
+        if self.send_sms_to_caller and caller_phone and when_human:
+            try:
+                from .sms_sender import render_confirmation, send_sms
+                body = render_confirmation(
+                    business_name=self.business_name,
+                    service=service,
+                    when_human=when_human,
+                )
+                res = await send_sms(to=caller_phone, body=body)
+                if not res.ok:
+                    log.warning(
+                        "followup sms to %s failed: %s",
+                        caller_phone, res.error,
+                    )
+            except Exception as e:
+                log.warning("followup sms exception: %s", e)
+
+        # ── Owner email ───────────────────────────────────────────
+        if self.send_email_to_owner and self.owner_email and when_human:
+            try:
+                from .email_sender import (
+                    _build_ics,
+                    render_confirmation_html,
+                    send_confirmation_email,
+                )
+                start = self._parse_start(args)
+                duration = int(args.get("duration_minutes") or 30)
+                caller_name = (
+                    args.get("caller_name")
+                    or (state.extracted.caller_name if state.extracted else None)
+                    or "New caller"
+                )
+                # Owner subject makes it obvious in an inbox WHO booked
+                # WHAT, WHEN — not the standard caller-facing subject.
+                # `_safe_header` strips control chars (CR/LF/NUL) that
+                # would let a malicious caller name inject additional
+                # email headers (e.g. Bcc: attacker@evil.com) via the
+                # subject line.  See security-review finding 2026-08-25.
+                subject_override = _safe_header(
+                    f"New booking — {caller_name} for {service} on {when_human}"
+                )
+                _, html_body = render_confirmation_html(
+                    business_name=self.business_name,
+                    service=service,
+                    when_human=when_human,
+                    phone=caller_phone,
+                    address=self.location,
+                )
+                # Prepend owner-facing summary paragraph.  Every
+                # caller-controlled field is HTML-escaped before
+                # interpolation — otherwise a caller saying
+                # "my name is <script>fetch('/steal')</script>" would
+                # yield a stored XSS in the owner's inbox.
+                _safe_caller_name = _safe_html(caller_name)
+                _safe_caller_phone = _safe_html(caller_phone)
+                owner_intro = (
+                    f"<p><b>New booking through the AI receptionist.</b></p>"
+                    f"<p>Caller: {_safe_caller_name}"
+                    + (f" ({_safe_caller_phone})" if caller_phone else "")
+                    + "</p>"
+                )
+                html_body = owner_intro + html_body
+
+                ics_content = None
+                if start is not None:
+                    ics_content = _build_ics(
+                        business_name=self.business_name,
+                        service=service,
+                        start=start,
+                        duration_minutes=duration,
+                        location=self.location,
+                    )
+                res = await send_confirmation_email(
+                    to=self.owner_email,
+                    subject=subject_override,
+                    html_body=html_body,
+                    ics_content=ics_content,
+                )
+                if not res.ok:
+                    log.warning(
+                        "followup email to %s failed: %s",
+                        self.owner_email, res.error,
+                    )
+            except Exception as e:
+                log.warning("followup email exception: %s", e)
+
+    async def on_call_end(self, state: CallState) -> None:
+        # 2026-08-24: not wired yet.  Belongs to the "call summary
+        # email to owner" flow once the Twilio /twilio/status endpoint
+        # is emitting CallEndEvent to the outbox.  Placeholder no-op.
+        return None
+
+
 def build_sink_from_env(mode: str, settings) -> CRMSink:
-    """Factory: 'none' | 'ghl' | 'sheets' | 'ghl+sheets'."""
+    """Factory: 'none' | 'ghl' | 'sheets' | 'hubspot' | combos with '+'.
+
+    Examples:
+      'hubspot'          → HubSpotSink alone
+      'ghl+sheets'       → GHL primary + Sheets audit log
+      'hubspot+sheets'   → HubSpot primary + Sheets audit log
+      'none' (default)   → NoopSink; nothing writes anywhere
+    """
     mode = (mode or "none").lower().strip()
     if mode == "none":
         return NoopSink()
@@ -184,6 +544,23 @@ def build_sink_from_env(mode: str, settings) -> CRMSink:
         )
         sinks.append(GHLSink(client))
 
+    if "hubspot" in parts:
+        from .hubspot_client import HubSpotClient
+        if not getattr(settings, "hubspot_access_token", None):
+            raise RuntimeError(
+                "hubspot sink requires HUBSPOT_ACCESS_TOKEN — generate a "
+                "Private App token at Settings → Integrations → Private "
+                "Apps in HubSpot and set it in env"
+            )
+        client = HubSpotClient(
+            access_token=settings.hubspot_access_token,
+            portal_id=getattr(settings, "hubspot_portal_id", None),
+            default_pipeline_id=getattr(settings, "hubspot_pipeline_id", None),
+            default_stage_id=getattr(settings, "hubspot_stage_id", None),
+            create_deals=bool(getattr(settings, "hubspot_create_deals", False)),
+        )
+        sinks.append(HubSpotSink(client))
+
     if "sheets" in parts:
         from .google_sheets import GoogleSheets
         if not settings.google_service_account_json or not settings.google_sheet_id:
@@ -194,6 +571,33 @@ def build_sink_from_env(mode: str, settings) -> CRMSink:
             tab=settings.google_sheet_tab,
         )
         sinks.append(SheetsSink(sheets))
+
+    if "followup" in parts:
+        # FollowupSink fires SMS to caller + email to owner on booking
+        # success.  Needs the business name + owner email at construction
+        # time.  Business_name/location come from the loaded profile —
+        # config falls back to env override for demos.
+        business_name = (
+            getattr(settings, "followup_business_name", None)
+            or getattr(settings, "business_name_override", None)
+            or "Reception"
+        )
+        owner_email = (
+            getattr(settings, "followup_owner_email", None)
+            or getattr(settings, "owner_email_override", None)
+        )
+        location = getattr(settings, "followup_business_address", None)
+        sinks.append(FollowupSink(
+            business_name=business_name,
+            owner_email=owner_email,
+            location=location,
+            send_sms_to_caller=bool(getattr(
+                settings, "followup_sms_caller", True,
+            )),
+            send_email_to_owner=bool(getattr(
+                settings, "followup_email_owner", True,
+            )),
+        ))
 
     if not sinks:
         return NoopSink()

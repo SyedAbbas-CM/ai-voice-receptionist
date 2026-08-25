@@ -83,7 +83,14 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/chat/",              # widget/simulator chat lifecycle
     "/voice/",             # widget/simulator STT+TTS
     "/v1/",                # ElevenLabs-compatible API (has its own compat_api_key gate)
-    "/debug/",             # observability endpoints — dashboard reads these
+    # 2026-08-25 P0.2 (BACKEND-AUDIT-2026-08-25-CHATGPT.md#2):
+    # /debug/* used to be here.  It exposes traces, per-call timelines,
+    # error taxonomies, and a live WebSocket event stream — call content
+    # for EVERY tenant.  Now enforced via auth: request must carry a
+    # valid API key.  Production mounting is additionally gated on
+    # settings.observability_api_enabled — see main.py.  Any browser
+    # dashboard that used /debug/* unauthenticated must move to signed
+    # short-lived session tickets (P0.3 pattern).
 )
 
 

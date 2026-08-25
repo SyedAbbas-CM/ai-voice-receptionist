@@ -23,6 +23,29 @@ from .restaurant_tools import RestaurantToolHandler, build_restaurant_tools
 from .wholesaler_tools import WholesalerToolHandler, build_wholesaler_tools
 
 
+# 2026-08-18: default accepted regions when the tenant hasn't overridden.
+# Was ["US"] only, which rejected valid PK/GB/etc numbers on the phone
+# precondition with `too_long` and put the LLM into a "please give me a
+# 10-digit number" loop against real international callers.  This list
+# is a permissive default; a tenant should still narrow it via the
+# BusinessProfile once phone_accepted_regions lands there.
+_DEFAULT_ACCEPTED_PHONE_REGIONS = ["US", "PK", "GB", "CA", "AU", "IN", "AE", "SG"]
+
+
+def _phone_region_config(business: BusinessProfile) -> tuple[str, list[str]]:
+    """Pick (default_region, accepted_regions) for a business.  Reads
+    optional attrs off the BusinessProfile if present so the schema can
+    grow to expose these without touching call sites."""
+    default_region = getattr(business, "phone_default_region", None) or "US"
+    accepted = getattr(business, "phone_accepted_regions", None)
+    if not accepted:
+        accepted = list(_DEFAULT_ACCEPTED_PHONE_REGIONS)
+    # Ensure default is included so parse_phone tries it first.
+    if default_region not in accepted:
+        accepted = [default_region] + accepted
+    return default_region, accepted
+
+
 def build_tools_for_vertical(
     business: BusinessProfile,
     calendar,
@@ -42,9 +65,15 @@ def build_tools_for_vertical(
             so the brain escalates rather than speaking a low-confidence hit.
     """
     vertical = (business.vertical or "clinic").lower()
+    default_phone_region, accepted_phone_regions = _phone_region_config(business)
 
     if vertical == "clinic":
-        tools, handler = build_clinic_tools(), ClinicToolHandler(business, calendar)
+        tools = build_clinic_tools()
+        handler = ClinicToolHandler(
+            business, calendar,
+            default_phone_region=default_phone_region,
+            accepted_phone_regions=accepted_phone_regions,
+        )
     elif vertical == "restaurant":
         tools, handler = build_restaurant_tools(), RestaurantToolHandler(business, calendar)
     elif vertical in ("real_estate", "real-estate", "realestate"):
@@ -52,7 +81,12 @@ def build_tools_for_vertical(
     elif vertical in ("wholesaler_outbound", "wholesaler", "subto", "subject_to"):
         tools, handler = build_wholesaler_tools(), WholesalerToolHandler(business, calendar)
     else:
-        tools, handler = build_clinic_tools(), ClinicToolHandler(business, calendar)
+        tools = build_clinic_tools()
+        handler = ClinicToolHandler(
+            business, calendar,
+            default_phone_region=default_phone_region,
+            accepted_phone_regions=accepted_phone_regions,
+        )
 
     # Compose RAG on top when a retriever is provided
     if retriever is not None and shaper_llm is not None:

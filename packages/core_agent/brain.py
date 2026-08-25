@@ -20,6 +20,20 @@ from .extractor import extract_fields
 from .prompt import build_system_prompt
 from .speech_sanitizer import sanitize_for_speech
 
+# 2026-08-24 (A1 wiring): hoisted to module scope per networking review.
+# The intercept below reads `settings.next_action_policy_enabled` once
+# per turn; keeping the import at module scope trims the per-turn import
+# cost to zero.  If the import ever fails (should not, since brain.py
+# already depends on other apps.api.app.* modules transitively), we
+# fall back to a stub with the flag off — synth is disabled by default
+# so this is behavior-preserving.
+try:
+    from apps.api.app.core.config import settings as _brain_settings
+except Exception:  # pragma: no cover — defensive
+    class _BrainSettingsStub:
+        next_action_policy_enabled = False
+    _brain_settings = _BrainSettingsStub()  # type: ignore[assignment]
+
 if TYPE_CHECKING:
     from apps.api.app.providers.base import LLMProvider, LLMResponse
 else:
@@ -52,6 +66,77 @@ _FAKE_BOOKING_PATTERNS = tuple(
 )
 
 _BOOKING_TOOLS = frozenset({"book_appointment", "book_reservation", "book_viewing"})
+
+
+# 2026-08-24 (A1 wiring): map booking-tool argument names → the flat
+# key set the deterministic renderer expects.  Kept as a module-level
+# constant so it's greppable and one-line to extend when a booking
+# tool grows a new field or a new tool joins _BOOKING_TOOLS.
+#
+# Left side is what the LLM/tool schema uses; right side is what
+# `next_action_synthesizer._render_confirm_action` reads.  If a
+# booking tool uses different arg names in the future, extend here
+# instead of teaching the renderer new keys — this keeps the renderer
+# stable and the mapping close to the tool schema.
+_BOOKING_ARG_TO_SLOT = {
+    "caller_name": "caller_name",
+    "name": "caller_name",
+    "customer_name": "caller_name",
+    "service": "service",
+    "reason": "service",
+    "appointment_type": "service",
+    "date": "date",
+    "start_date": "date",
+    "start_iso": "start_iso",   # renderer knows to split ISO into date+time
+    "time": "time",
+    "start_time": "time",
+    "phone": "phone",
+    "phone_number": "phone",
+}
+
+
+def _extract_known_slots(state, tool_results_payload: list[dict]) -> dict[str, str]:
+    """Build the flat `known_slots` dict the deterministic renderer wants.
+
+    Reads from the successful booking tool receipt this turn.  Prefers
+    the tool's own arguments (canonical values the tool executed on)
+    over any transcript-scraped values (which may be pre-normalization
+    or noisy).
+
+    Falls back to empty on any issue — the renderer treats empty as
+    "no facts, can't synthesize" and returns None → LLM fallback.
+    """
+    slots: dict[str, str] = {}
+    try:
+        for tr in tool_results_payload or []:
+            if tr.get("name") not in _BOOKING_TOOLS:
+                continue
+            if tr.get("error") is not None:
+                continue
+            args = tr.get("arguments") or {}
+            if not isinstance(args, dict):
+                continue
+            for arg_name, arg_val in args.items():
+                slot_key = _BOOKING_ARG_TO_SLOT.get(arg_name)
+                if not slot_key or not arg_val:
+                    continue
+                # start_iso needs splitting: "2026-08-26T14:30:00" → date+time
+                if slot_key == "start_iso":
+                    iso = str(arg_val)
+                    if "T" in iso:
+                        date_part, _, time_part = iso.partition("T")
+                        slots.setdefault("date", date_part.strip())
+                        # Trim seconds/timezone: "14:30:00Z" or "14:30:00-05:00"
+                        t = time_part.split("+")[0].split("-")[0].split("Z")[0]
+                        slots.setdefault("time", t.strip()[:5])
+                    else:
+                        # Bare date, no time — set date only
+                        slots.setdefault("date", iso.strip())
+                else:
+                    slots.setdefault(slot_key, str(arg_val))
+    except Exception:
+        return slots
+    return slots
 
 
 # 2026-08-13 (R2 P0): fake-wait guard.
@@ -194,7 +279,14 @@ class ReceptionistBrain:
     ) -> None:
         self.llm = llm
         self.business = business
-        self.tools = tools
+        # T-SP1 (2026-08-19): register the `emit_semantic_plan` metadata
+        # tool so the LLM can emit structured facts + pending_tasks
+        # alongside its natural reply.  The tool is handled inline in
+        # the tool loop below (never dispatched to `tool_handler`) — it
+        # just captures the plan into `state._semantic_plan`.  See
+        # `packages/core_agent/plan_realizer.py` for the schema.
+        from .plan_realizer import semantic_plan_tool_definition
+        self.tools = list(tools) + [semantic_plan_tool_definition()]
         self.tool_handler = tool_handler
         self.extractor_llm = extractor_llm or llm
         self.system_prompt = build_system_prompt(business)
@@ -234,11 +326,18 @@ class ReceptionistBrain:
 
             # 2026-08-10: tighter greeting — old one was 3 sentences +
             # disclosure = 7 sec of audio.  Now single sentence, ~2 sec.
+            # 2026-08-25 (compliance sweep): reworded disclosure to
+            # match the "never flat-say I'm an AI" identity rule.
+            # "Automated receptionist" satisfies FCC/state automation-
+            # disclosure requirements without breaking the role.
+            # Recording notice covers two-party-consent states
+            # (CA/FL/IL/MD/MA/MT/NV/NH/PA/WA) — plain-English so it
+            # counts as "notice" under state wiretap statutes.
             parts = [f"Thanks for calling {self.business.name}, how can I help?"]
             if include_disclosure:
-                parts.append("I'm an AI assistant.")
+                parts.append("You're speaking with our automated receptionist.")
             if include_recording:
-                parts.append("This call may be recorded.")
+                parts.append("This call may be recorded for quality.")
             greeting = " ".join(parts)
 
         state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=greeting))
@@ -300,6 +399,12 @@ class ReceptionistBrain:
                         matching receipt is real.
         """
         state.add_turn(TranscriptTurn(role=TurnRole.USER, text=user_text))
+        # 2026-08-21 NET: bump the extractor-throttle counter ONCE per
+        # turn entry.  All seven `_refresh_extraction_bg` call sites
+        # inside this turn will see the same stable value → modulo
+        # check evaluates consistently → extractor fires once per
+        # 3 turns as the docstring intends.
+        state._extractor_turn_idx = getattr(state, "_extractor_turn_idx", -1) + 1  # type: ignore[attr-defined]
 
         # K3+K4 (2026-08-05): classify turn intent BEFORE brain fires so
         # the persona prompt has explicit branches for correction /
@@ -405,6 +510,15 @@ class ReceptionistBrain:
                 # text, exhaust MAX_TOOL_ITERATIONS, and hit the teammate
                 # fallback.  300 tokens ≈ ~100 words ≈ ~15s audio ≈ still
                 # in-budget for a real receptionist reply.
+                # 2026-08-20 (SPEED-EXTRA-B): shrunk 300 → 200.  Per OpenAI's
+                # latency guide "cutting 50% of output tokens ≈ 50% of
+                # total-response latency."  200 tokens ≈ 60-70 words ≈ 8-10s
+                # audio, plenty for booking-confirmations while clipping the
+                # LLM's tendency to over-explain.  Real over-generation
+                # (rare — prompt already enforces "one to two sentences")
+                # is the only case where this matters, but on those turns
+                # the total-response time drops proportionally.  Prompt
+                # rule remains the primary length-control mechanism.
                 # ── Task #283 v2: STREAM-FIRST with tools ──────────────
                 # If the caller wants streaming AND the provider supports
                 # it, fire stream_complete WITH tools directly.  Peek at
@@ -434,8 +548,17 @@ class ReceptionistBrain:
                         _first_ms: Optional[float] = None
                         _tc_by_id: dict[str, dict] = {}
                         _text_chunks: list[str] = []
+                        # 2026-08-20 (P3 / T-SP-SPEED-EXTRA-B2): speech-act
+                        # token budget.  Previous flat 200 was over-budget for
+                        # most turns (acks are ~20 tok).  Read the CURRENT
+                        # turn's semantic plan (emitted on prior tool round)
+                        # to pick the right cap.  Falls back to DEFAULT_BUDGET
+                        # (80) when no plan present — still 60% smaller than
+                        # the old flat 200.
+                        from .token_budgets import token_budget_for_plan
+                        _mt = token_budget_for_plan(getattr(state, "_semantic_plan", None))
                         async for _kind, _payload, _is_final in self.llm.stream_complete(
-                            messages, temperature=0.3, max_tokens=300,
+                            messages, temperature=0.3, max_tokens=_mt,
                             tools=self.tools,
                         ):
                             if _first_ms is None:
@@ -495,10 +618,13 @@ class ReceptionistBrain:
 
                 if response is None:
                     # Streaming path unavailable — fall back to batch.
+                    # P3: same speech-act budget applies to batch.
+                    from .token_budgets import token_budget_for_plan
+                    _mt = token_budget_for_plan(getattr(state, "_semantic_plan", None))
                     try:
                         response = await self.llm.complete(
                             messages, tools=self.tools,
-                            temperature=0.3, max_tokens=300,
+                            temperature=0.3, max_tokens=_mt,
                             site="brain.reply",
                         )
                     except Exception as e:
@@ -614,6 +740,28 @@ class ReceptionistBrain:
                         "what day and time are you looking for?"
                     )
 
+                # T-SP1 (2026-08-19): if the LLM emitted a SemanticPlan
+                # this turn, substitute its critical facts into the
+                # reply text.  Kills the wrong-time-substitution class
+                # of bugs (LLM plans "1:30" but writes "2:30" in the
+                # reply).  Non-critical facts and other drift types
+                # fall through unchanged.
+                _plan = getattr(state, "_semantic_plan", None)
+                if _plan is not None:
+                    from .plan_realizer import substitute_critical_facts
+                    revised, subs = substitute_critical_facts(reply_text, _plan)
+                    if subs:
+                        import logging as _sp_log
+                        _sp_log.getLogger(__name__).warning(
+                            "SEMANTIC_PLAN_SUBSTITUTION session=%s subs=%s "
+                            "original=%r revised=%r",
+                            state.session_id, subs,
+                            reply_text[:120], revised[:120],
+                        )
+                        reply_text = revised
+                    # Clear so next turn doesn't reuse a stale plan.
+                    state._semantic_plan = None
+
                 state.add_turn(TranscriptTurn(role=TurnRole.ASSISTANT, text=reply_text))
                 self._refresh_extraction_bg(state)
                 return BrainTurnResult(
@@ -651,7 +799,64 @@ class ReceptionistBrain:
                             "kernel.record_slots_from_tool_call failed: %s", _e,
                         )
 
-            for tc in response.tool_calls:
+            # T-SP1 (2026-08-19): intercept `emit_semantic_plan` FIRST
+            # — it's a metadata tool, not an action.  Capture the
+            # plan into state and drop the tool call from the loop so
+            # the real handler doesn't see it.
+            from .plan_realizer import (
+                SEMANTIC_PLAN_TOOL_NAME,
+                parse_semantic_plan,
+            )
+            _semantic_plan_tcs = [
+                tc for tc in response.tool_calls
+                if tc.name == SEMANTIC_PLAN_TOOL_NAME
+            ]
+            if _semantic_plan_tcs:
+                # Take the last one if the LLM emitted more than one.
+                _plan_tc = _semantic_plan_tcs[-1]
+                _plan = parse_semantic_plan(_plan_tc.arguments or {})
+                if _plan is not None:
+                    setattr(state, "_semantic_plan", _plan)
+                    import logging as _l
+                    _l.getLogger(__name__).info(
+                        "SEMANTIC_PLAN captured session=%s op=%s facts=%d pending=%d",
+                        state.session_id,
+                        _plan.operation.value,
+                        len(_plan.facts),
+                        len(_plan.pending_tasks),
+                    )
+                    # Surface pending_tasks into reactive notes so the
+                    # NEXT turn's prompt can prompt about them.
+                    if _plan.pending_tasks:
+                        notes = list(getattr(state, "_reactive_notes", []) or [])
+                        for t in _plan.pending_tasks:
+                            notes.append(f"[pending_task] {t}")
+                        state._reactive_notes = notes[-10:]
+                # Emit a benign tool_result so the LLM sees success.
+                state.add_turn(TranscriptTurn(
+                    role=TurnRole.TOOL,
+                    text="plan_captured",
+                    tool_call_id=_plan_tc.id,
+                    tool_name=_plan_tc.name,
+                    tool_args=_plan_tc.arguments,
+                    tool_result={"status": "captured"},
+                ))
+                tool_results_payload.append({
+                    "name": _plan_tc.name,
+                    "arguments": _plan_tc.arguments,
+                    "result": {"status": "captured"},
+                    "error": None,
+                })
+            # Continue with the REAL tool calls only.
+            _real_tcs = [
+                tc for tc in response.tool_calls
+                if tc.name != SEMANTIC_PLAN_TOOL_NAME
+            ]
+            # If ALL tool calls were the metadata tool, we still fall
+            # through to another LLM iteration below so the model can
+            # produce a natural reply on the next round.  If there were
+            # real tool calls too, they execute in the standard loop.
+            for tc in _real_tcs:
                 # SpeechCommitGate signal: notify BEFORE running the
                 # tool.  The gate uses this to release held wait
                 # promises ("one moment") the LLM emitted earlier in
@@ -753,17 +958,97 @@ class ReceptionistBrain:
                     state.status = CallStatus.ESCALATED
                     state.escalation_reason = str(tc.arguments.get("reason") or "caller requested human")
 
+            # ── A1 wiring (2026-08-24): deterministic post-tool renderer ──
+            #
+            # The outer loop above will otherwise re-enter for a second
+            # LLM iteration whose only job is to phrase the tool result
+            # in natural language ("Perfect, you're booked for
+            # Wednesday at nine forty-five with Doctor Chen. See you
+            # then!").  For successful booking receipts we can render
+            # that reply deterministically from a template + facts,
+            # skipping the 2nd LLM call entirely.  See VOICE-AGENT-
+            # SUB-1.5S-RD-ROADMAP-2026-08-23.md §A2 for the design +
+            # expected saving (600-1200ms per booking-confirm turn).
+            #
+            # Guards NOT re-run on this path (by design):
+            #   * _reply_lies_about_booking — synth only fires when a
+            #     successful booking receipt exists, so it literally
+            #     cannot fake a booking.
+            #   * _reply_promises_wait_without_tool — synth produces
+            #     the confirmation string, never a "one moment" wait.
+            # If synth returns None we fall through to the LLM path
+            # and both guards get their normal chance to fire.
+            #
+            # Feature-flagged: default False = zero behavior change.
+            # Flip settings.next_action_policy_enabled to activate.
+            _flag_on = bool(getattr(
+                _brain_settings, "next_action_policy_enabled", False,
+            ))
+            if _flag_on and tool_results_payload:
+                try:
+                    from .next_action_synthesizer import (
+                        maybe_synthesize,
+                        maybe_synthesize_availability,
+                    )
+                    # Two deterministic paths this turn:
+                    #   1. Booking confirmation (post book_appointment) —
+                    #      the original A1/A2 wiring.
+                    #   2. Availability proposal (post check_availability) —
+                    #      2026-08-24 hallucination-fix wiring.  User trace:
+                    #      the LLM was inventing times NOT in open_slots.
+                    #      Deterministic render is the only guarantee we
+                    #      speak only times the calendar actually returned.
+                    known_slots = _extract_known_slots(state, tool_results_payload)
+                    synth_reply, synth_skip = maybe_synthesize(
+                        tool_results_payload, known_slots,
+                    )
+                    synth_source = "confirm_action"
+                    if not synth_skip:
+                        synth_reply, synth_skip = maybe_synthesize_availability(
+                            tool_results_payload,
+                        )
+                        synth_source = "slot_proposal"
+                    if synth_skip and synth_reply:
+                        import logging as _synth_log
+                        _synth_log.getLogger(__name__).info(
+                            "brain: NEXT_ACTION_SYNTH_HIT source=%s "
+                            "session=%s reply_chars=%d",
+                            synth_source, state.session_id, len(synth_reply),
+                        )
+                        reply_text = sanitize_for_speech(synth_reply)
+                        state.add_turn(TranscriptTurn(
+                            role=TurnRole.ASSISTANT, text=reply_text,
+                        ))
+                        self._refresh_extraction_bg(state)
+                        return BrainTurnResult(
+                            reply=reply_text,
+                            state=state,
+                            tool_results=tool_results_payload,
+                            escalated=escalated,
+                        )
+                except Exception as _synth_err:
+                    import logging as _synth_log
+                    _synth_log.getLogger(__name__).warning(
+                        "brain: NEXT_ACTION_SYNTH_ERR (falling back to LLM): %s",
+                        _synth_err,
+                    )
+
         # 2026-07-31: loop exhausted without a text reply — most common cause
         # is the LLM tool-looping on "no_match" from lookup_faq without ever
         # committing to a plain answer.  Do ONE final non-tool call to force
         # a text reply from whatever context we have.
         try:
             messages_no_tools = [{"role": "system", "content": self.system_prompt}] + state.to_llm_messages()
+            # P3: forced-final is a last resort after tool-loop exhaustion.
+            # Use COMPLEX_BUDGET so the LLM has room to give a real answer
+            # (this path fires when the caller asked a hard question and the
+            # tool loop couldn't resolve it — under-budgeting would clip).
+            from .token_budgets import COMPLEX_BUDGET
             forced = await self.llm.complete(
                 messages_no_tools,
                 tools=None,           # force text-only
                 temperature=0.3,
-                max_tokens=300,
+                max_tokens=COMPLEX_BUDGET,
                 site="brain.forced_final",
             )
             if forced.text and forced.text.strip():
@@ -799,12 +1084,36 @@ class ReceptionistBrain:
         that the LIVE reply needs.  Every-3rd-turn keeps the extraction
         fresh enough for summaries without starving the router.
         The FINAL turn (call-end) is fired unconditionally by the
-        session_manager so we always have final extraction."""
+        session_manager so we always have final extraction.
+
+        2026-08-21 NET: throttle bug fix.  Previous logic used
+        `turn_count = len(transcript.user_turns)` which advances DURING
+        a single turn as the transcript grows across the seven call
+        sites in this file (emergency short-circuit, jailbreak short-
+        circuit, mid tool-loop, post tool-loop, post-reply, streaming
+        residual, streaming completion).  On a booking turn that adds
+        the user message THEN the assistant reply THEN a follow-up
+        assistant sentence, multiple call sites see different
+        turn_count values — several would pass the `% 3 == 0` gate
+        within ONE turn.  Result: extractor fired every real turn
+        (verified in CA792b1dcf log).
+        Fix: use a per-state counter that we bump ONCE per
+        `handle_user_turn` entry, so the modulo check evaluates on the
+        same stable value across every call site inside that turn."""
         import asyncio as _asyncio
-        # Throttle: only every 3rd turn (turn_counter % 3 == 0)
-        turn_count = len([t for t in state.transcript if t.role.value == "user"])
-        if turn_count % 3 != 0:
+        # Throttle: use state's turn counter (bumped once per
+        # handle_user_turn entry, not derived from transcript length).
+        _turn_idx = getattr(state, "_extractor_turn_idx", 0)
+        if _turn_idx % 3 != 0:
             return
+        # Second-line defense: dedupe within the same turn even if a
+        # future refactor adds another call site that shares the same
+        # `_turn_idx`.  Once the extractor has fired for a given index,
+        # don't fire again for it.
+        _last_fired = getattr(state, "_extractor_last_fired_idx", -1)
+        if _last_fired == _turn_idx:
+            return
+        state._extractor_last_fired_idx = _turn_idx  # type: ignore[attr-defined]
         async def _run():
             try:
                 state.extracted = await extract_fields(

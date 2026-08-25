@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from typing import Optional
+import logging
+from typing import Any, Optional
 
 import httpx
 
@@ -9,6 +11,56 @@ from app.core.config import settings
 from packages.schemas import ToolCall, ToolDefinition
 
 from ..base import LLMProvider, LLMResponse
+
+_slog = logging.getLogger(__name__)
+
+
+def _derive_cache_key(messages: list[dict]) -> Optional[str]:
+    """2026-08-20 (SPEED-EXTRA-C): compute a stable `prompt_cache_key`
+    per OpenAI docs.  Same key routes to same backend, boosting
+    cache-hit rate under concurrent load.
+
+    Strategy: hash the FIRST system message (the business system
+    prompt).  Two calls for the same business → same key.  Different
+    businesses → different keys.  Turns of the same session naturally
+    share the same key since the system prompt is stable across the
+    session.  Returns None if no system message is present."""
+    if not messages:
+        return None
+    first = messages[0]
+    if first.get("role") != "system":
+        return None
+    content = first.get("content") or ""
+    if not isinstance(content, str) or not content:
+        return None
+    # 12 hex chars = 48 bits of entropy — plenty to distinguish
+    # tenants; short enough that logs stay readable.
+    h = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    return f"biz-{h}"
+
+
+def _log_cache_hit(
+    data: dict[str, Any], model: str, *, site: str,
+) -> None:
+    """2026-08-20 (SPEED-EXTRA-C): log the cached-token count so we can
+    measure whether prompt caching is actually helping.  Emits at INFO
+    so it lands in per-call logs.
+
+    OpenAI reports cached prompt tokens under
+    `usage.prompt_tokens_details.cached_tokens` for Chat Completions.
+    Missing = zero (older responses / non-eligible requests)."""
+    usage = data.get("usage") or {}
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    cached = int(prompt_details.get("cached_tokens") or 0)
+    prompt_total = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    if prompt_total <= 0:
+        return
+    hit_pct = (cached / prompt_total) * 100 if prompt_total else 0
+    _slog.info(
+        "OPENAI_CACHE site=%s model=%s cached=%d/%d (%.0f%%) completion=%d",
+        site, model, cached, prompt_total, hit_pct, completion,
+    )
 
 
 class OpenAILLM(LLMProvider):
@@ -96,6 +148,29 @@ class OpenAILLM(LLMProvider):
                 response_schema, strict=True,
             )
 
+        # 2026-08-20: OpenAI Fast processing tier.  Bench-measured 2x
+        # TTFT drop on our real (24k-char) system prompt.  Set via
+        # `.env` OPENAI_SERVICE_TIER=fast.  Empty = default (auto).
+        _tier = (settings.openai_service_tier or "").strip()
+        if _tier:
+            payload["service_tier"] = _tier
+
+        # 2026-08-20 (SPEED-EXTRA-C): prompt-cache routing + retention.
+        # `prompt_cache_key` pins requests with the same key to the same
+        # backend, boosting cache-hit rate under concurrent load — the
+        # system prompt for a given business is byte-stable, so two
+        # simultaneous callers of the same business benefit from each
+        # other's cached prefix.  Derive the key from the system message
+        # hash so it's stable across turns of the same business without
+        # threading tenant_id through 5 layers.
+        # `prompt_cache_retention="24h"` extends TTL from default 5-10min
+        # → 24h (KV tensors → GPU-local storage).  System prompt for a
+        # business doesn't change day-to-day, so 24h is the right TTL.
+        _cache_key = _derive_cache_key(messages)
+        if _cache_key:
+            payload["prompt_cache_key"] = _cache_key
+            payload["prompt_cache_retention"] = "24h"
+
         resp = await self._client.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
@@ -103,6 +178,13 @@ class OpenAILLM(LLMProvider):
         )
         resp.raise_for_status()
         data = resp.json()
+
+        # 2026-08-20 (SPEED-EXTRA-C): telemetry — log cache hits so we
+        # can actually measure whether the cache is helping.
+        try:
+            _log_cache_hit(data, self.model, site="brain.reply")
+        except Exception:
+            pass
 
         choice = data["choices"][0]
         msg = choice["message"]
@@ -172,6 +254,18 @@ class OpenAILLM(LLMProvider):
             payload["max_completion_tokens"] = max_tokens
         else:
             payload["max_tokens"] = max_tokens
+
+        # 2026-08-20: Fast processing tier.  See complete() for context.
+        _tier = (settings.openai_service_tier or "").strip()
+        if _tier:
+            payload["service_tier"] = _tier
+
+        # 2026-08-20 (SPEED-EXTRA-C): cache-routing + retention.
+        # See complete() for the rationale.
+        _cache_key = _derive_cache_key(messages)
+        if _cache_key:
+            payload["prompt_cache_key"] = _cache_key
+            payload["prompt_cache_retention"] = "24h"
 
         # Accumulate tool_calls across chunks: OpenAI streams them as
         # {index, id, type, function:{name, arguments:""}} in chunk 1,

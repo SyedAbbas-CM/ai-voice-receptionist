@@ -559,6 +559,103 @@ class TwilioStreamSession:
         # IGNORE → do nothing, wait for more audio
 
 
+@router.post("/twilio/status")
+async def twilio_status_callback(request: Request) -> Response:
+    """Twilio Call Status Callback endpoint.
+
+    Twilio POSTs a form-encoded body here whenever a call transitions
+    through its lifecycle: `initiated` → `ringing` → `answered` →
+    `completed` (or failed/busy/no-answer/canceled).
+
+    **Why this exists (2026-08-24):** networking spotted 405s on this
+    path in the Lightsail log — Twilio was trying to deliver call-end
+    status callbacks and we were silently dropping them.  Without this
+    endpoint we can't reliably fire SMS/email follow-ups keyed to the
+    real "call ended" moment (brain-side hangup detection is racy;
+    Twilio's `completed` status is the ground truth).
+
+    Body fields (Twilio Voice API):
+      - CallSid, AccountSid
+      - From, To, Direction ("inbound"/"outbound")
+      - CallStatus: "initiated" | "ringing" | "in-progress" |
+        "completed" | "busy" | "no-answer" | "failed" | "canceled"
+      - CallDuration (seconds, only on completed)
+      - Timestamp (RFC 2822)
+
+    **Signature verification (2026-08-25, ChatGPT audit P1):** Twilio
+    signs every status callback with X-Twilio-Signature.  Without
+    verification, an attacker can POST forged call-completion events
+    to trigger fake SMS follow-ups / email dispatches / billing side
+    effects.  This gated the endpoint via TWILIO_SIGNATURE_ENFORCE
+    same as /twilio/voice.  In dev the env var is False; in prod it's
+    True by default.  On signature failure we still return 200 (per
+    Twilio retry policy) but log SIGNATURE_INVALID as a security
+    signal that ops can alert on.
+
+    Failure policy: MUST return 200 quickly (Twilio retries on 4xx/5xx
+    which floods the log).  Log every callback but never fail the
+    response on downstream errors — the follow-up dispatch happens on
+    the event bus, not synchronously in this handler.
+    """
+    from fastapi import Response as _Resp
+    import logging as _l
+    log = _l.getLogger(__name__)
+    # Verify Twilio signature BEFORE touching form data.  If it fails
+    # we still return 200 so Twilio doesn't retry-flood, but we log
+    # loudly and skip all downstream dispatch — a forged event must
+    # never trigger customer-visible side effects.
+    signature_valid = True
+    try:
+        await _verify_twilio_signature(request)
+    except HTTPException as _sig_err:
+        signature_valid = False
+        log.warning(
+            "TWILIO_STATUS_SIGNATURE_INVALID status=%d detail=%r remote=%s",
+            _sig_err.status_code, _sig_err.detail,
+            (request.client.host if request.client else "?"),
+        )
+        # Return 200 — Twilio retries on 4xx/5xx.  Signature failure is
+        # already logged; downstream dispatch is skipped below.
+        return _Resp(status_code=200)
+    try:
+        form = await request.form()
+        call_sid = form.get("CallSid") or ""
+        call_status = form.get("CallStatus") or ""
+        call_duration = form.get("CallDuration") or ""
+        from_num = form.get("From") or ""
+        to_num = form.get("To") or ""
+        log.info(
+            "TWILIO_STATUS_CALLBACK call_sid=%s status=%s duration=%s "
+            "from=%s to=%s",
+            call_sid, call_status, call_duration, from_num, to_num,
+        )
+        # Dispatch follow-up on `completed` only.  Other statuses
+        # (ringing/initiated/in-progress) are informational; we log
+        # them but don't fan out.  Failed/busy/no-answer/canceled are
+        # missed calls — those get a separate "missed call" follow-up
+        # (out of scope for the initial wiring; hook TODO below).
+        if call_status == "completed":
+            # 2026-08-24: this is where SMS/email follow-up will fire.
+            # Building the dispatcher next; for now the log line above
+            # is the only signal.  Once dispatcher lands, replace this
+            # comment block with an event emit that follows the
+            # BookingEvent / CallEndEvent schema networking committed to
+            # in the DB session (see cross-session-message 2026-08-24).
+            _l.getLogger(__name__).info(
+                "TWILIO_STATUS_COMPLETED_TODO — follow-up dispatch not "
+                "wired yet.  call_sid=%s duration=%s",
+                call_sid, call_duration,
+            )
+    except Exception as e:
+        # Never fail the callback on parse/handler errors — Twilio
+        # will retry, flooding logs.  Log and swallow.
+        _l.getLogger(__name__).warning(
+            "twilio_status_callback: swallowed error: %s", e,
+        )
+    # Always 200 so Twilio doesn't retry.
+    return _Resp(status_code=200)
+
+
 @router.websocket("/twilio/stream")
 async def twilio_stream(ws: WebSocket) -> None:
     await ws.accept()

@@ -84,31 +84,45 @@ def render_confirmation_html(
     prep_notes: Optional[str] = None,
     confirmation_id: Optional[str] = None,
 ) -> tuple[str, str]:
-    """Return (subject, html_body)."""
-    subject = f"Booked: {service} at {business_name}"
+    """Return (subject, html_body).
+
+    2026-08-25 (security-review): every caller-controlled string
+    (service / phone / caller-supplied notes) gets HTML-escaped before
+    interpolation.  These fields flow from tool arguments populated by
+    the LLM from CALLER SPEECH; interpolating raw would create a stored
+    XSS in the recipient's inbox.  business_name / address / provider
+    come from the tenant's own configuration (owner-controlled), but we
+    escape them anyway for defense-in-depth — the sanitizer cost is
+    trivial and a compromised tenant config shouldn't break other
+    tenants' inboxes.
+    """
+    import html as _html
+    def _e(v: Optional[str]) -> str:
+        return _html.escape(str(v), quote=True) if v is not None else ""
+    subject = f"Booked: {_e(service)} at {_e(business_name)}"
     parts = [
         f"<p>Hi,</p>",
         f"<p>Your appointment is booked:</p>",
         "<ul>",
-        f"<li><b>Service:</b> {service}</li>",
-        f"<li><b>When:</b> {when_human}</li>",
+        f"<li><b>Service:</b> {_e(service)}</li>",
+        f"<li><b>When:</b> {_e(when_human)}</li>",
     ]
     if provider:
-        parts.append(f"<li><b>Provider:</b> {provider}</li>")
+        parts.append(f"<li><b>Provider:</b> {_e(provider)}</li>")
     if address:
-        parts.append(f"<li><b>Address:</b> {address}</li>")
+        parts.append(f"<li><b>Address:</b> {_e(address)}</li>")
     if phone:
-        parts.append(f"<li><b>Phone:</b> {phone}</li>")
+        parts.append(f"<li><b>Phone:</b> {_e(phone)}</li>")
     if confirmation_id:
-        parts.append(f"<li><b>Confirmation:</b> {confirmation_id}</li>")
+        parts.append(f"<li><b>Confirmation:</b> {_e(confirmation_id)}</li>")
     parts.append("</ul>")
     if prep_notes:
-        parts.append(f"<p><b>Please note:</b> {prep_notes}</p>")
+        parts.append(f"<p><b>Please note:</b> {_e(prep_notes)}</p>")
     parts.append(
         "<p>The attached .ics file will add this to your calendar. "
         "If you need to reschedule or cancel, just call us back.</p>"
     )
-    parts.append(f"<p>Thanks,<br>{business_name}</p>")
+    parts.append(f"<p>Thanks,<br>{_e(business_name)}</p>")
     return subject, "\n".join(parts)
 
 

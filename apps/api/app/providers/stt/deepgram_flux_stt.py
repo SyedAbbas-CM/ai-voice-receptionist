@@ -102,11 +102,16 @@ class DeepgramFluxSTT(STTProvider):
             ("eager_eot_threshold", str(settings.deepgram_flux_eager_eot_threshold)),
             ("eot_timeout_ms", str(settings.deepgram_flux_eot_timeout_ms)),
         ]
-        if self.language_hint:
-            params.append(("language_hints", self.language_hint))
-        # Same keyterm boost list Nova-3 uses — Flux supports it identically.
+        # 2026-08-21 NET-07: Flux connection params are SINGULAR
+        # (language_hint / keyterm). Plural forms only work in runtime
+        # Configure messages. Also language_hint only applies to
+        # flux-general-multi — sending it to flux-general-en is
+        # invalid. Previously we sent `language_hints`/`keyterms` so
+        # dental keyterm boost was silently never applied.
+        if self.language_hint and self.model == "flux-general-multi":
+            params.append(("language_hint", self.language_hint))
         for keyterm in _DENTAL_KEYTERMS:
-            params.append(("keyterms", keyterm))
+            params.append(("keyterm", keyterm))
 
         url = f"{self._WS_URL}?{urlencode(params)}"
         headers = {"Authorization": f"Token {self.api_key}"}
@@ -147,16 +152,17 @@ class DeepgramFluxSTT(STTProvider):
                         pass
 
             async def _keepalive():
-                """Same as Nova-3 — 5s cadence to keep idle WS alive."""
+                """2026-08-20: NO-OP on Flux.  Deepgram issue #649
+                confirmed: sending `{"type":"KeepAlive"}` to Flux v2 kills
+                the connection immediately with WS code 1005 (verified
+                on trace CAe87b82).  Flux is kept alive by the audio
+                stream itself — the caller is expected to send a
+                continuous audio feed (real or mulaw silence 0xFF).
+                Nova-3's KeepAlive JSON is NOT compatible with Flux v2.
+                """
                 try:
                     while True:
-                        await asyncio.sleep(5.0)
-                        try:
-                            await ws.send(json.dumps({"type": "KeepAlive"}))
-                        except websockets.ConnectionClosed:
-                            return
-                        except Exception:
-                            pass
+                        await asyncio.sleep(3600)
                 except asyncio.CancelledError:
                     return
 
@@ -180,18 +186,63 @@ class DeepgramFluxSTT(STTProvider):
                         mtype = msg.get("type")
 
                         if mtype == "TurnInfo":
-                            ti = msg.get("turn_info") or {}
-                            events = ti.get("events") or []
-                            text = (ti.get("transcript") or "").strip()
-                            is_final = bool(ti.get("is_final"))
-                            log.info(
-                                "DGF_TURN events=%s text=%r is_final=%s",
-                                events, text[:80], is_final,
-                            )
+                            # 2026-08-21: real Flux schema is FLAT.
+                            # Fields live at msg root, not msg["turn_info"]:
+                            #   event: "Update"|"StartOfTurn"|"EagerEndOfTurn"|
+                            #          "EndOfTurn"|"TurnResumed"
+                            #   transcript: str
+                            #   end_of_turn_confidence: float
+                            # Verified against actual WS payload on
+                            # 2026-08-21 (see /tmp/flux_survive.py output).
+                            # Prior nested `turn_info.events[]` parse was
+                            # dropping every real message → empty events + no
+                            # text, so caller speech went nowhere.
+                            event = msg.get("event")
+                            text = (msg.get("transcript") or "").strip()
+                            eot_conf = msg.get("end_of_turn_confidence")
+                            is_final = event == "EndOfTurn"
+                            # 2026-08-24 ChatGPT audit item #2: extract
+                            # word-level acoustic timestamps + audio-window
+                            # markers. Deepgram Flux exposes these but
+                            # we've been throwing them away. Enables us
+                            # to measure the REAL "mouth-close → EOT"
+                            # gap: last word's `.end` timestamp is the
+                            # acoustic end of caller speech; comparing to
+                            # our wall-clock EOT arrival tells us pure
+                            # Flux endpointing latency (was undetectable
+                            # before because STT_VAD `speech_start` is
+                            # not a mouth-open ground truth).
+                            words = msg.get("words") or []
+                            last_word_end_s = None
+                            if words:
+                                # `words[-1]` is the most recent word;
+                                # `.end` is seconds since audio stream start
+                                _lw = words[-1] if isinstance(words, list) else None
+                                if isinstance(_lw, dict):
+                                    last_word_end_s = _lw.get("end")
+                            audio_window_end_s = msg.get("audio_window_end")
+                            turn_index = msg.get("turn_index")
+                            sequence_id = msg.get("sequence_id")
+                            # Only log non-empty updates to reduce noise.
+                            if event and event != "Update":
+                                log.info(
+                                    "DGF_TURN event=%s text=%r eot_conf=%s "
+                                    "last_word_end_s=%s audio_window_end_s=%s "
+                                    "turn_idx=%s seq=%s",
+                                    event, text[:80], eot_conf,
+                                    last_word_end_s, audio_window_end_s,
+                                    turn_index, sequence_id,
+                                )
+                            elif event == "Update" and text:
+                                log.info(
+                                    "DGF_TURN Update text=%r eot_conf=%s "
+                                    "last_word_end_s=%s",
+                                    text[:80], eot_conf, last_word_end_s,
+                                )
 
                             # Interim partial (Update event) — emit partial
                             # for the turn manager to track.
-                            if "Update" in events and text:
+                            if event == "Update" and text:
                                 await event_queue.put(STTEvent(
                                     kind="partial",
                                     text=text,
@@ -200,13 +251,13 @@ class DeepgramFluxSTT(STTProvider):
                                 ))
 
                             # StartOfTurn maps to our speech_start signal.
-                            if "StartOfTurn" in events:
+                            elif event == "StartOfTurn":
                                 await event_queue.put(STTEvent(kind="speech_start"))
 
                             # EagerEndOfTurn — model thinks caller is done
                             # but hasn't committed.  Turn manager can fire
                             # speculative brain now.  Payload has transcript.
-                            if "EagerEndOfTurn" in events:
+                            elif event == "EagerEndOfTurn":
                                 await event_queue.put(STTEvent(
                                     kind="eager_end_of_turn",
                                     text=text,
@@ -216,23 +267,22 @@ class DeepgramFluxSTT(STTProvider):
 
                             # TurnResumed — caller kept talking, cancel any
                             # speculative brain fired from EagerEndOfTurn.
-                            if "TurnResumed" in events:
+                            elif event == "TurnResumed":
                                 await event_queue.put(STTEvent(kind="turn_resumed"))
 
-                            # EndOfTurn — final, committed.  This is the
-                            # authoritative "commit this turn" signal.
-                            # Emit both a 'final' (for existing turn
-                            # manager code that expects final events) AND
-                            # a new 'end_of_turn' (so kernels that trust
-                            # Flux can skip the confirm window).
-                            if "EndOfTurn" in events:
-                                if text:
-                                    await event_queue.put(STTEvent(
-                                        kind="final",
-                                        text=text,
-                                        is_final=True,
-                                        speech_final=True,
-                                    ))
+                            # EndOfTurn — final, committed.
+                            # 2026-08-21 NET-01: was emitting BOTH a
+                            # synthetic 'final' AND 'end_of_turn' per
+                            # audit — that made one Flux EndOfTurn
+                            # dispatch through both the Nova-style final
+                            # path (which fires EAGER + speculative
+                            # brain) AND the native end_of_turn path
+                            # (which commits the turn). Result: double
+                            # brain dispatch, commit-lock races, and
+                            # duplicate STT_FINAL log entries. Flux's
+                            # own turn state machine is authoritative;
+                            # emit only end_of_turn.
+                            elif event == "EndOfTurn":
                                 await event_queue.put(STTEvent(
                                     kind="end_of_turn",
                                     text=text,

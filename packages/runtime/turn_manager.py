@@ -395,14 +395,39 @@ class TurnManager:
             await self._emit(TurnEventKind.USER_REQUESTED_PAUSE, text=text)
             return
         # Neither backchannel nor pause — count toward interruption
-        if len(text) >= self._config.interruption_min_chars:
+        # 2026-08-21 NET (Ship 3): stricter partial-barge gate.
+        # Old: 3+ chars + 2 stable partials → INTERRUPTION.
+        # Regression on CA1f11caf57: "My name is Abba" (a partial of a
+        # user response that WASN'T meant to barge) hit the gate and
+        # dispatched a whole new brain gen mid-agent-speech, causing
+        # gen=2/gen=3 double-speak.
+        # Now: also require ≥ interruption_min_words (defaults to 2)
+        # to filter out short leading partials.  "Hello" alone as a
+        # partial won't count until we see enough real content.
+        # Tradeoff: intentional interruptions take one more partial
+        # (~200-400ms) to fire.  Acceptable to eliminate false fires.
+        word_count = len(text.strip().split())
+        if (
+            len(text) >= self._config.interruption_min_chars
+            and word_count >= self._config.interruption_min_words
+        ):
             self._state.non_backchannel_partial_count += 1
-            log.info("tm: interruption-candidate partial (%d/%d) text=%r",
+            log.info("tm: interruption-candidate partial (%d/%d) words=%d text=%r",
                      self._state.non_backchannel_partial_count,
-                     self._config.interruption_confirm_partials, text[:60])
+                     self._config.interruption_confirm_partials,
+                     word_count, text[:60])
             if self._state.non_backchannel_partial_count >= self._config.interruption_confirm_partials:
                 self._cancel_false_interruption_deadline()
-                log.info("tm: INTERRUPTION confirmed text=%r", text[:60])
+                # 2026-08-21 NET (Ship 1 telemetry): keep the trigger
+                # counter + word_count in the confirmed log so future
+                # race investigations can see EXACTLY which partial
+                # crossed the barge threshold.
+                log.info(
+                    "tm: INTERRUPTION confirmed count=%d/%d words=%d text=%r",
+                    self._state.non_backchannel_partial_count,
+                    self._config.interruption_confirm_partials,
+                    word_count, text[:80],
+                )
                 await self._emit(TurnEventKind.INTERRUPTION, text=text)
                 self._state.non_backchannel_partial_count = 0
 

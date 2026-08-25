@@ -6,7 +6,7 @@
   "phone": "+1-972-555-0192",
   "email": "reception@smiledental.example",
   "website": "https://smiledental.example",
-  "address": "2847 Maple Avenue, Plano TX 75093",
+  "address": "2847 Coit Road, Suite 210, Plano, Texas 75093",
   "hours": {
     "monday": "07:30-17:00",
     "tuesday": "07:30-17:00",
@@ -17,14 +17,46 @@
     "sunday": null
   },
   "services": [
-    { "name": "New patient exam with X-rays", "duration_minutes": 60, "description": "Comprehensive first visit with Dr. Chen or Dr. Whitfield, includes full X-ray series. One eighty nine dollars." },
-    { "name": "Adult cleaning", "duration_minutes": 45, "description": "Routine cleaning with Rosa Delgado, our lead hygienist. One thirty five dollars." },
-    { "name": "Composite filling", "duration_minutes": 45, "description": "Tooth-colored filling, price varies by number of surfaces. Starts at two forty five dollars." },
-    { "name": "Zoom whitening", "duration_minutes": 90, "description": "In-office whitening treatment. Five forty nine dollars." },
-    { "name": "Invisalign consultation", "duration_minutes": 45, "description": "Ortho consultation with Dr. Ramanathan. Free consult; full treatment starts around four thousand eight ninety five." },
-    { "name": "Implant consultation", "duration_minutes": 60, "description": "Single implant plus crown starts at four thousand two fifty." },
-    { "name": "Emergency exam", "duration_minutes": 30, "description": "Limited exam for pain or trauma, same-day or next-day. One fifteen dollars." },
-    { "name": "Pediatric first visit", "duration_minutes": 45, "description": "First dental visit for kids under twelve with Dr. Whitfield." }
+    {
+      "name": "New patient exam with X-rays",
+      "duration_minutes": 60,
+      "description": "Comprehensive first visit with Dr. Chen or Dr. Whitfield, includes full X-ray series. One eighty nine dollars."
+    },
+    {
+      "name": "Adult cleaning",
+      "duration_minutes": 45,
+      "description": "Routine cleaning with Rosa Delgado, our lead hygienist. One thirty five dollars."
+    },
+    {
+      "name": "Composite filling",
+      "duration_minutes": 45,
+      "description": "Tooth-colored filling, price varies by number of surfaces. Starts at two forty five dollars."
+    },
+    {
+      "name": "Zoom whitening",
+      "duration_minutes": 90,
+      "description": "In-office whitening treatment. Five forty nine dollars."
+    },
+    {
+      "name": "Invisalign consultation",
+      "duration_minutes": 45,
+      "description": "Ortho consultation with Dr. Ramanathan. Free consult; full treatment starts around four thousand eight ninety five."
+    },
+    {
+      "name": "Implant consultation",
+      "duration_minutes": 60,
+      "description": "Single implant plus crown starts at four thousand two fifty."
+    },
+    {
+      "name": "Emergency exam",
+      "duration_minutes": 30,
+      "description": "Limited exam for pain or trauma, same-day or next-day. One fifteen dollars."
+    },
+    {
+      "name": "Pediatric first visit",
+      "duration_minutes": 45,
+      "description": "First dental visit for kids under twelve with Dr. Whitfield."
+    }
   ],
   "faqs": {
     "insurance": "We're in-network with Delta Dental PPO, Cigna DPPO, and Blue Cross Blue Shield of Texas Dental. We also work with United Concordia for military families.",
@@ -36,10 +68,9 @@
     "kids": "Yes, we see children of all ages. Dr. Whitfield is our pediatric specialist and works great with kids as young as two or three.",
     "payment plans": "We offer in-house payment plans for treatment plans over one thousand dollars, and we accept CareCredit financing.",
     "invisalign": "Dr. Ramanathan does all our Invisalign treatments. The consultation is free, and full treatment is around four thousand eight ninety five, with payment plans available.",
-    "emergency": "For dental emergencies during business hours, call us and we'll get you in same-day if possible. After hours, Dr. Chen is on call — the after-hours line is nine seven two, five five five, zero one nine two.",
+    "emergency": "For dental emergencies during business hours, call us and we'll get you in same-day if possible. After hours, Dr. Chen is on call \u2014 the after-hours line is nine seven two, five five five, zero one nine two.",
     "spanish": "Yes, Rosa our lead hygienist is fully bilingual, and we can schedule you with her if you'd prefer to be seen by a Spanish-speaking provider."
   },
   "escalation_phone": "+1-972-555-0192",
-  "address": "2847 Coit Road, Suite 210, Plano, Texas 75093",
-  "voice_persona": "You are Alex — the office manager and front-desk lead at Smile Dental Clinic. You've worked here for five years. You know Doctor Chen, Doctor Ramanathan, Doctor Whitfield, and Rosa personally — first-name basis. You're warm and Texas-friendly (light 'y'all' or 'gotcha' occasionally, not exaggerated). Efficient on routine bookings — you don't waste patients' time but you're never curt. On emergencies you drop the pep and get calm and reassuring. If a caller sounds frustrated, you skip the 'I understand' scripts and get to fixing the problem. You genuinely like the patients and it shows."
+  "voice_persona": "You are Alex, the front-desk lead at Smile Dental Clinic in Plano.\n\nYou have been here long enough to know the doctors, the schedule rhythms, and the way regular patients tend to call. You sound like a capable thirty-something Texan talking to one person \u2014 warm, easy, attentive, and genuinely glad to help, never like you are reading receptionist copy.\n\nYou naturally use contractions. 'I am', 'we have', 'that is', 'you are', and 'I will' should sound more normal than the formal alternatives.\n\nYour little conversational habits are things like 'gotcha', 'okay', 'yeah', 'perfect', and occasionally 'y all' when it genuinely fits. They are not catchphrases. Do not force them and do not repeat the same one every turn.\n\nWhen someone is in a hurry, you get concise and move. When they are relaxed or chatty, you can be a little more conversational. When they are nervous, hurting, confused, or upset, the upbeat energy comes down immediately: you get calm, clear, and useful.\n\nYou do not perform empathy with customer-service lines. You show that you listened by responding to the specific thing they said and taking the next useful step.\n\nYou never sound salesy, over-cheerful, overly apologetic, or polished like a call-centre script. You do not praise every answer with 'Great!' or 'Perfect!'. You do not stack multiple questions when one will do.\n\nYou enjoy helping the clinic patients, but competence comes before personality."
 }
