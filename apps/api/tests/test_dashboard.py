@@ -237,3 +237,113 @@ def test_all_bookings_view_respects_window(client):
     _seed_session(tid, caller_name="Bob")
     resp = client.get(f"/dashboard/bookings?days=1&token={key}")
     assert resp.status_code == 200
+
+
+# ── security: query-token guard (2026-08-25 security review) ────
+
+
+def _make_client(monkeypatch, allow_token: bool = True,
+                  environment: str = "development") -> TestClient:
+    """Build a TestClient with a specific token-in-URL policy."""
+    monkeypatch.setenv("API_AUTH_ENFORCE", "false")
+    monkeypatch.setenv("ENVIRONMENT", environment)
+    # Force fresh Settings so the flag picks up.
+    from app.core import config as _cfg
+    from app.core.config import Settings
+    fresh = Settings()
+    fresh.dashboard_allow_token_in_url = allow_token
+    monkeypatch.setattr(_cfg, "settings", fresh)
+    from app.routes import dashboard as _dash_mod
+    # The route imports settings inside the function so no monkeypatch
+    # of module-level captured settings is needed.
+    from app.main import create_app
+    return TestClient(create_app())
+
+
+def test_dashboard_query_token_blocked_when_flag_off(monkeypatch):
+    """When dashboard_allow_token_in_url=False in dev, ?token= must 401."""
+    client = _make_client(monkeypatch, allow_token=False,
+                          environment="development")
+    tid, key = _seed_tenant()
+    resp = client.get(f"/dashboard/?token={key}")
+    assert resp.status_code == 401
+    assert "query-string tokens disabled" in resp.text
+
+
+def test_dashboard_bearer_still_works_when_query_disabled(monkeypatch):
+    """Even with ?token= disabled, Authorization: Bearer must work."""
+    client = _make_client(monkeypatch, allow_token=False,
+                          environment="development")
+    tid, key = _seed_tenant()
+    resp = client.get(
+        "/dashboard/",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert resp.status_code == 200
+
+
+def test_dashboard_production_forces_query_off(monkeypatch):
+    """Production ignores allow_flag=True — query tokens ALWAYS blocked
+    on prod hosts.  This is the load-bearing "even if a tenant flips the
+    flag, production is still protected" guarantee.
+
+    We can't fully boot the app under ENVIRONMENT=production without
+    alembic (init_db refuses).  Instead we directly test the guard
+    decision by monkey-patching the env at request time via a mock
+    Request.
+    """
+    from unittest.mock import MagicMock
+    from fastapi import HTTPException
+    from app.routes.dashboard import _resolve_dashboard_tenant
+
+    # Craft a request with ?token=stolen-in-a-URL and no Bearer header.
+    req = MagicMock()
+    req.headers = {}
+    req.query_params = {"token": "stolen-anywhere"}
+    req.client = None
+
+    # Force env=production + flag=True (i.e. tenant flipped it on but
+    # production must still refuse).
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    from app.core import config as _cfg
+    from app.core.config import Settings
+    fresh = Settings()
+    fresh.dashboard_allow_token_in_url = True
+    monkeypatch.setattr(_cfg, "settings", fresh)
+
+    with pytest.raises(HTTPException) as exc:
+        _resolve_dashboard_tenant(req)
+    assert exc.value.status_code == 401
+    assert "query-string tokens disabled" in str(exc.value.detail)
+
+
+def test_dashboard_production_bearer_works(monkeypatch):
+    """In production, Bearer auth is the only path — must still resolve
+    when the header carries a valid key."""
+    # Same direct-call approach to avoid the alembic dep.
+    from unittest.mock import MagicMock
+    from app.routes.dashboard import _resolve_dashboard_tenant
+
+    # Boot a client to seed a tenant + get a real key.
+    client = _make_client(monkeypatch, allow_token=True,
+                          environment="development")
+    tid, key = _seed_tenant()
+
+    req = MagicMock()
+    req.headers = {"authorization": f"Bearer {key}"}
+    req.query_params = {}
+    req.client = None
+
+    # Now flip env → production.
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    resolved = _resolve_dashboard_tenant(req)
+    assert resolved == tid
+
+
+def test_dashboard_missing_auth_returns_401_with_hint(monkeypatch):
+    """No Bearer, no query token → 401 with actionable message."""
+    client = _make_client(monkeypatch, allow_token=True,
+                          environment="development")
+    resp = client.get("/dashboard/")
+    assert resp.status_code == 401
+    assert "Bearer" in resp.text

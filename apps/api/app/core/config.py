@@ -149,6 +149,17 @@ class Settings(BaseSettings):
     # still required — /debug/ is no longer in the public prefix list.
     observability_api_enabled: bool = False
 
+    # 2026-08-25 (security-review): dashboard uses ?token=<api-key> for
+    # browser-navigation ergonomics.  URLs land in server access logs +
+    # browser history + Referer headers on outbound links.  Two guards:
+    #   1. dashboard_allow_token_in_url: when False, dashboard REQUIRES
+    #      Authorization: Bearer header (no query fallback).  Only intended
+    #      for pilot/demo tenants who explicitly need the ergonomics.
+    #   2. Force-False when ENVIRONMENT=production (dashboard.py enforces).
+    # Long-term (P0.3 networking work): signed short-lived widget tickets
+    # replace long-lived API keys in URLs entirely.
+    dashboard_allow_token_in_url: bool = True
+
     # RAG for voice-agent knowledge lookups.
     # rag_retriever: "sqlite" (default, zero-config), "noop" (off),
     #   "supabase" (Postgres+pgvector, coming later), "langchain" (adapter).

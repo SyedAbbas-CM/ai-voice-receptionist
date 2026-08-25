@@ -52,23 +52,66 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
 def _resolve_dashboard_tenant(request: Request) -> str:
-    """Same key namespace as the tenant API, but accept the bearer via
-    header OR ?token= query param for browser ergonomics.
+    """Resolve tenant from Authorization: Bearer header (always
+    accepted) OR ?token= query param (guarded).
+
+    **?token= security posture (2026-08-25 security-review):** query-
+    string tokens land in server access logs, browser history, and
+    Referer headers on outbound links.  Two guards:
+      1. `settings.dashboard_allow_token_in_url` (default True for
+         demo/pilot; flip to False when a production tenant onboards).
+      2. Force-False when `ENVIRONMENT=production` — even a True flag
+         is ignored on the production host.
+
+    When ?token= is disabled and no Bearer header is present, we
+    return a 401 with an explicit message.  Long-term (P0.3 networking
+    work): signed short-lived widget tickets replace long-lived API
+    keys entirely.
 
     Fail-closed on unknown tokens.  Returns tenant_id.
     """
+    import os
+    from app.core.config import settings as _settings
+
     bearer = ""
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         bearer = auth.removeprefix("Bearer ").strip()
+
     if not bearer:
-        # Query-string fallback for browser demo use.  See security
-        # note in module docstring.
-        bearer = request.query_params.get("token", "").strip()
+        # Query-string fallback — guarded.
+        env = os.environ.get("ENVIRONMENT", "development").lower()
+        query_token_allowed = (
+            getattr(_settings, "dashboard_allow_token_in_url", True)
+            and env != "production"
+        )
+        if query_token_allowed:
+            bearer = request.query_params.get("token", "").strip()
+        else:
+            # Explicit hint: log the attempt so ops sees browser widgets
+            # broken by the flip; don't just return a bare 401.
+            if request.query_params.get("token"):
+                import logging as _l
+                _l.getLogger(__name__).warning(
+                    "DASHBOARD_QUERY_TOKEN_BLOCKED env=%s allow_flag=%s "
+                    "remote=%s — token in URL rejected; use Authorization "
+                    "header instead",
+                    env,
+                    getattr(_settings, "dashboard_allow_token_in_url", True),
+                    (request.client.host if request.client else "?"),
+                )
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "dashboard: Authorization: Bearer header required "
+                    "(query-string tokens disabled by policy)"
+                ),
+            )
+
     if not bearer:
         raise HTTPException(
             status_code=401,
-            detail="dashboard: bearer or ?token= required",
+            detail="dashboard: Authorization: Bearer <api-key> required",
         )
     tenant_id = _resolve_tenant(bearer)
     if not tenant_id:
