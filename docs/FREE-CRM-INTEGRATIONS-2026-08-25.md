@@ -16,7 +16,7 @@
 | **Airtable Free** | ⚠️ Limited | $0 | 1000 API calls/mo, 1000 records/base | **BUILD ADAPTER** (light CRM alt) |
 | **Notion Free** | ✅ Full | $0 | ~1000 req/hr per integration | **NICE-TO-HAVE** (not really a CRM) |
 | **Zoho CRM Free** | ❌ Blocked | Free plan exists, no API | 3 users, no webhooks | **SKIP** |
-| **GoHighLevel** | ❌ Paid-only | $97/mo minimum | — | **SKIP for demo** (code exists, uses tenant's own key) |
+| **GoHighLevel Developer Sandbox** | ✅ Full via Marketplace | $0 (marketplace developer portal) | 5 seats, sandbox-scoped data | **BUILD/TEST NOW** — code already ships, user needs marketplace signup |
 | **Salesforce Developer Edition** | ✅ Full | $0 | 15k API calls/day | **NICE-TO-HAVE** (2 hours to add adapter) |
 | **Excel / OneDrive Graph API** | ✅ Free | $0 (personal Microsoft) | 10k/10min | **NICE-TO-HAVE** (real-estate brief) |
 
@@ -73,6 +73,42 @@ European clients often prefer Microsoft over Google. Real-estate brief says "Exc
 **Salesforce** — Developer Edition IS free with API access, BUT: real-estate SMB market rarely uses Salesforce (it's enterprise-focused), and every hour spent on Salesforce is an hour not spent on Pipedrive/Airtable which the real-estate market actually uses. Add later if a specific client asks.
 
 **Notion** — API is free but Notion isn't really a CRM; it's a workspace. Building an adapter is a nice-to-have but doesn't move the application forward.
+
+---
+
+## ⚠️ CORRECTION on GoHighLevel (2026-08-26)
+
+**Earlier I said GHL is paid-only at $97/mo.  That's the SUB-ACCOUNT price for real customer usage.  BUT GHL has a separate free Marketplace Developer Sandbox — the same class of dev tier as Pipedrive Developer Sandbox.**
+
+Sources:
+- [GHL: Create a Developer Account](https://marketplace.gohighlevel.com/docs/oauth/CreateDeveloperAccount/)
+- [GHL: Sandbox Account docs](https://marketplace.gohighlevel.com/docs/oauth/SandboxAccount)
+- [GHL: App Testing Guide](https://marketplace.gohighlevel.com/docs/oauth/AppTestingGuide)
+
+**How to sign up (2 minutes, no CC):**
+1. Go to [marketplace.gohighlevel.com](https://marketplace.gohighlevel.com/)
+2. Sign in with a Google or email account
+3. Click **Testing** in the top nav
+4. Click **+ Create App Test Account**
+5. Enter an Account/Agency Name + Password
+6. **Get your Location ID + Private Integration Token** from Settings → Private Integrations inside the sandbox
+7. Drop into Lightsail `.env`: `GHL_API_TOKEN=<token>` + `GHL_LOCATION_ID=<location>`
+
+**Then `CRM_SINK=ghl+hubspot+pipedrive+followup` runs live during the demo call.**
+
+Our existing `packages/integrations/ghl_client.py` already uses Private Integration tokens (not OAuth) — matches the sandbox auth pattern exactly. **Zero code change needed** — just sign up + drop credentials.
+
+**Sandbox limits:** 5 seats by default, isolated data, sandbox goes inactive if you don't create an app in 45 days OR publish a public/private app within 6 months. For our purposes ("test integrations in dev") — none of these are limits we'll hit.
+
+## Updated demo sign-up checklist (was 12 min, now 14 min for 4 CRMs)
+
+1. **HubSpot free** — 2 min, [app.hubspot.com/signup](https://app.hubspot.com/signup-hubspot/crm)
+2. **Google Cloud + Sheets API** — 5 min, [console.cloud.google.com](https://console.cloud.google.com)
+3. **Pipedrive Developer Sandbox** — 3 min, [developers.pipedrive.com](https://developers.pipedrive.com/)
+4. **GoHighLevel Marketplace Sandbox** — 2 min, [marketplace.gohighlevel.com](https://marketplace.gohighlevel.com/) → Testing → Create App Test Account
+5. **Airtable free** (only if you want an Airtable adapter) — 2 min, [airtable.com/signup](https://airtable.com/signup)
+
+Total: **~14 min for 4 fully-functional live CRM sinks** during the real-estate demo call.
 
 ---
 
