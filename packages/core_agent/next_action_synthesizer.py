@@ -456,8 +456,60 @@ def _render_slot_proposal(
     return f"I've got {list_str}{when}. Which works?"
 
 
+def build_decision_state_with_signals(
+    known_slots: Optional[dict[str, str]] = None,
+    *,
+    last_caller_text: Optional[str] = None,
+    last_agent_text: Optional[str] = None,
+    slot_capture_active: bool = False,
+    conversation_phase: Optional[ConversationPhase] = None,
+    requires_confirmation: bool = False,
+    tool_pending: bool = False,
+    missing: Optional[list[str]] = None,
+) -> ConversationDecisionState:
+    """Construct a `ConversationDecisionState` populated with the boolean
+    signals that `NextActionPolicy._select_ack` cares about.
+
+    2026-08-27 (task #138 wiring): this is the seam brain.py calls
+    to get an ACK-aware decision state on every turn, not just at
+    synthesis-time.  It runs `TurnSignalReducer` if `last_caller_text`
+    is supplied and merges the reduced signals into the state.
+
+    Silently degrades: if last_caller_text is None or the reducer
+    raises (it won't — it's defensive — but if), the returned state
+    has all-False signals and policy falls to canonical acks.  Same
+    behavior as before this function existed.
+    """
+    signals_kw: dict = {}
+    if last_caller_text:
+        try:
+            from packages.dialogue.turn_signal_reducer import (
+                reduce_turn_signals,
+            )
+            reduced = reduce_turn_signals(
+                last_caller_text,
+                last_agent_text=last_agent_text,
+                slot_capture_active=slot_capture_active,
+            )
+            signals_kw = reduced.to_state_kwargs()
+        except Exception:
+            # Never let a reducer bug break the caller's turn.
+            pass
+    return ConversationDecisionState(
+        conversation_phase=(
+            conversation_phase or ConversationPhase.DISCOVERY
+        ),
+        requires_confirmation=requires_confirmation,
+        tool_pending=tool_pending,
+        known=known_slots or {},
+        missing=missing or [],
+        **signals_kw,
+    )
+
+
 __all__ = [
     "maybe_synthesize",
     "maybe_synthesize_availability",
     "render_from_semantic_plan",
+    "build_decision_state_with_signals",
 ]
