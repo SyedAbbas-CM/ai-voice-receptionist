@@ -345,6 +345,169 @@ class HubSpotSink(CRMSink):
             log.warning("hubspot add_note (call_end) failed: %s", e)
 
 
+class PipedriveSink(CRMSink):
+    """Upsert person + add note + optionally create deal + create activity
+    on Pipedrive.
+
+    2026-08-25 (EU demo pass): job brief explicitly names Pipedrive as a
+    supported CRM.  Free Developer Sandbox is real-account-quality — no
+    special sandbox behavior, just isolated data.
+
+    Failure policy mirrors GHLSink / HubSpotSink — swallow at sink
+    boundary, log warnings.  A broken CRM must never crash the call.
+    """
+
+    name = "pipedrive"
+
+    def __init__(self, client) -> None:
+        self.client = client  # PipedriveClient
+
+    @staticmethod
+    def _split_name(full: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+        if not full:
+            return None, None
+        parts = full.strip().split(maxsplit=1)
+        return parts[0], parts[1] if len(parts) > 1 else None
+
+    async def on_booking(self, state: CallState, booking: dict) -> None:
+        args = booking.get("arguments") or {}
+        result = booking.get("result") or {}
+        # Accept both {"booked": True} (GHL/calendar path) and
+        # {"ok": True} (local path).
+        if not (result.get("booked") or result.get("ok")):
+            return
+        extracted = state.extracted
+        phone = (
+            args.get("phone")
+            or (extracted.phone if extracted else None)
+        )
+        if not phone:
+            return
+        caller_name = (
+            args.get("caller_name")
+            or (extracted.caller_name if extracted else None)
+        )
+        first, last = self._split_name(caller_name)
+        email = args.get("email") or None
+
+        # Pipedrive's `label` field is a single string, not a list.  Pick
+        # the most useful marker for downstream filtering.
+        label = "voiceops-ai-agent"
+
+        try:
+            person = await self.client.upsert_person(
+                phone=phone,
+                first_name=first,
+                last_name=last,
+                email=email,
+                label=label,
+            )
+        except Exception as e:
+            log.warning("pipedrive upsert_person failed: %s", e)
+            return
+
+        person_id = person.get("id")
+        if not person_id:
+            return
+
+        # Note — human-readable summary of the booking.
+        service = args.get("service") or "Appointment"
+        when = (
+            args.get("start_iso")
+            or (args.get("date", "") + " " + args.get("time", "")).strip()
+        )
+        summary = extracted.summary if extracted else ""
+        note_lines = [
+            f"<p><b>Booked via AI receptionist.</b></p>",
+            f"<p>Service: {service}</p>",
+            f"<p>When: {when}</p>",
+            f"<p>Phone: {phone}</p>",
+        ]
+        if summary:
+            note_lines.append(f"<p>Summary: {summary}</p>")
+        try:
+            await self.client.add_note(
+                content="\n".join(note_lines),
+                person_id=int(person_id),
+            )
+        except Exception as e:
+            log.warning("pipedrive add_note failed: %s", e)
+
+        # Activity — represents the booking as a Pipedrive activity.
+        try:
+            if args.get("start_iso"):
+                # Extract date + time from start_iso "YYYY-MM-DDTHH:MM".
+                iso = str(args["start_iso"])
+                date_part, _, time_part = iso.partition("T")
+                due_time = (time_part.split(":")[0]
+                             + ":"
+                             + time_part.split(":")[1]) if ":" in time_part else "09:00"
+                duration = args.get("duration_minutes") or 30
+                dur_str = f"{int(duration) // 60:02d}:{int(duration) % 60:02d}"
+                await self.client.create_activity(
+                    subject=f"{service} — {caller_name or phone}",
+                    due_date=date_part,
+                    due_time=due_time,
+                    duration=dur_str,
+                    activity_type="meeting",
+                    person_id=int(person_id),
+                    note=args.get("notes") or "",
+                )
+        except Exception as e:
+            log.warning("pipedrive create_activity failed: %s", e)
+
+        # Deal — optional, gated by client config.
+        try:
+            deal_title = (
+                f"{service} — {caller_name or phone}"
+            )
+            await self.client.create_deal(
+                person_id=int(person_id),
+                title=deal_title,
+            )
+        except Exception as e:
+            log.warning("pipedrive create_deal failed: %s", e)
+
+    async def on_call_end(self, state: CallState) -> None:
+        """Log a summary note on call end so missed calls + enquiries
+        also land in Pipedrive, not only successful bookings."""
+        if not state.extracted or not state.extracted.phone:
+            return
+        first, last = self._split_name(state.extracted.caller_name)
+        try:
+            person = await self.client.upsert_person(
+                phone=state.extracted.phone,
+                first_name=first,
+                last_name=last,
+                label="voiceops-ai-agent",
+            )
+        except Exception as e:
+            log.warning("pipedrive upsert_person (call_end) failed: %s", e)
+            return
+        person_id = person.get("id")
+        if not person_id:
+            return
+        status = (
+            state.status.value
+            if hasattr(state.status, "value") else str(state.status)
+        )
+        lines = [
+            f"<p><b>Call ended — status: {status}</b></p>",
+            f"<p>Session: {state.session_id}</p>",
+            f"<p>Intent: {state.extracted.intent.value}</p>",
+            f"<p>Urgency: {state.extracted.urgency.value}</p>",
+            f"<p>Lead score: {state.extracted.lead_score}</p>",
+        ]
+        if state.extracted.summary:
+            lines.append(f"<p>Summary: {state.extracted.summary}</p>")
+        try:
+            await self.client.add_note(
+                content="\n".join(lines), person_id=int(person_id),
+            )
+        except Exception as e:
+            log.warning("pipedrive add_note (call_end) failed: %s", e)
+
+
 class FollowupSink(CRMSink):
     """Fire caller SMS + owner email on successful bookings.
 
@@ -560,6 +723,31 @@ def build_sink_from_env(mode: str, settings) -> CRMSink:
             create_deals=bool(getattr(settings, "hubspot_create_deals", False)),
         )
         sinks.append(HubSpotSink(client))
+
+    if "pipedrive" in parts:
+        from .pipedrive_client import PipedriveClient
+        if not getattr(settings, "pipedrive_api_token", None):
+            raise RuntimeError(
+                "pipedrive sink requires PIPEDRIVE_API_TOKEN — see your "
+                "user Personal Preferences → API in the Pipedrive web UI"
+            )
+        if not getattr(settings, "pipedrive_company_domain", None):
+            raise RuntimeError(
+                "pipedrive sink requires PIPEDRIVE_COMPANY_DOMAIN — the "
+                "subdomain before .pipedrive.com in your account URL"
+            )
+        client = PipedriveClient(
+            api_token=settings.pipedrive_api_token,
+            company_domain=settings.pipedrive_company_domain,
+            default_pipeline_id=getattr(
+                settings, "pipedrive_pipeline_id", None,
+            ),
+            default_stage_id=getattr(settings, "pipedrive_stage_id", None),
+            create_deals=bool(getattr(
+                settings, "pipedrive_create_deals", False,
+            )),
+        )
+        sinks.append(PipedriveSink(client))
 
     if "sheets" in parts:
         from .google_sheets import GoogleSheets

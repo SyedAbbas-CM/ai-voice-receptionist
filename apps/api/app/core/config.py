@@ -307,6 +307,16 @@ class Settings(BaseSettings):
     hubspot_stage_id: Optional[str] = None
     hubspot_create_deals: bool = False
 
+    # 2026-08-25 — Pipedrive integration.  Free Developer Sandbox available.
+    # Owner: Personal Preferences → API in Pipedrive web UI for the token.
+    # company_domain is the subdomain: for "acme.pipedrive.com" it's "acme".
+    # Deals need pipeline_id + stage_id from your Pipedrive setup.
+    pipedrive_api_token: Optional[str] = None
+    pipedrive_company_domain: Optional[str] = None
+    pipedrive_pipeline_id: Optional[int] = None
+    pipedrive_stage_id: Optional[int] = None
+    pipedrive_create_deals: bool = False
+
     crm_sink: str = "none"  # none | ghl | sheets | hubspot | followup | combos with '+'
 
     # 2026-08-24 — Post-booking follow-up (SMS to caller, email to owner).
