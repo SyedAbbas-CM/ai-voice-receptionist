@@ -496,6 +496,19 @@ class Settings(BaseSettings):
     # OFF by default.  When on, brain returns structured JSON with
     # should_speak/backchannel/committed_reply and can decide to
     # listen silently across multiple partials.
+    #
+    # ⚠️  2026-08-26 (ChatGPT audit finding) — DO NOT FLIP THIS TO TRUE
+    # until `twilio_actor.py:_brain_job_reactive` is fixed:
+    #   - calls reactive lane with tools=None (line ~4955)
+    #   - commit lane emits {"tool_results": []} (line ~5032, 5049)
+    # If reactive COMMIT fires on a turn that should have called
+    # book_appointment / take_message / etc., the reply text may
+    # sound right ("You're booked for Wednesday!") but the actual
+    # tool call never runs.  Silent booking failures.
+    # Fix: reactive lane must decide SILENT/BACKCHANNEL/COMMIT only.
+    # COMMIT should delegate to the normal tool-capable
+    # ConversationController, not shortcut past it.  See ChatGPT
+    # audit docs/FULL-CODEBASE-AUDIT-2026-08-26-CHATGPT.md.
     reactive_brain_enabled: bool = False
 
     database_url: Optional[str] = None
