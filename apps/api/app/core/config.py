@@ -317,6 +317,15 @@ class Settings(BaseSettings):
     pipedrive_stage_id: Optional[int] = None
     pipedrive_create_deals: bool = False
 
+    # 2026-08-26 — generic outbound webhook for n8n / Make / Zapier /
+    # custom.  Tenant provides the URL (their workflow trigger); we
+    # provide the HMAC secret they'll share with their platform for
+    # signature verification.  See packages/integrations/webhook_client.py
+    # and docs/WEBHOOK-EVENT-SCHEMA.md for the payload contract.
+    webhook_url: Optional[str] = None
+    webhook_secret: Optional[str] = None
+    webhook_source: str = "voiceops-ai-agent"
+
     crm_sink: str = "none"  # none | ghl | sheets | hubspot | followup | combos with '+'
 
     # 2026-08-24 — Post-booking follow-up (SMS to caller, email to owner).

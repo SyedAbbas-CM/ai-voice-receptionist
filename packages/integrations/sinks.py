@@ -508,6 +508,107 @@ class PipedriveSink(CRMSink):
             log.warning("pipedrive add_note (call_end) failed: %s", e)
 
 
+class WebhookSink(CRMSink):
+    """Emit business events to a tenant-configured URL.
+
+    2026-08-26 — real-estate + car-wash job briefs both named
+    n8n/Make/Zapier as required.  This sink is the "we integrate with
+    any workflow platform" answer: tenant runs their own n8n/Make/
+    Zapier instance and points a Webhook trigger at the URL we POST to.
+
+    Same failure-isolation as every other CRMSink — if the tenant's
+    workflow URL is down, HubSpot writes still fire, SMS still sends,
+    calendar still books.  The whole point is that CRMs, calendar,
+    SMS, and workflows are all INDEPENDENT downstream consumers of
+    the same call.
+
+    Events emitted (aligns with `docs/WEBHOOK-EVENT-SCHEMA.md`):
+      - booking.created (on successful on_booking with book_* tool
+        result marked ok/booked)
+      - call.completed (on on_call_end)
+      - missed_call (future — needs the /twilio/status missed-call
+        branch we haven't wired yet; scaffolded)
+      - message.taken (future — needs TakeMessage tool, task #121)
+      - transfer.requested (on escalate_to_human tool receipt)
+    """
+
+    name = "webhook"
+
+    def __init__(self, client) -> None:
+        self.client = client  # WebhookClient
+
+    async def on_booking(self, state: CallState, booking: dict) -> None:
+        args = booking.get("arguments") or {}
+        result = booking.get("result") or {}
+        if not (result.get("booked") or result.get("ok")):
+            return
+        # Event payload matches the canonical schema.  Field names are
+        # snake_case, no nested dicts deeper than 2 levels for n8n
+        # ergonomics (nested paths are tedious in n8n's Expression editor).
+        payload = {
+            "tenant_id": getattr(state, "tenant_id", None),
+            "business_id": getattr(state, "business_id", None),
+            "session_id": state.session_id,
+            "call_sid": state.session_id.removeprefix("twilio_")
+                if state.session_id.startswith("twilio_") else None,
+            "caller_name": (
+                args.get("caller_name")
+                or (state.extracted.caller_name if state.extracted else None)
+            ),
+            "phone": (
+                args.get("phone")
+                or (state.extracted.phone if state.extracted else None)
+            ),
+            "email": args.get("email"),
+            "service": args.get("service"),
+            "start_iso": args.get("start_iso"),
+            "duration_minutes": args.get("duration_minutes"),
+            "notes": args.get("notes"),
+            "tool_name": booking.get("name"),
+            "booked_at": None,   # timestamp filled in envelope
+        }
+        try:
+            await self.client.emit(
+                event_type="booking.created",
+                payload=payload,
+                idempotency_key=(
+                    f"booking:{state.session_id}:{booking.get('name')}"
+                ),
+            )
+        except Exception as e:
+            log.warning("webhook booking.created failed: %s", e)
+
+    async def on_call_end(self, state: CallState) -> None:
+        extracted = state.extracted
+        status = (
+            state.status.value
+            if hasattr(state.status, "value") else str(state.status)
+        )
+        payload = {
+            "tenant_id": getattr(state, "tenant_id", None),
+            "business_id": getattr(state, "business_id", None),
+            "session_id": state.session_id,
+            "call_sid": state.session_id.removeprefix("twilio_")
+                if state.session_id.startswith("twilio_") else None,
+            "status": status,
+            "caller_name": extracted.caller_name if extracted else None,
+            "phone": extracted.phone if extracted else None,
+            "intent": extracted.intent.value if extracted else None,
+            "urgency": extracted.urgency.value if extracted else None,
+            "lead_score": extracted.lead_score if extracted else None,
+            "summary": extracted.summary if extracted else None,
+            "escalation_reason": getattr(state, "escalation_reason", None),
+        }
+        try:
+            await self.client.emit(
+                event_type="call.completed",
+                payload=payload,
+                idempotency_key=f"call_end:{state.session_id}",
+            )
+        except Exception as e:
+            log.warning("webhook call.completed failed: %s", e)
+
+
 class FollowupSink(CRMSink):
     """Fire caller SMS + owner email on successful bookings.
 
@@ -723,6 +824,28 @@ def build_sink_from_env(mode: str, settings) -> CRMSink:
             create_deals=bool(getattr(settings, "hubspot_create_deals", False)),
         )
         sinks.append(HubSpotSink(client))
+
+    if "webhook" in parts:
+        from .webhook_client import WebhookClient
+        webhook_url = getattr(settings, "webhook_url", None)
+        webhook_secret = getattr(settings, "webhook_secret", None)
+        if not webhook_url:
+            raise RuntimeError(
+                "webhook sink requires WEBHOOK_URL — the tenant's n8n / "
+                "Make / Zapier trigger URL"
+            )
+        if not webhook_secret:
+            raise RuntimeError(
+                "webhook sink requires WEBHOOK_SECRET — generate with "
+                "`openssl rand -hex 32` and share with the tenant so "
+                "their workflow can verify our HMAC signature"
+            )
+        client = WebhookClient(
+            url=webhook_url,
+            secret=webhook_secret,
+            source=getattr(settings, "webhook_source", "voiceops-ai-agent"),
+        )
+        sinks.append(WebhookSink(client))
 
     if "pipedrive" in parts:
         from .pipedrive_client import PipedriveClient
