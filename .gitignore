@@ -85,7 +85,6 @@ docs/rnd-2026-08/
 # temp backups from sed -i
 .env.bak
 *.bak
-.github/workflows/
 
 # 2026-08-25 (security-review): Claude Code's per-project state includes
 # permission rules with baked-in bearer tokens in curl commands.  A live
@@ -93,3 +92,10 @@ docs/rnd-2026-08/
 # bundle for audit; excluding here at the git layer is the same fix at
 # a different boundary.
 .claude/
+
+# NOTE: .github/workflows/ is NOT ignored — CI + auto-deploy workflows
+# live there and must be version-controlled.  A prior version of this
+# file ignored the whole directory; removed 2026-08-25 so GitHub Actions
+# picks up deploy-lightsail.yml.  If a workflow ever needs a secret it
+# must come from GitHub repo Secrets (Settings → Secrets), never from
+# a file committed to the repo.

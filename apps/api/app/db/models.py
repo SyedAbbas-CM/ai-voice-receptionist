@@ -160,3 +160,46 @@ class BookingRow(Base):
     status: Mapped[str] = mapped_column(String, default="confirmed")
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+# ─── Telephony identity → tenant mapping ─────────────────────────────────────
+#
+# 2026-08-25 P0.4 (BACKEND-AUDIT-2026-08-25-CHATGPT.md#4):
+# The Twilio WSS handler used to hardcode `tenant_id="default"` on every
+# inbound call, regardless of which of a tenant's phone numbers Twilio dialed
+# into. That let anyone hitting the Media Streams endpoint be treated as
+# tenant "default" for the whole call lifetime — combined with the P0.1
+# supertenant bypass, this leaked cross-tenant call content.
+#
+# This table maps `E.164 called-number` → `tenant_id`. On WSS start, the
+# handler pulls the `to` custom parameter (set in the TwiML by /twilio/voice)
+# and resolves the real tenant here BEFORE dispatching the call to a brain.
+#
+# `business_id` is optional because a tenant may operate multiple businesses
+# (multi-location clinics, franchise groups) that share one Twilio number;
+# routing to a specific business happens by rule inside the tenant's config.
+# When set, it wins over the tenant-default business_id resolver.
+class PhoneNumberMapping(Base):
+    __tablename__ = "phone_number_mappings"
+    __table_args__ = (
+        # `phone_e164` is the primary lookup key on every inbound call —
+        # must be O(1). Unique because one phone number cannot resolve
+        # to two tenants (that would be catastrophic ambiguity).
+        UniqueConstraint("phone_e164", name="uq_phone_e164"),
+        Index("idx_phone_mapping_tenant", "tenant_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # E.164 format ("+15551234567", "+351215550192"). Twilio always sends
+    # the `To` field in E.164, so no normalization needed on the read path.
+    phone_e164: Mapped[str] = mapped_column(String, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    # Optional — when set, all calls to this number auto-assign to this
+    # business inside the tenant. Otherwise the tenant's default resolver runs.
+    business_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Human label for admin UIs — "Smile Dental main line", "Ribeira Prime EN line".
+    label: Mapped[str] = mapped_column(String, default="")
+    # If revoked, resolver treats the number as unknown → call is refused.
+    # Prevents accidentally sending calls to a paused tenant.
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

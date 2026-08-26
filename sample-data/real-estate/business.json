@@ -1,32 +1,103 @@
 {
-  "id": "demo-realestate-001",
-  "name": "Harbor Realty Group",
+  "id": "demo-realestate-lx-001",
+  "name": "Ribeira Prime Real Estate",
   "vertical": "real_estate",
-  "timezone": "America/New_York",
+  "timezone": "Europe/Lisbon",
+  "phone": "+351-21-555-0192",
+  "email": "hello@ribeiraprime.example",
+  "website": "https://ribeiraprime.example",
+  "address": "Rua da Prata 82, 1100-421 Lisboa, Portugal",
   "hours": {
     "monday": "09:00-19:00",
     "tuesday": "09:00-19:00",
     "wednesday": "09:00-19:00",
     "thursday": "09:00-19:00",
     "friday": "09:00-19:00",
-    "saturday": "10:00-17:00",
-    "sunday": "12:00-16:00"
+    "saturday": "10:00-16:00",
+    "sunday": null
+  },
+  "languages_supported": ["en", "pt-PT"],
+  "gdpr": {
+    "data_controller": "Ribeira Prime Real Estate, Lda.",
+    "dpo_email": "dpo@ribeiraprime.example",
+    "call_recording": "with_notice",
+    "recording_notice_script_en": "Just so you know, this call is being handled by an AI assistant and is recorded for quality and follow-up. If you'd rather not be recorded, I can take a message and have an agent ring you back instead.",
+    "recording_notice_script_pt": "Só a informar, esta chamada é atendida por um assistente de IA e é gravada para efeitos de qualidade e seguimento. Se preferir não ser gravado, posso registar uma mensagem para um agente lhe ligar de volta.",
+    "retention_days": 90,
+    "data_hosting_region": "EU",
+    "sub_processors": [
+      "Twilio Ireland (telephony)",
+      "Deepgram EU (speech-to-text)",
+      "OpenAI Ireland (LLM)",
+      "ElevenLabs (text-to-speech, US — DPA in place)",
+      "HubSpot EU (CRM)"
+    ]
   },
   "services": [
-    { "name": "Viewing", "duration_minutes": 45, "description": "In-person property viewing with an agent" },
-    { "name": "Virtual tour", "duration_minutes": 30, "description": "Live video walkthrough with an agent" },
-    { "name": "Buyer consultation", "duration_minutes": 60, "description": "Initial consultation with a buyer's agent — needs, budget, timeline" },
-    { "name": "Seller consultation", "duration_minutes": 60, "description": "Home valuation and listing strategy meeting" }
+    {
+      "name": "Buyer qualification call",
+      "duration_minutes": 20,
+      "description": "Initial qualification with a buyer's agent — budget range, financing status, timeline, must-have areas, property type. No commitment.",
+      "qualification_fields": ["budget_min", "budget_max", "financing_status", "timeline_months", "preferred_areas", "property_type", "bedrooms_min", "must_haves"]
+    },
+    {
+      "name": "Property viewing",
+      "duration_minutes": 45,
+      "description": "In-person viewing at a specific listing with the listing agent. Confirms property ID, viewing time, number of viewers, and whether the caller is currently working with another agent.",
+      "requires_property_id": true
+    },
+    {
+      "name": "Virtual tour",
+      "duration_minutes": 30,
+      "description": "Live video walkthrough on WhatsApp or Zoom — good for buyers abroad or on tight schedule.",
+      "requires_property_id": true
+    },
+    {
+      "name": "Home valuation",
+      "duration_minutes": 60,
+      "description": "Seller-side visit for a market valuation and listing strategy discussion. Takes address, property type, floor area (sqm), condition, and desired timeline.",
+      "qualification_fields": ["address", "property_type", "sqm", "bedrooms", "bathrooms", "condition", "timeline_months", "reason_selling"]
+    },
+    {
+      "name": "Rental enquiry",
+      "duration_minutes": 15,
+      "description": "Qualification for long-term rental — budget per month, move-in date, contract length, employment/references status, number of occupants, pets.",
+      "qualification_fields": ["budget_month_eur", "move_in_date", "contract_months", "employment_status", "occupants_count", "has_pets", "preferred_areas"]
+    },
+    {
+      "name": "Investment consultation",
+      "duration_minutes": 45,
+      "description": "For buy-to-let and short-term-rental investors — talks yield expectations, target neighbourhoods, Alojamento Local licensing status, financing structure."
+    }
   ],
   "faqs": {
-    "commission": "Standard buyer's-agent commission is 2.5%, paid by the seller in most cases.",
-    "financing": "We work with three preferred lenders and can send a pre-approval intro on request.",
-    "areas served": "We cover Downtown, Riverside, and the East Bay neighborhoods.",
-    "listings": "Current listings are at harborrealty.com/listings — I can also SMS you a filtered list.",
-    "school district": "I can look up school ratings for a specific address, but our agents don't rank them ourselves.",
-    "closing timeline": "Typical closing in this market is 30 to 45 days from offer accepted."
+    "areas served": "We cover central Lisbon — Baixa, Chiado, Príncipe Real, Alfama, Bairro Alto, and Estrela. For Cascais, Sintra, or the Setúbal side we can refer you to a partner agency.",
+    "commission": "Sellers pay a commission of five percent plus VAT of the final sale price. Buyers pay nothing to us — our fee comes from the seller side.",
+    "financing": "We work with three preferred mortgage brokers who cover both Portuguese and non-resident buyers. I can put a pre-approval intro in the diary if you'd like.",
+    "non resident": "Yes, we help many non-resident buyers, including from the UK, France, and Brazil. You'll need a Portuguese tax number — a NIF — which we can help you get, and a Portuguese bank account for the transfer. The whole process is usually four to six weeks.",
+    "golden visa": "The Portuguese Golden Visa programme for real-estate investment was closed in October 2024. There are still investment-fund routes available, but we don't advise directly on those — I can connect you with a specialist immigration lawyer if that's your interest.",
+    "closing timeline": "Typical closing here is six to ten weeks from offer accepted, including the CPCV — the promissory contract — and the final deed at the notary.",
+    "cpcv": "The CPCV is the Portuguese promissory purchase contract. It's signed a few weeks after offer acceptance, with a deposit of usually ten to twenty percent, and it's legally binding on both sides.",
+    "imt": "IMT is the property transfer tax. It's on a sliding scale depending on price and whether the property is your main residence — I can send you the exact table by email or WhatsApp.",
+    "listings": "Current listings are at ribeira-prime.example — I can also SMS or WhatsApp you a shortlist based on what you're looking for.",
+    "alojamento local": "Alojamento Local — AL — is the short-term rental licence. Central Lisbon has restrictions on new AL registrations in some parishes. If you're buying for short-term rental, I strongly recommend an investment consultation first.",
+    "school district": "For expat families we most often see interest in Carlucci American International School, St. Julian's, and the German School. I can pass you specific reviews from clients who moved recently.",
+    "language": "Yes, we speak English, Portuguese, and one of our agents also speaks French. You can be seen in any of those languages."
   },
-  "escalation_phone": "+1-555-030-9922",
-  "address": "220 Harbor Blvd, Downtown",
-  "voice_persona": "professional, curious, gathers qualifying detail without being pushy"
+  "call_recording_enabled": true,
+  "recording_disclosure_at_greeting": true,
+  "escalation_phone": "+351-21-555-0192",
+  "human_transfer_rules": {
+    "always_transfer_on": ["complaint", "offer_over_500k", "legal_question", "asks_for_specific_agent_by_name"],
+    "warm_transfer_hours": "monday-friday 09:00-19:00 Europe/Lisbon",
+    "outside_hours_action": "take_message"
+  },
+  "crm": {
+    "provider": "hubspot_eu",
+    "lead_source_default": "voice_agent_inbound",
+    "auto_create_deal": true,
+    "deal_pipeline": "buyer_pipeline",
+    "assign_round_robin_from": ["agent_maria", "agent_joao", "agent_sofia"]
+  },
+  "voice_persona": "You are Sofia, the front-desk lead at Ribeira Prime Real Estate in Lisbon.\n\nYou have been with the agency for a few years, so you know the agents, the neighbourhoods, and the way a typical enquiry goes. You sound like a warm, capable Portuguese professional in your early thirties who has spoken to enough international buyers that you can switch to English without effort. You are helpful, direct, and never salesy.\n\nYou naturally use contractions in English — 'I'm', 'we've', 'that's'. In Portuguese you speak informally with 'você' or 'senhor/senhora' as appropriate to how the caller addresses you.\n\nYou never invent property details, prices, or availability. When a caller asks about a specific listing you don't have loaded, you say so and offer to text or email the current shortlist. You never quote a valuation on the phone — that always requires a home visit.\n\nWhen a caller sounds hurried, you get concise and move to booking. When they sound uncertain — first-time buyer, non-resident asking about the process — you slow down, explain the next step, and offer to send follow-up materials by SMS or WhatsApp.\n\nYou disclose that you are the virtual receptionist the first time someone directly asks 'am I speaking to a person' or 'are you a bot'. You do not volunteer it on turn one — a real receptionist wouldn't either.\n\nWhen the caller asks something outside your knowledge — mortgage interest rates today, a specific tax question, a legal dispute — you say honestly 'that's not something I can answer accurately, but I can have Maria or João call you back within the hour and they'll be much better on that.' You do not bluff."
 }

@@ -46,6 +46,37 @@ def create_app() -> FastAPI:
 
     init_db()
 
+    # 2026-08-25 P0.3/P0.4 startup guard: check SHORT_TICKET_SECRET so a
+    # misconfigured box surfaces at boot instead of on the first Twilio
+    # call.  Ticket mint/verify hard-fails if the secret is missing or
+    # < 32 chars — without this warning, the first symptom would be
+    # every WSS upgrade returning 401 with an opaque log line.  We do
+    # NOT crash on missing secret because the WSS ticket flow may not
+    # be wired yet in some branches; the check emits a WARNING that's
+    # loud enough to catch in journalctl but leaves boot successful.
+    import os as _os_st
+    _st_secret = _os_st.environ.get("SHORT_TICKET_SECRET", "").strip()
+    _st_log = _logging.getLogger(__name__)
+    if not _st_secret:
+        _st_log.warning(
+            "SHORT_TICKET_SECRET is UNSET — any code that calls "
+            "packages.auth.mint_ticket() or verify_ticket() will fail. "
+            "Generate one with `openssl rand -hex 32` and add to .env "
+            "before enabling the Twilio WSS ticket flow (P0.4) or the "
+            "dashboard signed-session flow (P0.3)."
+        )
+    elif len(_st_secret) < 32:
+        _st_log.warning(
+            "SHORT_TICKET_SECRET is only %d chars — HMAC-SHA256 wants at "
+            "least 32 for safety. Regenerate with `openssl rand -hex 32`.",
+            len(_st_secret),
+        )
+    else:
+        _st_log.info(
+            "SHORT_TICKET_SECRET configured (%d chars) — ticket mint/verify ready.",
+            len(_st_secret),
+        )
+
     # Wire observability tracer once at startup. NoopTracer is the default
     # (zero overhead) — set TRACER_KIND=print for local dev or =otel for a
     # real OTLP endpoint (Langfuse, Honeycomb, Grafana Tempo).

@@ -48,8 +48,13 @@ def test_restaurant_business_json_loads(restaurant_business):
 
 
 def test_real_estate_business_json_loads(real_estate_business):
+    # 2026-08-25 (EU real-estate demo pass): fixture rebuilt for Ribeira
+    # Prime.  Services renamed and expanded — "Viewing" → "Property viewing",
+    # plus valuation / rental / investment / virtual tour.
     assert real_estate_business.vertical == "real_estate"
-    assert any(s.name == "Viewing" for s in real_estate_business.services)
+    service_names = {s.name for s in real_estate_business.services}
+    assert "Property viewing" in service_names
+    assert "Home valuation" in service_names or "Rental enquiry" in service_names
 
 
 def test_vertical_factory_picks_right_handler(restaurant_business, real_estate_business, calendar):
@@ -61,7 +66,10 @@ def test_vertical_factory_picks_right_handler(restaurant_business, real_estate_b
     re_tools, re_handler = build_tools_for_vertical(real_estate_business, calendar)
     re_tool_names = {t.name for t in re_tools}
     assert "book_viewing" in re_tool_names
-    assert "qualify_lead" in re_tool_names
+    # 2026-08-25: qualify_lead split into per-intent tools.
+    assert "qualify_buyer_lead" in re_tool_names
+    assert "qualify_seller_lead" in re_tool_names
+    assert "qualify_rental_lead" in re_tool_names
     assert isinstance(re_handler, RealEstateToolHandler)
 
 
@@ -98,42 +106,55 @@ async def test_real_estate_qualify_and_book(real_estate_business, calendar):
     tomorrow = (datetime.utcnow() + timedelta(days=1)).replace(hour=11, minute=0, second=0, microsecond=0)
 
     qualify = await handler(ToolCall(
-        id="c1", name="qualify_lead",
+        id="c1", name="qualify_buyer_lead",
         arguments={
             "caller_name": "John Buyer",
-            "phone": "5551239876",
-            "intent": "buy",
-            "budget_max_usd": 750000,
-            "timeline": "this month",
+            "phone": "+15551239876",
+            "budget_max_eur": 750_000,
+            "timeline_months": 1,
             "financing_status": "pre_approved",
-            "areas": ["Downtown", "Riverside"],
+            "preferred_areas": ["Chiado", "Príncipe Real"],
             "notes": "wants 3-bed minimum",
         },
     ))
     assert qualify.error is None
     assert qualify.result["qualified"] is True
-    assert qualify.result["lead_score"] >= 60  # buy + pre-approved + this-month + $750k
+    assert qualify.result["lead_kind"] == "buyer"
+    # buy + pre-approved + <=3-month + €750k → high score.
+    assert qualify.result["lead_score"] >= 60
 
     book = await handler(ToolCall(
         id="c2", name="book_viewing",
         arguments={
             "caller_name": "John Buyer",
-            "phone": "5551239876",
-            "property_ref": "412 Maple Street",
+            "phone": "+15551239876",
+            "property_ref": "Rua da Prata 82, Baixa",
             "start_iso": tomorrow.isoformat(),
         },
     ))
     assert book.error is None
     assert book.result["booked"] is True
+    assert book.result.get("book_type") == "book_viewing"
 
 
 def test_real_estate_lead_scoring_ranges(real_estate_business, calendar):
-    handler = RealEstateToolHandler(real_estate_business, calendar)
-    # tire kicker
-    from packages.integrations.real_estate_tools import _score_lead
-    assert _score_lead("other", 0, "just browsing", "unknown") < 30
-    # hot lead
-    assert _score_lead("buy", 1_200_000, "this week", "pre_approved") >= 80
+    # 2026-08-25: _score_lead split into per-intent scoring functions.
+    from packages.integrations.real_estate_tools import (
+        _score_buyer_lead,
+        _score_investor_lead,
+    )
+    # tire kicker: no budget, no timeline, unknown financing → low
+    assert _score_buyer_lead(
+        budget_max=0, timeline_months=0,
+        financing="unknown", has_areas=False,
+    ) < 30
+    # hot lead: €1.2M, financing sorted, within 3 months, has areas
+    assert _score_buyer_lead(
+        budget_max=1_200_000, timeline_months=2,
+        financing="pre_approved", has_areas=True,
+    ) >= 80
+    # investor cash sale, high capital
+    assert _score_investor_lead(capital=750_000, financing="cash") >= 70
 
 
 @pytest.mark.asyncio
