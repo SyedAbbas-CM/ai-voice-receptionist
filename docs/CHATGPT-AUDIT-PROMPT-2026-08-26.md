@@ -136,7 +136,30 @@ Give me the specific delta. If the answer is "the code shipped but the runtime b
 
 I'm out of theory. What's the ACTUAL blocker to sounding human on a live call?
 
-## 6. What ELSE is missing from the plan that we haven't caught?
+## 6. n8n / workflow automation equivalent — what shape does it actually take?
+
+Real-estate job brief explicitly required: "n8n, Make, Zapier, or comparable automation platforms" experience.  Car-wash job brief also named "n8n or Make."  Two out of two SMB briefs so far.
+
+We currently do NOT ship a WebhookSink that POSTs normalized event JSON to a tenant-configured URL.  We DO ship `/twilio/status` webhook (Twilio → us) and `on_booking` / `on_call_end` sink hooks internally.  The gap: no outbound webhook that lets a tenant's own n8n / Make / Zapier consume our events.
+
+Three possible interpretations of "have the n8n equivalent":
+
+**A.** Emit generic HMAC-signed webhooks to tenant-configured URLs on every event (booking.created, call.completed, missed_call, message.taken, transfer.requested).  Tenant runs n8n themselves, wires trigger nodes to our webhooks.  ~6h to build.  **This is what the two job briefs actually asked for.**
+
+**B.** Publish ready-to-import n8n workflow JSON templates for common flows (missed-call → SMS, new booking → HubSpot + Sheets + Slack, no-show follow-up).  Marketing artifact, ~3h per template.
+
+**C.** Run n8n ourselves as part of the platform (embedded in dashboard, per-tenant instances).  ~40h + ongoing hosting.  Becomes a different product.
+
+Questions:
+- **Is A actually sufficient for the SMB market or do we need B/C to close deals?**  When a real-estate agency reads "we integrate with n8n" in a proposal, do they mean (a) "you emit webhooks I can trigger my n8n on" or (b) "you ship me workflow templates I can import" or (c) "you host my automation"?
+- **How does Vapi handle this?** Their marketplace lists "n8n" as a supported integration.  What does that actually mean in practice?
+- **What's the canonical event schema shape?** BookingEvent + CallEndEvent + MissedCallEvent + MessageEvent + TransferEvent — what fields are load-bearing vs optional?  Is there an industry standard (Segment, CloudEvents, LangSmith) or should we invent?
+- **HMAC signature + idempotency-key + retry semantics** — what pattern do Twilio / Stripe / other event-emitting APIs use that we should copy?
+- **Priority relative to the pending humanness / P0 backend work.**  If real-estate + car-wash both mentioned n8n, and neither mentioned WhatsApp Calling, does that make Option A higher priority than adding WhatsApp?
+
+Give me the shape of the fix.  If Option A is enough, exactly what event types, what schema, what auth pattern.
+
+## 7. What ELSE is missing from the plan that we haven't caught?
 
 Given your two prior audits + this bundle's current state — what class of gap have you NOT flagged yet that would matter for a European real-estate SMB paying customer going live? Off-the-top-of-my-head things I worry about:
 
