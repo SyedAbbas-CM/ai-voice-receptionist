@@ -101,7 +101,42 @@ For each, give me:
 
 The output should be one table the user can screenshot and reference during pilot onboarding of any client. Also list the ones that are **completely blocked** (no free API path exists at all) so we know to price paid tiers into any deal that includes them.
 
-## 4. What ELSE is missing from the plan that we haven't caught?
+## 4. WhatsApp Business Calling API — worth adding as a second telephony transport?
+
+Meta released the WhatsApp Business Calling API. Third-party AI (like ours) can plug into the audio media stream via WebRTC + SIP. Rules per Meta:
+
+- Explicit opt-in template required before ANY outbound AI call
+- Cap 5 connected / 24h / user
+- Auto-revoke after 4 consecutive unanswered
+- Outbound blocked in US, CA, EG, VN, NG
+- Inbound global, no restrictions
+
+Docs: https://developers.facebook.com/documentation/business-messaging/whatsapp/calling
+
+Questions:
+- **What is a realistic effort estimate to add WhatsApp Calling as a second transport (parallel to Twilio Media Streams) reusing our existing brain / STT / LLM / TTS / sinks?** Specifically: what pieces of `apps/api/app/routes/twilio.py` + `apps/api/app/routes/twilio_actor.py` + `apps/api/app/telephony/` would need to be abstracted so the brain doesn't care which transport delivered the audio?
+- **Is the "chat-to-voice escalation" use case real for the SMB market (dental/real-estate/car-wash), or is this only a play for larger customer-support use cases?** The gap: users don't dial our AI on WhatsApp; they text a chatbot and get escalated. Do our current tenants have text chatbots at all?
+- **What's the Meta App Review + Business Verification path look like?** How long does approval take for a new voice app?
+- **Any competitor already offers this via Vapi / Retell?** If yes, what's the differentiator we'd bring? If no, are we early or is there a reason nobody's built it?
+- **Priority relative to the pending humanness / P0 backend work.** Do we build this next, in 6 months, or never (because the SMB market doesn't ask for it)?
+
+## 5. Real reason it "still isn't that human" — LLM-facing behavior audit
+
+User's direct feedback: "its still not that human btw"
+
+Two ChatGPT audits ago you rated humanness 5/10 and gave a 4-phase plan. The gap between where we are (5/10) and where Retell/ElevenLabs are (8/10) is not model quality — it's LIVE WIRING. Please walk through the following specifically:
+
+- **Is `settings.next_action_policy_enabled` actually True on the running production tenant?** Grep the .env pattern in `docs/*` for what user was told to set. If it's False in .env, the whole A1/A2 wiring is dark and the humanness fix hasn't shipped even though the code did.
+- **Does `brain.py` actually POPULATE the ConversationDecisionState fields (`caller_shared_hardship`, `caller_corrected_us`, `caller_is_dictating`) from anything real?** If those fields are always False, `_select_ack` always falls to canonical acks and the "match ack to context" behavior doesn't happen.
+- **Does the `SemanticPlan` ever get produced?** `packages/dialogue/plan.py::SemanticPlan` is defined. `render_from_semantic_plan` consumes it. Is there any code path that INSTANTIATES a SemanticPlan and calls `state._semantic_plan = plan`? Or is it entirely dead code?
+- **Is `_reply_lies_about_booking` firing when the LLM confabulates?** If a caller test-called and got "booked on May 12th" without book_appointment ever firing, either the guard didn't detect or the guard is disabled.
+- **Real turn examples from a recent test call.** Pull 3 turns from `data/logs/calls/` or the transcript files under `docs/transcripts/` and evaluate: (a) what did the agent say, (b) what SHOULD it have said per the persona, (c) what does the code have to change to get from (a) to (b)?
+
+Give me the specific delta. If the answer is "the code shipped but the runtime bits are switched off," tell me exactly what env changes flip them on. If the answer is "the code shipped but doesn't actually run the right path," give me the file:line where the path skips the wiring.
+
+I'm out of theory. What's the ACTUAL blocker to sounding human on a live call?
+
+## 6. What ELSE is missing from the plan that we haven't caught?
 
 Given your two prior audits + this bundle's current state — what class of gap have you NOT flagged yet that would matter for a European real-estate SMB paying customer going live? Off-the-top-of-my-head things I worry about:
 
