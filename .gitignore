@@ -91,7 +91,24 @@ docs/rnd-2026-08/
 # Vapi token leaked via .claude/settings.local.json during a codebase
 # bundle for audit; excluding here at the git layer is the same fix at
 # a different boundary.
-.claude/
+#
+# 2026-08-29: switched from blanket `.claude/` to per-entry rules so
+# SHARED team plugins under `.claude/plugins/` can be version-controlled
+# while per-user settings + local permission rules + bearer-token leak
+# vectors stay ignored.  Git rule: to include ANYTHING inside a
+# gitignored directory you must first un-ignore the directory itself,
+# then re-ignore the specific children you want to keep out.
+.claude/*
+# ignore the risky per-user + local-permission files by name
+.claude/settings.local.json
+.claude/mcp*.json
+.claude/session*.json
+.claude/cache/
+.claude/logs/
+.claude/*.lock
+.claude/scheduled_tasks*
+# but DO track the shared plugins directory
+!.claude/plugins/
 
 # NOTE: .github/workflows/ is NOT ignored — CI + auto-deploy workflows
 # live there and must be version-controlled.  A prior version of this
