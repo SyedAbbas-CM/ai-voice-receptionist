@@ -535,6 +535,48 @@ class ReceptionistBrain:
                     (_policy_decision.delivery_intent.value
                         if _policy_decision else "?"),
                 )
+                # 2026-08-29 (humanness traceability): typed
+                # PolicyDecisionEvent for the trace view.  Renders in
+                # the humanness timeline as
+                #   "Turn policy decided next action" — Action=X,
+                #    ack=Y, delivery=Z, requesting slot: <slot>
+                try:
+                    from packages.observability.humanness_events import (
+                        PolicyDecisionEvent as _PDE,
+                        emit_humanness_event as _emit_pde,
+                    )
+                    if _policy_decision is not None:
+                        _emit_pde(_PDE(
+                            call_id=state.session_id or "?",
+                            tenant_id=getattr(
+                                state, "tenant_id", "default",
+                            ),
+                            session_id=state.session_id or "?",
+                            action=_policy_decision.action.value,
+                            acknowledgment=(
+                                _policy_decision.acknowledgment.value
+                                if _policy_decision.acknowledgment
+                                else None
+                            ),
+                            delivery_intent=(
+                                _policy_decision.delivery_intent.value
+                            ),
+                            max_tokens=getattr(
+                                _policy_decision, "max_tokens", None,
+                            ),
+                            requested_slot=getattr(
+                                _policy_decision,
+                                "requested_slot", None,
+                            ),
+                            must_include_facts_count=len(
+                                getattr(
+                                    _policy_decision,
+                                    "must_include_facts", []
+                                ) or []
+                            ),
+                        ))
+                except Exception:
+                    pass
             except Exception as _pol_err:
                 import logging as _pol_log
                 _pol_log.getLogger(__name__).warning(
@@ -783,6 +825,22 @@ class ReceptionistBrain:
                     "EMPTY_LLM_COMPLETION session=%s attempting rescue retry",
                     state.session_id,
                 )
+                # 2026-08-29 (humanness traceability): typed
+                # humanness event so the trace view + evals harness
+                # can query by kind="empty_llm_completion".
+                try:
+                    from packages.observability.humanness_events import (
+                        EmptyLlmCompletionEvent, emit_humanness_event,
+                    )
+                    emit_humanness_event(EmptyLlmCompletionEvent(
+                        call_id=state.session_id or "?",
+                        tenant_id=getattr(state, "tenant_id", "default"),
+                        session_id=state.session_id or "?",
+                        user_text=user_text[:400],
+                        site="brain.reply",
+                    ))
+                except Exception:
+                    pass
                 # Try once more with an explicit rescue system note
                 # nudging the model into a short conversational reply.
                 # We keep the same tool schema so a real booking tool
@@ -819,6 +877,26 @@ class ReceptionistBrain:
                         state.session_id,
                         _rescue_has_text, _rescue_has_tools,
                     )
+                    # 2026-08-29 (humanness traceability): typed
+                    # EmptyLlmRescueEvent so trace view can render
+                    # "retry succeeded / retry also empty" one-liners.
+                    try:
+                        from packages.observability.humanness_events import (
+                            EmptyLlmRescueEvent as _ERE,
+                            emit_humanness_event as _emit_hre,
+                        )
+                        _emit_hre(_ERE(
+                            call_id=state.session_id or "?",
+                            tenant_id=getattr(
+                                state, "tenant_id", "default",
+                            ),
+                            session_id=state.session_id or "?",
+                            user_text=user_text[:400],
+                            recovered_text=_rescue_has_text,
+                            recovered_tools=_rescue_has_tools,
+                        ))
+                    except Exception:
+                        pass
                     # Log to the durable event log for later bisection.
                     try:
                         from packages.observability.call_event_log import (
@@ -861,6 +939,26 @@ class ReceptionistBrain:
                     fallback_text = (
                         "Sorry, I missed that — could you say it again?"
                     )
+                    # 2026-08-29 (humanness traceability): last-
+                    # resort deterministic fallback fired.  Trace
+                    # view marks this ERROR severity so business
+                    # owners spot every fire.
+                    try:
+                        from packages.observability.humanness_events import (
+                            EmptyLlmDeterministicFallbackEvent as _EDF,
+                            emit_humanness_event as _emit_hdf,
+                        )
+                        _emit_hdf(_EDF(
+                            call_id=state.session_id or "?",
+                            tenant_id=getattr(
+                                state, "tenant_id", "default",
+                            ),
+                            session_id=state.session_id or "?",
+                            user_text=user_text[:400],
+                            fallback_text=fallback_text,
+                        ))
+                    except Exception:
+                        pass
                     state.add_turn(TranscriptTurn(
                         role=TurnRole.ASSISTANT, text=fallback_text,
                     ))
