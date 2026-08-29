@@ -61,3 +61,24 @@ class BusinessProfile(BaseModel):
     recording_notice_enabled: bool = False
     # If set, this REPLACES the auto-composed greeting entirely.
     greeting_override: Optional[str] = None
+
+    # 2026-08-29 (BUG-CHR-02): tenant phone-region config for the
+    # pre-write phone validator.  Christiaan (+31 Dutch mobile) hit
+    # empty completions because clinic_tools defaulted to region="US"
+    # only and libphonenumber rejected his 10-digit local Dutch number.
+    #
+    # Names align with vertical_tools._phone_region_config which was
+    # already reading these attributes via getattr — schema just needed
+    # to expose them.
+    #
+    # `phone_default_region` = ISO-3166-alpha-2 code used when the
+    # caller provides digits without a country code.  Set to the
+    # tenant's local country (US clinic → "US", Ribeira Prime → "PT").
+    #
+    # `phone_accepted_regions` = additional regions to try if the
+    # default fails.  Real-world clinics get calls from expats /
+    # tourists / cross-border customers.  Empty list = fall back to
+    # the permissive default set in vertical_tools.py.  Tenant can
+    # tighten by supplying an explicit narrow list.
+    phone_default_region: str = "US"
+    phone_accepted_regions: list[str] = Field(default_factory=list)

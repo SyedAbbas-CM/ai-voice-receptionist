@@ -29,7 +29,15 @@ from .wholesaler_tools import WholesalerToolHandler, build_wholesaler_tools
 # 10-digit number" loop against real international callers.  This list
 # is a permissive default; a tenant should still narrow it via the
 # BusinessProfile once phone_accepted_regions lands there.
-_DEFAULT_ACCEPTED_PHONE_REGIONS = ["US", "PK", "GB", "CA", "AU", "IN", "AE", "SG"]
+# 2026-08-29 (BUG-CHR-02 expansion): Christiaan hit this list with a
+# Dutch +31 mobile and got rejected because "NL" wasn't in it.  Expanded
+# to cover the common expat + tourist origins for US + EU clinics.
+# Order doesn't matter for parse — libphonenumber tries each region.
+_DEFAULT_ACCEPTED_PHONE_REGIONS = [
+    "US", "CA", "GB", "IE", "AU", "NZ", "IN", "PK",
+    "PT", "ES", "FR", "DE", "NL", "BE", "IT", "CH", "AT",
+    "MX", "BR", "AE", "SG",
+]
 
 
 def _phone_region_config(business: BusinessProfile) -> tuple[str, list[str]]:
