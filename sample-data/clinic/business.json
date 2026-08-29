@@ -56,6 +56,16 @@
       "name": "Pediatric first visit",
       "duration_minutes": 45,
       "description": "First dental visit for kids under twelve with Dr. Whitfield."
+    },
+    {
+      "name": "Follow-up visit",
+      "duration_minutes": 30,
+      "description": "Recheck after a procedure — implant healing check, post-antibiotic recheck, second half of a two-visit treatment. Free if within thirty days of the original visit, otherwise seventy-five dollars."
+    },
+    {
+      "name": "Adult recall exam",
+      "duration_minutes": 30,
+      "description": "Six-month checkup with X-rays as needed for returning patients. Ninety-five dollars."
     }
   ],
   "faqs": {

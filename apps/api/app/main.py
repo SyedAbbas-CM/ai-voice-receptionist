@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.db.session import init_db
-from app.routes import admin, channels, chat, dashboard, debug, elevenlabs_compat, outbound, plivo, sessions, signalwire, telnyx, twilio, vapi, voice
+from app.routes import admin, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, sessions, signalwire, telnyx, twilio, vapi, voice
 from packages.observability.structured_log import maybe_install as maybe_install_json_logs
 
 
@@ -160,6 +160,11 @@ def create_app() -> FastAPI:
             "for the incident window if you need live debug routes."
         )
     app.include_router(admin.router)
+    # 2026-08-29 task #77: /admin/calls/{id}/incident — aggregated per-call
+    # trace (session + transcript + bookings + call_events) in ONE query.
+    # Gated by the same ADMIN_TOKEN as admin.router. Unblocks voice-agent's
+    # BUG-02 investigation without needing to grep raw log files.
+    app.include_router(incident.router)
     app.include_router(dashboard.router)
 
     # Sprint 9b: /metrics scrape endpoint for turn-latency histograms,
