@@ -522,6 +522,25 @@ class ReceptionistBrain:
                 _policy_directive = render_policy_directive(
                     _policy_decision, last_ack=_last_ack,
                 )
+                # 2026-08-29 (task #97 second half): let observers act
+                # on the decision.  Actor uses this to fire
+                # enter_slot_capture(kind="phone") on ASK_SLOT
+                # decisions where requested_slot=="phone", so the
+                # NEXT caller turn feeds the structured slot session
+                # instead of the general brain.  Callback is optional;
+                # missing → business-as-usual.
+                _on_dec = getattr(
+                    state, "_on_policy_decision", None,
+                )
+                if _on_dec is not None and _policy_decision is not None:
+                    try:
+                        await _on_dec(_policy_decision)
+                    except Exception as _cb_err:
+                        import logging as _cb_log
+                        _cb_log.getLogger(__name__).warning(
+                            "policy-decision callback failed "
+                            "(non-fatal): %s", _cb_err,
+                        )
                 # Stash last ack for next-turn recency guard.
                 if _policy_decision is not None:
                     state._last_ack = _policy_decision.acknowledgment

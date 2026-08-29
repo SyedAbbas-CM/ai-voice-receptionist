@@ -2318,6 +2318,9 @@ class TwilioActorSession:
                 await self._run_brain_streaming(state, brain, transcript, turn_gen, span)
                 return
 
+            # LK steal #7 wire: stage slot-capture prompt (if any) on
+            # state so brain sees the narrow sub-agent scope.
+            self._stage_state_for_brain_dispatch(state)
             payload = await session_manager.run_user_turn(state, brain, transcript)
             if span is not None:
                 span.mark("llm_first_token")
@@ -2477,6 +2480,8 @@ class TwilioActorSession:
             if ws_payload is not None:
                 payload = ws_payload
             else:
+                # LK steal #7 wire.
+                self._stage_state_for_brain_dispatch(state)
                 payload = await session_manager.run_user_turn(
                     state, brain, transcript,
                     on_delta=on_delta,
@@ -2726,6 +2731,8 @@ class TwilioActorSession:
             if handle is not None:
                 state, brain = handle
                 try:
+                    # LK steal #7 wire.
+                    self._stage_state_for_brain_dispatch(state)
                     payload = await session_manager.run_user_turn(state, brain, text)
                     reply = (payload.get("reply") or "").strip()
                     if reply:
@@ -3189,6 +3196,121 @@ class TwilioActorSession:
         capture.  Returns None during normal (non-capture) turns.
         """
         return self._active_slot_prompt
+
+    def _stage_state_for_brain_dispatch(self, state) -> None:
+        """LK steal #7 wire (2026-08-29): copy actor-owned per-turn
+        state into `state` before we hand it to the brain.
+
+        Attaches:
+          * `_slot_capture_prompt` — narrow sub-agent prompt when a
+            phone capture is active (LK steal #7).
+          * `_on_policy_decision` — async callback that fires when
+            NextActionPolicy chooses ASK_SLOT.  Actor uses it to
+            open `enter_slot_capture(kind="phone")` so the NEXT
+            caller turn feeds the structured slot session instead
+            of the general brain (task #97 second half).
+
+        Call this immediately before every
+        `session_manager.run_user_turn(state, brain, ...)` in this
+        file.  Networking picked this shape (option B) over a
+        packages/core_agent helper so ownership stays inside the
+        actor lifecycle.
+
+        Never raises — if state is a shape we don't recognize, the
+        attribute assign silently no-ops and the brain sees the
+        wider-prompt path.
+        """
+        try:
+            state._slot_capture_prompt = self._active_slot_prompt
+        except Exception:
+            # State is a dataclass or a plain object; either accepts
+            # attribute assignment or errors here defensively.
+            pass
+        try:
+            state._on_policy_decision = (
+                self._on_policy_decision_callback
+            )
+        except Exception:
+            pass
+
+    async def _on_policy_decision_callback(self, decision) -> None:
+        """Brain calls this after NextActionPolicy runs.  We open
+        slot capture on ASK_SLOT(slot='phone').  All other actions
+        are no-ops here — the general brain path continues normally.
+
+        Safe to call while a capture is already active — the
+        enter_slot_capture side effect closes the prior capture
+        defensively (SLOT_CAPTURE_REPLACED).
+
+        The Christiaan scenario: turn N ends, policy sees phone slot
+        missing, fires ASK_SLOT(phone).  We enter capture NOW so
+        turn N+1 (the caller giving their number) feeds the
+        structured session with the LK sub-agent prompt attached.
+        """
+        try:
+            from packages.dialogue.next_action_policy import (
+                ConversationAction,
+            )
+            if getattr(decision, "action", None) != (
+                ConversationAction.ASK_SLOT
+            ):
+                return
+            requested = getattr(decision, "requested_slot", None)
+            if requested != "phone":
+                # Only phone is wired end-to-end today.  name/email/
+                # date/yes-no will follow via task #98.
+                return
+            if self._active_slot is not None and (
+                self._active_slot.slot_type == "phone"
+            ):
+                # Already capturing phone — no-op.
+                return
+            # Fire the capture.  Config pulled from tenant business
+            # profile if available; otherwise safe defaults.
+            _biz = getattr(self, "business", None) or getattr(
+                self, "_business", None,
+            )
+            _default_region = (
+                getattr(_biz, "phone_default_region", "US")
+                if _biz is not None else "US"
+            )
+            _accepted_regions = (
+                getattr(_biz, "phone_accepted_regions", None)
+                if _biz is not None else None
+            )
+            config = {
+                "default_region": _default_region,
+                "accepted_regions": _accepted_regions or [],
+            }
+            self.enter_slot_capture(
+                kind="phone",
+                config=config,
+                on_commit=self._default_slot_on_commit,
+                modality="audio",
+                require_confirmation=True,
+            )
+        except Exception as e:
+            import logging as _pol_log
+            _pol_log.getLogger(__name__).warning(
+                "policy-decision callback ASK_SLOT wiring failed "
+                "(non-fatal): %s", e,
+            )
+
+    async def _default_slot_on_commit(self, result) -> None:
+        """Default on_commit hook — validated E.164 lands.  We stash
+        it on the actor for the next brain turn to see; downstream
+        booking-flow code reads it from state or via a booking-tool
+        pre-fill.  Deliberately minimal here — this is the plumbing
+        that proves the loop closes end-to-end.  Fully-featured
+        booking-continuation is a follow-up.
+        """
+        self._last_validated_phone = getattr(result, "value", None)
+        import logging as _sc_log
+        _sc_log.getLogger(__name__).info(
+            "SLOT_CAPTURE_COMMIT_DEFAULT call=%s value=%r",
+            self.call_id,
+            (self._last_validated_phone or "")[:32],
+        )
 
     def _arm_slot_stall_watchdog(self) -> None:
         """Start / restart the inactivity timer for the active slot."""
@@ -4899,6 +5021,8 @@ class TwilioActorSession:
                 return
 
             # Fallback: batch-mode brain call (legacy path).
+            # LK steal #7 wire.
+            self._stage_state_for_brain_dispatch(state)
             payload = await session_manager.run_user_turn(state, brain, transcript)
             reply = (payload.get("reply") or "").strip()
             # 2026-08-10 FIX: escalated/tool_results were referenced BEFORE
@@ -5456,6 +5580,8 @@ class TwilioActorSession:
                         pass
                 return
 
+            # LK steal #7 wire.
+            self._stage_state_for_brain_dispatch(state)
             payload = await session_manager.run_user_turn(state, brain, transcript)
             if span is not None:
                 span.mark("llm_first_token")
