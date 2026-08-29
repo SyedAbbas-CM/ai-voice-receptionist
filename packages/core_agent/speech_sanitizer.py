@@ -45,13 +45,50 @@ _BRACKET_PATTERNS = [
 
 
 # Tool-name leakage patterns (spoken form, without brackets)
+#
+# BUG-01 fix (2026-08-29): the previous rules matched BOTH the snake_case
+# form ("check_availability") AND the natural English phrase ("check
+# availability").  On Roxana's call the LLM said "Let me check
+# availability for a tooth extraction" — the sanitizer stripped "check
+# availability" and TTS spoke "Let me for a tooth extraction," four
+# separate times.
+#
+# Constraint: still catch real tool leaks like "let me call
+# check_availability()" or "escalate_to_human tool" but leave the
+# natural verbs alone.  Rules of thumb:
+#   - underscore form → definitely a leak, strip it
+#   - space form → only strip when preceded/followed by "tool"/"call"/
+#     "function" or wrapped in punctuation that reads as code-ish
+#   - bare English verbs ("check availability", "book appointment") →
+#     LEAVE ALONE; they are how a human receptionist speaks
 _TOOL_LEAK_PATTERNS = [
-    re.compile(r"\blookup[_ ]answer\b", re.I),
-    re.compile(r"\bcheck[_ ]availability\b", re.I),
-    re.compile(r"\bbook[_ ]appointment\b", re.I),
-    re.compile(r"\bescalate[_ ]to[_ ]human\b", re.I),
+    # Snake_case identifiers — always a leak.
+    re.compile(r"\blookup_answer\b", re.I),
+    re.compile(r"\bcheck_availability\b", re.I),
+    re.compile(r"\bbook_appointment\b", re.I),
+    re.compile(r"\bescalate_to_human\b", re.I),
+    re.compile(r"\bbook_viewing\b", re.I),
+    re.compile(r"\bbook_reservation\b", re.I),
+    re.compile(r"\bfind_existing_appointment\b", re.I),
+    re.compile(r"\bcancel_appointment\b", re.I),
+    re.compile(r"\breschedule_appointment\b", re.I),
+    # Meta / process leaks — model narrating tool results.
     re.compile(r"\bbased on (?:the |our )?tool result\b", re.I),
     re.compile(r"\bthe (?:FAQ|database|system) (?:says|shows)\b", re.I),
+    # Space-form tool names only when they read as identifiers, not as
+    # natural English.  Anchor them to nearby "tool"/"function"/"the
+    # <name> API" wording so "Let me check availability" survives.
+    re.compile(
+        r"\b(?:the |our )?(?:check availability|book appointment|"
+        r"escalate to human|lookup answer)\b(?=\s+(?:tool|function|call|api))",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:call|use|invoke|run) (?:the )?"
+        r"(?:check availability|book appointment|escalate to human|"
+        r"lookup answer)\b",
+        re.I,
+    ),
 ]
 
 

@@ -94,3 +94,95 @@ def classify_barge(text: str) -> BargeAction:
 def should_interrupt(text: str) -> bool:
     """Convenience shortcut."""
     return classify_barge(text) is BargeAction.INTERRUPT
+
+
+# ── LiveKit-style min-interruption gating (2026-08-29) ──────────────
+#
+# LiveKit's Agents SDK ships two knobs (`min_interruption_words`,
+# `min_interruption_duration`) that suppress micro-interruptions:
+# coughs, brief "uhh", one-word restarts.  The old classify_barge() had
+# no timing signal and no configurable word floor, so a caller clearing
+# their throat mid-sentence would fire an interrupt every time.
+#
+# `BargeInPolicy` layers on top of classify_barge():
+#   1. Explicit interrupt patterns ("stop", "wait") always fire —
+#      regardless of word count or duration.  Latency matters more than
+#      false positives on those.
+#   2. Otherwise, require BOTH ≥min_words AND ≥min_duration_ms of
+#      speech before honoring an interrupt.  Below either threshold →
+#      CONTINUE (agent keeps speaking) and downstream logs a
+#      min_words_not_met barge-in event so we can tune from real calls.
+#
+# Defaults chosen to match LiveKit's shipping values (min_words=2,
+# min_duration_ms=500) — safe starting point for a receptionist that
+# needs to hear "wait" but not "uh".
+
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BargeInPolicy:
+    """Configuration for min-word/min-duration barge-in gating.
+
+    Fields:
+      min_interruption_words: minimum non-backchannel token count
+        required before a barge-in commits.  Explicit interrupt cues
+        (stop/wait/hold on/etc) BYPASS this floor.
+      min_interruption_duration_ms: minimum speech duration before
+        a barge-in commits.  Same explicit-cue bypass.
+      trust_explicit_cues: if False, even explicit cues respect the
+        min-floor thresholds (rarely wanted; kept for A/B testing).
+    """
+    min_interruption_words: int = 2
+    min_interruption_duration_ms: int = 500
+    trust_explicit_cues: bool = True
+
+    def evaluate(
+        self,
+        text: str,
+        duration_ms: int = 0,
+    ) -> tuple[BargeAction, str]:
+        """Classify a barge attempt against this policy.
+
+        Returns (action, reason) where reason is a short trace string
+        the observability layer emits.
+        """
+        base = classify_barge(text)
+        if base in (BargeAction.IGNORE, BargeAction.CONTINUE):
+            # Silence + backchannels already handled correctly.
+            return base, f"base:{base.value}"
+        # base == INTERRUPT — apply the min floors.
+        norm = _normalize(text)
+        tokens = norm.split()
+        word_count = len(tokens)
+        # Explicit-cue bypass: real interruption words trump the
+        # min floors.
+        has_explicit = self.trust_explicit_cues and any(
+            p.search(text) for p in _INTERRUPT_PATTERNS
+        )
+        if has_explicit:
+            return BargeAction.INTERRUPT, "explicit_cue"
+        # Gate on word count.
+        if word_count < self.min_interruption_words:
+            return (
+                BargeAction.CONTINUE,
+                f"min_words_not_met:{word_count}<"
+                f"{self.min_interruption_words}",
+            )
+        # Gate on duration when we have a real signal.  duration_ms==0
+        # means the caller didn't report a duration; we don't invent
+        # rejection there.
+        if (
+            duration_ms > 0
+            and duration_ms < self.min_interruption_duration_ms
+        ):
+            return (
+                BargeAction.CONTINUE,
+                f"min_duration_not_met:{duration_ms}<"
+                f"{self.min_interruption_duration_ms}",
+            )
+        return BargeAction.INTERRUPT, "policy_pass"
+
+
+DEFAULT_BARGE_POLICY = BargeInPolicy()

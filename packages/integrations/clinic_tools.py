@@ -187,6 +187,90 @@ class ClinicToolHandler:
                 return s.duration_minutes
         return 30
 
+    def _resolve_service_or_error(
+        self, spoken: str, call: ToolCall,
+    ):
+        """BUG-CHR-03 fix (2026-08-29): canonicalize a caller-spoken
+        service name to a real tenant service BEFORE we compute
+        duration or write the calendar.
+
+        Returns:
+          str — canonical service name (from BusinessProfile.services).
+                Call proceeds with that name.
+          ToolResult — structured error the LLM sees when the input is
+                       AMBIGUOUS or UNKNOWN.  Prompt has an explicit
+                       rule for each shape so no more empty completions.
+
+        MATCH_FUZZY passes through (we accept the fuzzy pick; the LLM
+        is instructed by prompt to confirm with the caller
+        conversationally on a first booking).  If we ever want to
+        force an explicit confirm on FUZZY, this is where to add it.
+        """
+        # Import lazily so unit tests that don't touch this path don't
+        # pull the alias table.
+        from packages.integrations.service_aliases import (
+            resolve_service, ServiceMatchKind,
+        )
+        from packages.observability.humanness_events import (
+            ServiceResolutionEvent, emit_humanness_event,
+        )
+        match = resolve_service(spoken, self.business.services)
+        # Emit trace event for every resolution — dashboard/incident
+        # tools query by kind="service_resolution".
+        try:
+            emit_humanness_event(ServiceResolutionEvent(
+                call_id=getattr(self, "_call_id", "?"),
+                tenant_id=getattr(
+                    self.business, "id", getattr(
+                        self.business, "tenant_id", "default"
+                    ),
+                ),
+                session_id=getattr(self, "_session_id", "?"),
+                spoken=str(spoken or ""),
+                kind=match.kind.value,
+                canonical_name=match.canonical_name,
+                candidates=list(match.candidates),
+                confidence=match.confidence,
+                reason=match.reason,
+            ))
+        except Exception:
+            # Observability failures must never break the tool path.
+            pass
+        if match.kind in (
+            ServiceMatchKind.MATCH_EXACT, ServiceMatchKind.MATCH_FUZZY,
+        ):
+            return match.canonical_name
+        if match.kind == ServiceMatchKind.AMBIGUOUS:
+            return ToolResult(
+                tool_call_id=call.id, name=call.name,
+                result={
+                    "service_ambiguous": True,
+                    "service_input": spoken,
+                    "candidates": list(match.candidates),
+                    "reason": (
+                        "The caller-said service could mean any of the "
+                        "candidates. Ask which one they want before "
+                        "booking."
+                    ),
+                },
+            )
+        # UNKNOWN
+        return ToolResult(
+            tool_call_id=call.id, name=call.name,
+            result={
+                "service_unknown": True,
+                "service_input": spoken,
+                "available_services": [
+                    s.name for s in self.business.services
+                ][:6],
+                "reason": (
+                    "The caller-said service isn't in our list. Ask "
+                    "what they need in their own words, then match to "
+                    "one of the available services."
+                ),
+            },
+        )
+
     def _validate_phone_or_error(
         self, raw_phone: str, call: ToolCall,
     ):
@@ -272,7 +356,19 @@ class ClinicToolHandler:
         try:
             if call.name == "check_availability":
                 date_str = call.arguments["date"]
-                service = call.arguments["service"]
+                # BUG-CHR-03 wire (2026-08-29): resolve the spoken
+                # service name to the tenant's canonical service list
+                # BEFORE looking up its duration.  A stray "A follow-up"
+                # from the caller was previously handed straight to
+                # _service_duration, which fell back to 30min and
+                # silently mis-classified the appointment.
+                _spoken_service = call.arguments["service"]
+                _service_result = self._resolve_service_or_error(
+                    _spoken_service, call,
+                )
+                if isinstance(_service_result, ToolResult):
+                    return _service_result
+                service = _service_result
                 # Sprint 10 WIRING: normalize natural date via
                 # TemporalResolver before ISO parse.  Fixes the
                 # intelligence-test failure where LLM sent "next
@@ -331,7 +427,15 @@ class ClinicToolHandler:
                             "candidates": start["candidates"],
                         },
                     )
-                service = call.arguments["service"]
+                # BUG-CHR-03 wire (2026-08-29): resolve spoken service
+                # BEFORE the phone precondition + calendar write.
+                _spoken_service = call.arguments["service"]
+                _service_result = self._resolve_service_or_error(
+                    _spoken_service, call,
+                )
+                if isinstance(_service_result, ToolResult):
+                    return _service_result
+                service = _service_result
                 duration = self._service_duration(service)
                 # R3 P4 (task #371, slim v1): PHONE PRECONDITION.
                 # Run the LLM-supplied phone through libphonenumber
