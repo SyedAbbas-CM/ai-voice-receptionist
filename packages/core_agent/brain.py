@@ -585,23 +585,80 @@ class ReceptionistBrain:
                 )
                 _policy_directive = None
 
+        # LK steal #7 (2026-08-29): if a slot-capture sub-agent prompt
+        # is attached to the state, use it INSTEAD OF the wider system
+        # prompt.  The whole point of LK's sub-agent pattern is that
+        # the narrow scope knows nothing about the wider agent — it
+        # only knows how to capture the one slot cleanly.  Mixing both
+        # prompts defeats the purpose (small model gets confused by
+        # the wider persona/tool surface).
+        #
+        # The actor stashes this on state as `_slot_capture_prompt`
+        # for the duration of the capture.  Cleared when the actor
+        # calls exit_slot_capture.  Non-slot turns are unaffected.
+        _slot_prompt = getattr(state, "_slot_capture_prompt", None)
+        _slot_prompt_active = bool(
+            _slot_prompt
+            and getattr(_slot_prompt, "instructions", "")
+        )
+        if _slot_prompt_active:
+            # Log + emit for traceability.  Every slot-capture turn shows
+            # up in /trace so business owners see the narrow-scope
+            # branch fire (and can bisect if capture goes sideways).
+            import logging as _slot_log
+            _slot_log.getLogger(__name__).info(
+                "SLOT_CAPTURE_PROMPT_ACTIVE session=%s tools_hint=%s",
+                state.session_id,
+                getattr(_slot_prompt, "tools_hint", ()),
+            )
+            try:
+                from packages.observability.call_event_log import (
+                    get_call_event_log, CallEvent as _CE_sp,
+                    EventSourceKind as _SK_sp,
+                )
+                _elog = get_call_event_log()
+                if _elog is not None:
+                    _elog.write(_CE_sp(
+                        call_id=state.session_id or "?",
+                        tenant_id=getattr(state, "tenant_id", "default"),
+                        source=_SK_sp.LLM,
+                        kind="slot_capture_prompt_active",
+                        payload={
+                            "tools_hint": list(
+                                getattr(_slot_prompt, "tools_hint", ())
+                            ),
+                            "instructions_chars": len(
+                                getattr(_slot_prompt, "instructions", "")
+                            ),
+                        },
+                    ))
+            except Exception:
+                pass
         for _ in range(self.MAX_TOOL_ITERATIONS):
-            messages = [{"role": "system", "content": self.system_prompt}]
-            # K3+K4: inject the turn-intent hint as a fresh system note
-            # ONLY for this turn (not persisted to state.transcript so
-            # it doesn't pollute future turns).
-            intent = getattr(state, "last_turn_intent", None)
-            if intent is not None and getattr(intent, "system_note", ""):
-                messages.append({"role": "system", "content": intent.system_note})
-            # 2026-08-27 (task #120): inject the policy directive AFTER
-            # turn-intent so the LLM sees the chosen action last (most
-            # recent system message tends to bind tightest on gpt-4o-
-            # mini class models).  Skipped when directive is None
-            # (flag off OR renderer errored) — LLM improvises as before.
-            if _policy_directive:
-                messages.append({
-                    "role": "system", "content": _policy_directive,
-                })
+            if _slot_prompt_active:
+                # Narrow sub-agent scope.  No wider system prompt, no
+                # turn intent, no policy directive.
+                messages = [{
+                    "role": "system",
+                    "content": _slot_prompt.instructions,
+                }]
+            else:
+                messages = [{"role": "system", "content": self.system_prompt}]
+                # K3+K4: inject the turn-intent hint as a fresh system note
+                # ONLY for this turn (not persisted to state.transcript so
+                # it doesn't pollute future turns).
+                intent = getattr(state, "last_turn_intent", None)
+                if intent is not None and getattr(intent, "system_note", ""):
+                    messages.append({"role": "system", "content": intent.system_note})
+                # 2026-08-27 (task #120): inject the policy directive AFTER
+                # turn-intent so the LLM sees the chosen action last (most
+                # recent system message tends to bind tightest on gpt-4o-
+                # mini class models).  Skipped when directive is None
+                # (flag off OR renderer errored) — LLM improvises as before.
+                if _policy_directive:
+                    messages.append({
+                        "role": "system", "content": _policy_directive,
+                    })
             messages.extend(state.to_llm_messages())
             with tracer.span(
                 "gen_ai.chat_completion",

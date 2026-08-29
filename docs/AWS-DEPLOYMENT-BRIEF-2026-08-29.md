@@ -3,12 +3,71 @@
 Author: voice-agent (humanness lane)
 Owner of implementation: networking lane
 Date: 2026-08-29
+Revised: 2026-08-29 (post-Track-A landing — framing corrected)
 
 ## Scope
 
 What the receptionist-agent service needs from AWS to run in production. This is NOT the terraform module. This is what the terraform module has to provision. Networking writes the actual infra code.
 
-The user asked for "auto deploy from here with a script." Answer: yes, and the right shape is a Terraform module + a `make deploy` target that fronts it. This doc gives networking everything they need to write both.
+**Important framing correction** (2026-08-29 revised): the user pushed back on running this at ~$150-200/month in OUR account with zero paying customers. Correct. The deployment work now splits:
+
+- **Track A (SHIPPED, networking):** `./scripts/deploy.sh` — automates Lightsail rsync + systemd restart + health check. Zero-ceremony deploy from this working tree to the current $24/mo box. Use this today.
+- **Track B (client-provisioning template):** the Fargate/RDS/S3 terraform module documented below is written ONCE, then applied against a CLIENT's AWS account when they sign. Per-client isolation, one codebase, we don't pay the pilot cost.
+- **Track B (shared multi-tenant option):** a second tfvars profile (`tier="shared-multi-tenant"`) for small clients who don't warrant their own AWS account. We host, they pay per-tenant subscription.
+
+This document is the source of truth for both Track B variants.
+
+## Per-client deployment model (Track B)
+
+Explicit constraints so networking can write the module against a single source of truth:
+
+### 1. Secrets ownership flip (CLIENT's account, not ours)
+
+- The terraform module reads secrets from AWS Secrets Manager.
+- The **secrets themselves live in the CLIENT's account**, not ours.
+- Consequence: the CLIENT's Secrets Manager holds their OpenAI/Deepgram/ElevenLabs/Twilio/CRM keys. The client pays those provider bills; we never see the keys.
+- Our code is account-agnostic: it just calls `secretsmanager:GetSecretValue` against the ARNs the terraform outputs give it. Which account those ARNs resolve to is a tfvars concern.
+- Onboarding a new client: they generate provider keys, drop them into their Secrets Manager (via the tf module's `provisioning/` scripts), we run `terraform apply` with their tfvars.
+
+### 2. Tenant model at the INFRA layer
+
+- **One `terraform apply` = one client = one AWS account** (or one client-owned sub-account under AWS Organizations).
+- NOT one shared account with per-tenant IAM boundaries. That model exists (multi-tenant SaaS profile below) but is the exception, not the default.
+- Terraform state per client lives in the client's own state-bucket + DynamoDB lock table. We do not commingle state across clients.
+- Cross-client blast radius on a bad deploy: zero.
+
+### 3. DNS pattern (client owns)
+
+- Client owns their subdomain (e.g. `receptionist.acme-clinic.com`).
+- Terraform provisions an ALB with an ACM cert for the client's chosen hostname.
+- Client points a CNAME at the ALB DNS name.
+- Twilio number → client's subdomain → their ALB → their Fargate task.
+- We don't own the DNS, we don't hold the cert, we don't route production traffic.
+
+### 4. What we ship to the client
+
+A repo (or tarball) containing:
+
+- `terraform/` — the module
+- `README.md` — 3-step client onboarding runbook
+- `tfvars.example` — filled-in template with placeholders documented
+- `provisioning/create-secrets.sh` — helper that reads a `.env`-style file and creates the Secrets Manager entries with the exact names our app expects
+- `provisioning/cutover-checklist.md` — Twilio number config, DNS TTL flip, ACM cert validation, first smoke call
+- (Optional, future) `Dockerfile.client-signing` — if the client is compliance-conscious, they can rebuild the container image from our repo instead of pulling from our ECR
+
+Client's flow: `terraform init && terraform apply -var-file=./tfvars`.
+
+### 5. What stays ours: shared multi-tenant SaaS profile
+
+For clients that don't want their own AWS account (small dental practice, single-location realtor):
+
+- Different tfvars profile: `tier = "shared-multi-tenant"`.
+- Aurora Serverless v2 with per-tenant DB schemas OR per-tenant DB (networking's call — depends on Postgres schema design for `TenantRuntimeContextResolver` task #133).
+- Per-tenant Secrets Manager namespace: `receptionist/shared/{tenant_id}/llm`, etc.
+- One ALB fronting one Fargate service; per-tenant routing happens at the app layer via the tenant-resolver.
+- Cost floor: ~$300/mo before per-tenant scale. Break-even at ~10 tenants each paying $50/mo.
+- We host, we invoice, we pay the provider bills, we mark up.
+- This is a different business model — subscription SaaS. **Do not** stand it up until networking's B-P0.0 TenantRuntimeContextResolver lands, or a bad-tenant query can leak another tenant's data.
 
 ## Traffic profile
 
@@ -197,10 +256,11 @@ Everything infra. Specifically:
 
 ## Open questions for networking
 
-1. Region choice: US-first (us-east-1) or dual-region from day one? Dual doubles infra cost but halves EU latency.
-2. Twilio Media Streams supports us-east-1 + us-west-2 + eu-west-1 currently. Any preference?
+1. Region choice: US-first (us-east-1) or dual-region from day one? Dual doubles infra cost but halves EU latency. **For Track B client template**: probably let the client pick their region via tfvar — but their region choice affects Twilio Media Streams edge selection (they need us-east-1 / us-west-2 / eu-west-1).
+2. Twilio Media Streams supports us-east-1 + us-west-2 + eu-west-1 currently. Any preference for the shared-multi-tenant profile?
 3. Do we want ADOT/OpenTelemetry sidecar for traces, or CloudWatch alone?
-4. RDS Aurora Serverless v2 vs. plain RDS Postgres for pilot — cost trade at low load favors plain RDS, but Aurora auto-scales cleaner. Networking's call.
-5. Timeline — is this a "spec now, implement next sprint" or "start terraform this week"?
+4. ~~RDS Aurora Serverless v2 vs. plain RDS Postgres~~ — ANSWERED 2026-08-29: **plain RDS** in the Track B client template; Aurora only in the shared-multi-tenant profile. Aurora at pilot volume is a footgun.
+5. ~~S3 vs EFS for TTS cache~~ — ANSWERED 2026-08-29: **S3 with in-memory LRU** in the Track B template. EFS multi-AZ is a bigger footgun.
+6. Timeline — is this a "spec now, implement next sprint" or "start terraform this week"? Track A is live (deploy.sh); Track B has no client-signed deadline yet.
 
 Answer any of these and I'll iterate. Otherwise this is enough for networking to write the module.
