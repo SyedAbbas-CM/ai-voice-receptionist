@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.db.session import init_db
-from app.routes import admin, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, sessions, signalwire, telnyx, twilio, vapi, voice
+from app.routes import admin, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, sessions, signalwire, telnyx, trace, twilio, vapi, voice
 from packages.observability.structured_log import maybe_install as maybe_install_json_logs
 
 
@@ -166,6 +166,12 @@ def create_app() -> FastAPI:
     # BUG-02 investigation without needing to grep raw log files.
     app.include_router(incident.router)
     app.include_router(dashboard.router)
+    # 2026-08-29 (humanness debugging + traceability):
+    # /trace/{call_id} — tenant-scoped humanness trace view.  Reads
+    # structured humanness_events + transcript + bookings and renders
+    # a business-owner-friendly timeline.  Companion to incident.py
+    # which is admin-gated raw JSON.
+    app.include_router(trace.router)
 
     # Sprint 9b: /metrics scrape endpoint for turn-latency histograms,
     # barge-in counters, provider fallback counts, ledger heard/generated
