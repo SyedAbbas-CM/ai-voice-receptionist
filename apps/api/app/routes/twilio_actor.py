@@ -776,6 +776,11 @@ class TwilioActorSession:
         self._slot_stall_task: Optional[asyncio.Task] = None
         self._slot_stall_first_prompt_s: float = 6.0
         self._slot_stall_escalate_s: float = 8.0
+        # LK steal #7 (2026-08-29): narrow sub-agent prompt attached
+        # while a slot capture is active.  Downstream brain turn reads
+        # `active_slot_prompt` and injects .instructions as a
+        # system-note when non-None.  Cleared on exit_slot_capture.
+        self._active_slot_prompt = None
 
         self.actor: Optional[CallActor] = None
 
@@ -3026,6 +3031,10 @@ class TwilioActorSession:
         on_confirm_needed=None,
         stall_first_prompt_s: Optional[float] = None,
         stall_escalate_s: Optional[float] = None,
+        modality: str = "audio",
+        require_confirmation: Optional[bool] = None,
+        extra_instructions: str = "",
+        on_enter_persona_hint: str = "",
     ) -> StructuredInputSession:
         """Open a structured-input session for the caller's next turns.
 
@@ -3043,6 +3052,14 @@ class TwilioActorSession:
         on_stall:   optional async callable(stage: str, session) -> None.
                     Fires when the caller stops talking mid-capture.
                     stage ∈ {"first_prompt", "escalate"}.
+
+        2026-08-29 (LK steal #7): if a sub-agent prompt is available
+        for `kind`, stash it on the actor so the next brain turn injects
+        the narrow instructions as a system-note.  Callers who invoke
+        this via ASK_SLOT get the LK phone_number.py discipline
+        automatically — no invention, no simulation, read back in
+        groups.  Silent no-op for slot kinds we don't yet have a
+        sub-agent prompt for (only 'phone' today).
         """
         # Close any prior capture defensively — one active slot at a time.
         if self._active_slot is not None:
@@ -3067,11 +3084,78 @@ class TwilioActorSession:
             stall_escalate_s if stall_escalate_s is not None
             else self._SLOT_STALL_ESCALATE_S
         )
+        # LK steal #7: attach the narrow sub-agent prompt for this
+        # kind if we have one.  Downstream brain turn can read
+        # self._active_slot_prompt and inject as a system-note.
+        self._active_slot_prompt = None
+        if kind == "phone":
+            try:
+                from packages.slot_parsers.slot_capture_prompts import (
+                    build_phone_capture_prompt,
+                )
+                # Default require_confirmation for audio: True (STT
+                # noise makes read-back valuable).  For text: False
+                # (the caller sees what they typed).
+                if require_confirmation is None:
+                    require_confirmation = (modality == "audio")
+                self._active_slot_prompt = build_phone_capture_prompt(
+                    modality=modality,  # type: ignore[arg-type]
+                    require_confirmation=require_confirmation,
+                    extra_instructions=extra_instructions,
+                    on_enter_persona_hint=on_enter_persona_hint,
+                )
+            except Exception as e:
+                # Prompt attachment is defensive — capture must still
+                # work if the prompt module is missing.
+                log.warning(
+                    "SLOT_PROMPT_ATTACH_FAILED call=%s kind=%s: %s",
+                    self.call_id, kind, e,
+                )
+                self._active_slot_prompt = None
         # Arm the stall watchdog.  It's reset on every feed() and
         # cancelled on commit/reset/exit.
         self._arm_slot_stall_watchdog()
-        log.info("SLOT_CAPTURE_ENTER call=%s kind=%s config=%s",
-                 self.call_id, kind, config)
+        log.info(
+            "SLOT_CAPTURE_ENTER call=%s kind=%s config=%s prompt=%s",
+            self.call_id, kind, config,
+            bool(self._active_slot_prompt),
+        )
+        # Emit a typed humanness event so the /trace view shows the
+        # capture start in the timeline.  Uses the generic
+        # SpeechGateDroppedEvent shape? — no, we want a purpose-built
+        # event.  For now, log via the existing durable event_log
+        # kind so incident.py shows it, and let a future commit add
+        # a proper SlotCaptureEnteredEvent to humanness_events.py.
+        try:
+            from packages.observability.call_event_log import (
+                get_call_event_log, CallEvent as _CE_slot,
+                EventSourceKind as _SK_slot,
+            )
+            _log = get_call_event_log()
+            if _log is not None:
+                _log.write(_CE_slot(
+                    call_id=self.call_id or "?",
+                    tenant_id=getattr(
+                        self, "tenant_id", "default",
+                    ),
+                    source=_SK_slot.LLM,
+                    kind="slot_capture_enter",
+                    payload={
+                        "kind": kind,
+                        "modality": modality,
+                        "prompt_attached": bool(
+                            self._active_slot_prompt
+                        ),
+                        "config_summary": {
+                            k: v for k, v in config.items()
+                            if k in (
+                                "default_region", "accepted_regions",
+                            )
+                        },
+                    },
+                ))
+        except Exception:
+            pass
         return session
 
     def exit_slot_capture(self, reason: str = "commit") -> None:
@@ -3087,10 +3171,24 @@ class TwilioActorSession:
         self._slot_on_commit = None
         self._slot_on_stall = None
         self._slot_on_confirm_needed = None
+        # LK steal #7: release the sub-agent prompt so the next
+        # brain turn sees the normal system prompt again.
+        self._active_slot_prompt = None
 
     @property
     def slot_capture_active(self) -> bool:
         return self._active_slot is not None
+
+    @property
+    def active_slot_prompt(self):
+        """LK steal #7: the SlotCapturePrompt currently attached to
+        the active capture, or None.  Read-only from outside.
+
+        Brain / turn manager reads this and injects
+        `.instructions` as a system-note for the duration of the
+        capture.  Returns None during normal (non-capture) turns.
+        """
+        return self._active_slot_prompt
 
     def _arm_slot_stall_watchdog(self) -> None:
         """Start / restart the inactivity timer for the active slot."""
