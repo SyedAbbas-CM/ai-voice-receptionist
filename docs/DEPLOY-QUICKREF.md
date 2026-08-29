@@ -65,17 +65,23 @@ Push to `feat/architectural-networking` → GitHub Actions runs the same `deploy
 
 ## Pull a call trace after a live call
 
+**Easiest — one command:**
 ```bash
-# By CallSid (from Twilio Console)
-curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
-    "https://agent.eternalconquests.com/trace/CA<sid>?f=json"
+./scripts/trace_call.sh CA<sid>          # full trace (transcript + events + regression signals)
+./scripts/trace_call.sh --recent 5       # list 5 most recent CallSids
+```
 
-# Or humanness-events view (voice-agent's tenant-scoped view)
-curl -sS "https://agent.eternalconquests.com/trace/CA<sid>?f=json"
+Prints:
+- Chronological transcript
+- Every call_event with humanness-signal highlighting
+- Event kind counts
+- Regression-signal check (empty_llm_completion, empty_llm_deterministic_fallback, slot_capture_enter)
 
-# If you don't know the CallSid, get the most recent 5 sessions:
-ssh -i "/Users/az/Desktop/Receptionist Agent/LightsailDefaultKey-us-east-1.pem" ubuntu@3.227.16.73 \
-    'python3 -c "import sqlite3; c=sqlite3.connect(\"/home/ubuntu/receptionist-agent/data/voiceops.db\"); [print(r) for r in c.execute(\"SELECT id, started_at FROM sessions ORDER BY started_at DESC LIMIT 5\").fetchall()]"'
+Under the hood: SSH + sqlite dump. No HTTP auth needed. Works even when `/trace/{call_id}` HTTP endpoint isn't reachable (missing admin token, tenant keys hashed in DB).
+
+**Via HTTP** (needs an admin token OR a plaintext tenant API key — see DEPLOY-RUNBOOK):
+```bash
+curl -sS -H "Authorization: Bearer $TENANT_KEY" "https://agent.eternalconquests.com/trace/CA<sid>?f=json"
 ```
 
 ## When it breaks
