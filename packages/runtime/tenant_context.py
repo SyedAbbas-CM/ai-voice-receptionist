@@ -280,37 +280,41 @@ class TenantRuntimeContextResolver:
 
     def _resolve_config_path(self, tenant_id: str) -> Optional[Path]:
         """Walk the priority chain, return the first existing path.
-        Returns None if nothing found — caller decides what to do."""
-        from app.core.config import settings
+        Returns None if nothing found — caller decides what to do.
+
+        All paths are resolved relative to `settings.repo_root` (the
+        repo root derived from `__file__` in config.py), NOT the process
+        CWD — otherwise running from `apps/api/` and running from the
+        repo root would see different fixtures. This bit us in the
+        first smoke test.
+        """
+        from app.core.config import settings, REPO_ROOT
 
         # 1. Per-tenant config dir (the intended long-term layout)
-        p1 = Path("data/tenants") / tenant_id / "business.json"
+        p1 = REPO_ROOT / "data" / "tenants" / tenant_id / "business.json"
         if p1.exists():
             return p1
 
         # 2. sample-data/{tenant_id}/business.json (current fixture layout,
         #    where tenant_id is a vertical alias like "clinic" or "real-estate")
-        p2 = Path("sample-data") / tenant_id / "business.json"
+        p2 = REPO_ROOT / "sample-data" / tenant_id / "business.json"
         if p2.exists():
             return p2
 
-        # 3. Legacy — the global settings path. Only for the legacy sentinel
-        #    OR as a last-resort fallback while call sites migrate.
-        legacy = settings.business_profile_path
-        if legacy:
-            p3 = Path(legacy)
-            if p3.exists():
-                if tenant_id != LEGACY_SENTINEL:
-                    # Loud once — help operators grep for migration debt.
-                    if tenant_id not in self._legacy_warned:
-                        self._legacy_warned.add(tenant_id)
-                        log.warning(
-                            "tenant_runtime: tenant_id=%r resolved via LEGACY "
-                            "global business_profile_path=%r; migrate to "
-                            "data/tenants/%s/business.json before shipping "
-                            "multi-tenant.", tenant_id, legacy, tenant_id,
-                        )
-                return p3
+        # 3. Legacy — the global settings path. ONLY when tenant_id is
+        #    the explicit LEGACY_SENTINEL. Any real tenant_id that reaches
+        #    step 3 means the caller lied about having a tenant — we do
+        #    NOT silently misroute them to whatever the global fixture is.
+        #    Falling through returns None → resolve() raises → ingress
+        #    refuses the call. This is the whole point of B-P0.0.
+        if tenant_id == LEGACY_SENTINEL:
+            legacy = settings.business_profile_path
+            if legacy:
+                p3 = Path(legacy)
+                if not p3.is_absolute():
+                    p3 = REPO_ROOT / p3
+                if p3.exists():
+                    return p3
 
         return None
 

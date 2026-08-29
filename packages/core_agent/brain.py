@@ -482,6 +482,67 @@ class ReceptionistBrain:
         from packages.observability import get_tracer
         tracer = get_tracer()
 
+        # 2026-08-27 (task #120): NextActionPolicy per-turn injection.
+        # ChatGPT audit 2026-08-26 H-P0.1: policy only governed the
+        # post-booking synth branch, not general turns.  Now every
+        # turn:
+        #   1. Runs the TurnSignalReducer on the caller text
+        #   2. Populates ConversationDecisionState with real signals
+        #   3. Asks NextActionPolicy for the chosen action + ack
+        #   4. Renders a system-note directive telling the LLM which
+        #      action shape + which ack lane + how brief to be
+        # LLM still verbalizes; policy decides shape.  Feature-flagged
+        # by settings.next_action_policy_enabled (default False =
+        # zero behavior change).
+        _policy_directive: Optional[str] = None
+        _policy_decision = None
+        if getattr(_brain_settings, "next_action_policy_enabled", False):
+            try:
+                from .next_action_synthesizer import (
+                    build_decision_state_with_signals,
+                )
+                from .policy_directive import render_policy_directive
+                from packages.dialogue.next_action_policy import (
+                    NextActionPolicy,
+                )
+                # Extract last agent utterance for reducer's structured-ask
+                # heuristic ("did the agent just ask for phone?").
+                _last_agent_text = ""
+                for _t in reversed(state.transcript):
+                    if _t.role == TurnRole.ASSISTANT and _t.text:
+                        _last_agent_text = _t.text
+                        break
+                _decision_state = build_decision_state_with_signals(
+                    known_slots=_extract_known_slots(state, []),
+                    last_caller_text=user_text,
+                    last_agent_text=_last_agent_text,
+                )
+                _policy_decision = NextActionPolicy().decide(_decision_state)
+                _last_ack = getattr(state, "_last_ack", None)
+                _policy_directive = render_policy_directive(
+                    _policy_decision, last_ack=_last_ack,
+                )
+                # Stash last ack for next-turn recency guard.
+                if _policy_decision is not None:
+                    state._last_ack = _policy_decision.acknowledgment
+                import logging as _pol_log
+                _pol_log.getLogger(__name__).info(
+                    "POLICY_DECISION action=%s ack=%s delivery=%s",
+                    _policy_decision.action.value if _policy_decision else "?",
+                    (_policy_decision.acknowledgment.value
+                        if _policy_decision and _policy_decision.acknowledgment
+                        else "?"),
+                    (_policy_decision.delivery_intent.value
+                        if _policy_decision else "?"),
+                )
+            except Exception as _pol_err:
+                import logging as _pol_log
+                _pol_log.getLogger(__name__).warning(
+                    "policy directive rendering failed (falling back to "
+                    "LLM improvise): %s", _pol_err,
+                )
+                _policy_directive = None
+
         for _ in range(self.MAX_TOOL_ITERATIONS):
             messages = [{"role": "system", "content": self.system_prompt}]
             # K3+K4: inject the turn-intent hint as a fresh system note
@@ -490,6 +551,15 @@ class ReceptionistBrain:
             intent = getattr(state, "last_turn_intent", None)
             if intent is not None and getattr(intent, "system_note", ""):
                 messages.append({"role": "system", "content": intent.system_note})
+            # 2026-08-27 (task #120): inject the policy directive AFTER
+            # turn-intent so the LLM sees the chosen action last (most
+            # recent system message tends to bind tightest on gpt-4o-
+            # mini class models).  Skipped when directive is None
+            # (flag off OR renderer errored) — LLM improvises as before.
+            if _policy_directive:
+                messages.append({
+                    "role": "system", "content": _policy_directive,
+                })
             messages.extend(state.to_llm_messages())
             with tracer.span(
                 "gen_ai.chat_completion",
