@@ -756,6 +756,124 @@ class ReceptionistBrain:
                 except Exception:
                     pass
 
+            # 2026-08-29 (BUG-CHR-01): LLM empty-completion watchdog.
+            #
+            # Christiaan (CA2fa1fef2, +31 6 25007600) hit 5 empty
+            # completions in one call — LLM_STREAM_DONE chars=0 tools=0.
+            # Caller sat through 8+ seconds of dead air per stall,
+            # then hung up.  Content-triggered: some inputs (bare
+            # nouns like 'A follow-up', Dutch phone digit strings)
+            # produce empty completions on gpt-4o-mini that neither
+            # the streaming path nor the batch path recovers from.
+            #
+            # Universal safety net: when the response has neither text
+            # nor tool_calls, retry ONCE with a rephrasing prompt.
+            # If the retry ALSO returns empty, fall to a deterministic
+            # spoken fallback so the caller never hears dead air.
+            #
+            # Not a substitute for fixing the content-specific bugs
+            # (BUG-CHR-02 international phone, BUG-CHR-03 service alias)
+            # but every future unknown-empty gets caught here.
+            _has_text = bool(response.text and response.text.strip())
+            _has_tool_calls = bool(response.tool_calls)
+            if not _has_text and not _has_tool_calls:
+                import logging as _empty_log
+                _elog_local = _empty_log.getLogger(__name__)
+                _elog_local.warning(
+                    "EMPTY_LLM_COMPLETION session=%s attempting rescue retry",
+                    state.session_id,
+                )
+                # Try once more with an explicit rescue system note
+                # nudging the model into a short conversational reply.
+                # We keep the same tool schema so a real booking tool
+                # call can still emerge on the retry.
+                _rescue_messages = list(messages)
+                _rescue_messages.append({
+                    "role": "system",
+                    "content": (
+                        "Your previous reply was empty. The caller last "
+                        "said: " + repr(user_text)[:200] + ". Respond "
+                        "briefly and conversationally in your persona. "
+                        "If you need clarification, ask ONE question. "
+                        "Do NOT stay silent. Do NOT emit an empty reply."
+                    ),
+                })
+                try:
+                    from .token_budgets import token_budget_for_plan
+                    _mt_rescue = token_budget_for_plan(
+                        getattr(state, "_semantic_plan", None),
+                    )
+                    response = await self.llm.complete(
+                        _rescue_messages, tools=self.tools,
+                        temperature=0.5,  # slightly warmer to unstick
+                        max_tokens=_mt_rescue,
+                        site="brain.rescue_empty",
+                    )
+                    _rescue_has_text = bool(
+                        response.text and response.text.strip()
+                    )
+                    _rescue_has_tools = bool(response.tool_calls)
+                    _elog_local.info(
+                        "EMPTY_LLM_RESCUE session=%s recovered_text=%s "
+                        "recovered_tools=%s",
+                        state.session_id,
+                        _rescue_has_text, _rescue_has_tools,
+                    )
+                    # Log to the durable event log for later bisection.
+                    try:
+                        from packages.observability.call_event_log import (
+                            get_call_event_log, CallEvent as _CE_r,
+                            EventSourceKind as _SK_r,
+                        )
+                        _elog_durable = get_call_event_log()
+                        if _elog_durable is not None:
+                            _elog_durable.write(_CE_r(
+                                call_id=state.session_id or "?",
+                                tenant_id=getattr(
+                                    state, "tenant_id", "default",
+                                ),
+                                source=_SK_r.LLM,
+                                kind="empty_completion_rescue",
+                                payload={
+                                    "user_text": user_text[:400],
+                                    "recovered_text": _rescue_has_text,
+                                    "recovered_tools": _rescue_has_tools,
+                                },
+                            ))
+                    except Exception:
+                        pass
+                except Exception as _rescue_err:
+                    _elog_local.warning(
+                        "EMPTY_LLM_RESCUE_FAILED session=%s: %s",
+                        state.session_id, _rescue_err,
+                    )
+                    response = None
+                # If retry ALSO failed OR returned empty, fall to a
+                # deterministic spoken fallback.  Never dead air.
+                if response is None or (
+                    not (response.text and response.text.strip())
+                    and not response.tool_calls
+                ):
+                    _elog_local.warning(
+                        "EMPTY_LLM_DETERMINISTIC_FALLBACK session=%s",
+                        state.session_id,
+                    )
+                    fallback_text = (
+                        "Sorry, I missed that — could you say it again?"
+                    )
+                    state.add_turn(TranscriptTurn(
+                        role=TurnRole.ASSISTANT, text=fallback_text,
+                    ))
+                    self._refresh_extraction_bg(state)
+                    return BrainTurnResult(
+                        reply=fallback_text,
+                        state=state,
+                        tool_results=tool_results_payload,
+                        escalated=escalated,
+                    )
+                # else: rescue produced a real reply, continue with
+                # the normal path using the new response.
+
             if not response.tool_calls:
                 # Task #283 v2: streaming already happened above (with tools).
                 # If response.text is populated, it came from either the
