@@ -512,10 +512,39 @@ class ReceptionistBrain:
                     if _t.role == TurnRole.ASSISTANT and _t.text:
                         _last_agent_text = _t.text
                         break
+                # 2026-08-29 (BUG #146 fix, from live test call
+                # CA3dac680ae8661459bc74735603f2cbc9): compute the
+                # `missing` slots BEFORE handing to NextActionPolicy.
+                # Previous code left this defaulting to [] which made
+                # policy always fall through to action=ANSWER — every
+                # ASK_SLOT branch (and the entire LK slot-capture wire)
+                # was dormant on live calls.  compute_missing_slots
+                # detects booking-intent from recent caller utterances
+                # and returns the ordered list of book_appointment
+                # required slots not yet in known_slots.  Returns [] on
+                # non-booking turns (ANSWER path preserved).
+                from .missing_slots import (
+                    compute_missing_slots,
+                    recent_caller_texts_from_state,
+                )
+                _known_slots = _extract_known_slots(state, [])
+                _recent_caller_texts = (
+                    recent_caller_texts_from_state(state)
+                )
+                # Include the current user_text — it's the freshest
+                # signal + may not be in state.transcript yet depending
+                # on where in the turn boundary we are.
+                if user_text and user_text not in _recent_caller_texts:
+                    _recent_caller_texts.insert(0, user_text)
+                _missing = compute_missing_slots(
+                    known_slots=_known_slots,
+                    recent_caller_texts=_recent_caller_texts,
+                )
                 _decision_state = build_decision_state_with_signals(
-                    known_slots=_extract_known_slots(state, []),
+                    known_slots=_known_slots,
                     last_caller_text=user_text,
                     last_agent_text=_last_agent_text,
+                    missing=_missing,
                 )
                 _policy_decision = NextActionPolicy().decide(_decision_state)
                 _last_ack = getattr(state, "_last_ack", None)
@@ -1097,10 +1126,32 @@ class ReceptionistBrain:
                         len(response.tool_calls or []),
                         len(tool_results_payload),
                     )
-                    reply_text = (
-                        "Actually, let me ask you directly — "
-                        "what day and time are you looking for?"
+                    # 2026-08-29 (BUG #147 fix): the old fallback said
+                    # "Actually, let me ask you directly — what day and
+                    # time are you looking for?" which sounded jarring
+                    # and prompt-leak-y ("let me ask you directly" reads
+                    # like the model is quoting an instruction).  Real
+                    # user complaint from live test call: "gets a bit
+                    # aggressive".  Rotate through natural receptionist
+                    # phrasings that keep the conversation alive without
+                    # the meta-language.  Selection is deterministic on
+                    # a lightweight rolling counter so consecutive fires
+                    # don't sound identical.
+                    _fw_fallbacks = (
+                        "Sure — what day and time were you thinking?",
+                        "Happy to help — what day works for you?",
+                        "Yeah — when were you looking to come in?",
+                        "Got it — what day and time work best?",
+                        "Okay — any day in particular you had in mind?",
                     )
+                    _fw_idx = getattr(state, "_fw_fallback_idx", 0)
+                    reply_text = _fw_fallbacks[
+                        _fw_idx % len(_fw_fallbacks)
+                    ]
+                    try:
+                        state._fw_fallback_idx = _fw_idx + 1
+                    except Exception:
+                        pass
 
                 # T-SP1 (2026-08-19): if the LLM emitted a SemanticPlan
                 # this turn, substitute its critical facts into the
