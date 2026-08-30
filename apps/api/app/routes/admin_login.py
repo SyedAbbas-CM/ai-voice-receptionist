@@ -61,6 +61,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -197,12 +198,20 @@ def verify_admin_session(request: Request) -> Optional[dict]:
 
 @router.get("/admin/login", response_class=HTMLResponse)
 def get_login_form(request: Request, error: Optional[str] = None) -> HTMLResponse:
-    """Simple password entry form."""
+    """Simple password entry form.
+
+    Security note (2026-08-30): earlier draft interpolated the raw
+    `error` query param straight into the HTML → reflected-XSS gadget
+    (`?error=<script>...`). Fixed by html.escape'ing before rendering
+    AND clamping to a short length (100 chars) so an attacker can't
+    stuff a payload big enough to be interesting even if escape somehow
+    fails downstream.
+    """
     error_html = ""
     if error:
-        error_html = (
-            f'<div class="err">{error}</div>'
-        )
+        # Length clamp first; escape second (belt-and-suspenders).
+        safe_error = html.escape(str(error)[:100])
+        error_html = f'<div class="err">{safe_error}</div>'
     body = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Admin login</title>
 <style>

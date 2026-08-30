@@ -288,6 +288,33 @@ def test_open_redirect_same_origin_path_accepted(_env):
     assert r.headers["location"] == "/admin/annotate/CAxyz"
 
 
+def test_login_form_xss_error_param_escaped(_env):
+    """Regression: security-review MEDIUM. `?error=<script>...</script>`
+    was being interpolated raw into the HTML → reflected XSS. Escaping
+    must render the payload inert."""
+    with _client() as c:
+        r = c.get("/admin/login?error=%3Cscript%3Ealert(1)%3C/script%3E")
+    assert r.status_code == 200
+    # The script tag MUST NOT appear as executable HTML — should be
+    # escaped to &lt;script&gt; etc.
+    assert "<script>alert(1)</script>" not in r.text
+    assert "&lt;script&gt;" in r.text or "&lt;script" in r.text
+
+
+def test_login_form_xss_error_param_length_clamped(_env):
+    """Even if escape breaks somehow, the 100-char clamp limits blast radius."""
+    payload = "A" * 500
+    with _client() as c:
+        r = c.get(f"/admin/login?error={payload}")
+    assert r.status_code == 200
+    # Should render at most 100 A's inside the error div
+    # (Roughly — html.escape is a no-op on A, so exact count check works)
+    err_start = r.text.find('class="err"')
+    err_end = r.text.find('</div>', err_start)
+    err_content = r.text[err_start:err_end]
+    assert err_content.count("A") <= 100
+
+
 def test_503_when_no_creds_configured(monkeypatch):
     """Neither ADMIN_TOKEN nor password hash → admin routes are dark."""
     monkeypatch.setenv("API_AUTH_ENFORCE", "false")
