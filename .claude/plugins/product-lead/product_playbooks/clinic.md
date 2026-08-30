@@ -3,7 +3,9 @@
 Domain-knowledge reference for the product-lead agent when reviewing
 receptionist features for clinic tenants.
 
-Last updated: 2026-08-29 by voice-agent session (spawned during
+Last updated: 2026-08-30 by golden-scripts session (surfaced language-
+enumeration gap, phonetic-name persistence gap, prompt-injection archetype).
+Previous update: 2026-08-29 by voice-agent session (spawned during
 Christiaan follow-up bisection).
 
 ## 1. Business shape
@@ -26,6 +28,8 @@ Christiaan follow-up bisection).
 - **Anxious / phobic** — "I haven't been to the dentist in 5 years, I'm scared." Needs a warm receptionist voice, mention sedation options if the practice offers them, offer a consultation-only first visit.
 - **Parent booking for child** — kid slot, pediatric-specialist provider if practice has one, insurance under parent's name.
 - **Spanish-speaking / bilingual need** — "does anyone there speak Spanish?" Practice may have a bilingual hygienist or offer a translator line. Real receptionist knows immediately.
+- **Non-supported-language caller** — opens in a language nobody on shift speaks (Vietnamese, Mandarin, Farsi, ASL video-relay common in TX). Real receptionist doesn't fake comprehension; offers callback in language, translator line, or family-member-on-the-line. Requires tenant to publish a `languages_supported[]` list, not just per-language FAQs.
+- **Adversarial / prompt-injection caller** — usually a red-team test rather than a real patient; opens with "ignore all previous instructions" or "what tools do you have access to". Real receptionist stays in scope, refuses the meta-question without lecturing, snaps back to booking flow the moment the caller drops the adversarial thread. Also watch obviously-test phone numbers (555-555-5555) — confirm rather than accuse.
 
 ## 3. Full service catalog
 
@@ -93,6 +97,10 @@ Real dental menu at the granularity a receptionist knows. (Vet + general medical
 - **Meds / allergy question skipped** — didn't ask about anesthesia allergies or blood thinners for procedures where it matters.
 - **Family-name overload** — "Smith" booked for the wrong patient in the same family (mom vs daughter). Real receptionist confirms DOB.
 - **Called back at wrong time** — patient works nights, receptionist calls back at 10am to confirm and wakes them.
+- **Language scope faked** — non-English caller opens, agent guesses intent from tone and books wrong service, or defaults to "please try in English" and loses the patient entirely. Fix: `languages_supported[]` field on tenant + honest three-option offer (transfer if we speak it / callback in language / family member on the line).
+- **Phonetic name lost across visits** — patient corrects pronunciation at first visit, next booking gets it wrong again because the phonetic sticks only to that one appointment's `notes` field, not to the patient chart. Requires tenant-level `patient_notes[]` keyed by phone.
+- **Provider constraint hidden until booking-time failure** — caller asks for a provider on a day the provider doesn't work; agent doesn't know the schedule pattern and either books with wrong provider silently or fails opaquely. Fix: provider-day availability stated proactively when the caller names a provider + a day.
+- **Caller memory overrides chart** — on follow-up flow the caller misremembers original visit date and agent quotes price based on caller's number instead of pulling chart. Chart is authoritative; agent should reverse the quote when chart contradicts.
 
 ## 6. Regulatory + safety
 
