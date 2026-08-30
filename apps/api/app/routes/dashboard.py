@@ -339,6 +339,22 @@ def _render_bookings_table(bookings: list[BookingRow]) -> str:
     )
 
 
+def _session_id_to_call_id(session_id: str) -> str:
+    """Convert stored session_id (typically 'twilio_CA...') back to
+    the raw CA-SID for /trace/{call_id} URLs.  /trace's resolver
+    accepts either form, but the URL reads cleaner + is easier to
+    copy-paste to Twilio Console with the bare SID.
+
+    Falls back to the original string when the shape doesn't match
+    (e.g. widget sessions like 'twilio_browser_261caaf9') — /trace
+    still resolves those correctly."""
+    if not session_id:
+        return session_id
+    if session_id.startswith("twilio_"):
+        return session_id[len("twilio_"):]
+    return session_id
+
+
 def _render_sessions_table(
     sessions: list[SessionRow], token: str,
 ) -> str:
@@ -357,6 +373,13 @@ def _render_sessions_table(
         extracted = s.extracted or {}
         caller = extracted.get("caller_name") or "—"
         intent = extracted.get("intent") or ""
+        # 2026-08-30 (task #143): humanness trace link.  Business
+        # owners click straight from a call row to the /trace view
+        # showing the humanness timeline (policy decisions, slot
+        # capture events, service resolution, discovery, empty-
+        # completion protections, etc).  Auth reuses the same
+        # tenant Bearer / ?token= as this dashboard.
+        _call_id_for_trace = _session_id_to_call_id(s.id)
         rows.append(
             "<tr>"
             f"<td>{_esc(_fmt_time(s.started_at))}</td>"
@@ -366,6 +389,9 @@ def _render_sessions_table(
             f"<td><span class=\"{pill_cls}\">{_esc(status)}</span></td>"
             "<td>"
             f"<a href=\"/dashboard/calls/{_esc(s.id)}{tok_qs}\">Open</a>"
+            " &middot; "
+            f"<a href=\"/trace/{_esc(_call_id_for_trace)}{tok_qs}\" "
+            f"title=\"Humanness event timeline for this call\">Trace</a>"
             "</td>"
             "</tr>"
         )

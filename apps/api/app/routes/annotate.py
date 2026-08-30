@@ -124,7 +124,12 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
             f'<td>{html.escape(s.tenant_id or "?")}</td>'
             f'<td>{html.escape(started[:19])}</td>'
             f'<td><span class="{verdict_class}">{html.escape(verdict)}</span> {gold}</td>'
-            f'<td><a href="/admin/annotate/{html.escape(cid)}">annotate</a></td>'
+            f'<td>'
+            f'<a href="/admin/annotate/{html.escape(cid)}">annotate</a>'
+            f' &middot; '
+            f'<a href="/trace/{html.escape(cid)}" target="_blank" '
+            f'title="Humanness event timeline">trace ↗</a>'
+            f'</td>'
             f'</tr>'
         )
 
@@ -307,6 +312,7 @@ def get_annotation_form(
   Started: {html.escape(_to_iso(sess.started_at) if sess else "?")} ·
   {len(turns)} turns
   · <a href="/admin/annotate">← index</a>
+  · <a href="/trace/{html.escape(raw)}" target="_blank" title="Humanness event timeline for this call">humanness trace ↗</a>
 </div>
 
 <form method="POST" action="/admin/annotate/{html.escape(raw)}/save">
