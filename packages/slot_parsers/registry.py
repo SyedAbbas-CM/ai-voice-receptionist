@@ -66,11 +66,26 @@ def _phone_validator(canonical: str, config: dict) -> SlotResult:
     )
 
 
+# ── task #142 additions (2026-08-30) ────────────────────────────────
+# email / name / date / yes_no — LK sub-agent pattern parity.
+# Each slot has its own normalize + validator pair; the wider actor
+# stays slot-type-agnostic.
+
+from .email_slot import normalize_email, email_validator
+from .name_slot import normalize_name, name_validator
+from .date_slot import normalize_date, date_validator
+from .yes_no_slot import normalize_yes_no, yes_no_validator
+
+
 # ── registry ─────────────────────────────────────────────────────────
 
 # Each entry maps slot_type → (normalize function, validator function).
 _REGISTRY: dict[str, tuple[Optional[Callable[[str], str]], Validator]] = {
     "phone": (normalize_spoken_digits, _phone_validator),
+    "email": (normalize_email, email_validator),
+    "name": (normalize_name, name_validator),
+    "date": (normalize_date, date_validator),
+    "yes_no": (normalize_yes_no, yes_no_validator),
 }
 
 

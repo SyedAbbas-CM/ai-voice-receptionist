@@ -3094,12 +3094,17 @@ class TwilioActorSession:
         # LK steal #7: attach the narrow sub-agent prompt for this
         # kind if we have one.  Downstream brain turn can read
         # self._active_slot_prompt and inject as a system-note.
+        # 2026-08-30 (task #142): extended to email/name/date/yes_no.
         self._active_slot_prompt = None
-        if kind == "phone":
-            try:
-                from packages.slot_parsers.slot_capture_prompts import (
-                    build_phone_capture_prompt,
-                )
+        try:
+            from packages.slot_parsers.slot_capture_prompts import (
+                build_phone_capture_prompt,
+                build_email_capture_prompt,
+                build_name_capture_prompt,
+                build_date_capture_prompt,
+                build_yes_no_capture_prompt,
+            )
+            if kind == "phone":
                 # Default require_confirmation for audio: True (STT
                 # noise makes read-back valuable).  For text: False
                 # (the caller sees what they typed).
@@ -3111,14 +3116,38 @@ class TwilioActorSession:
                     extra_instructions=extra_instructions,
                     on_enter_persona_hint=on_enter_persona_hint,
                 )
-            except Exception as e:
-                # Prompt attachment is defensive — capture must still
-                # work if the prompt module is missing.
-                log.warning(
-                    "SLOT_PROMPT_ATTACH_FAILED call=%s kind=%s: %s",
-                    self.call_id, kind, e,
+            elif kind == "email":
+                self._active_slot_prompt = build_email_capture_prompt(
+                    modality=modality,  # type: ignore[arg-type]
+                    extra_instructions=extra_instructions,
+                    on_enter_persona_hint=on_enter_persona_hint,
                 )
-                self._active_slot_prompt = None
+            elif kind == "name":
+                self._active_slot_prompt = build_name_capture_prompt(
+                    modality=modality,  # type: ignore[arg-type]
+                    extra_instructions=extra_instructions,
+                    on_enter_persona_hint=on_enter_persona_hint,
+                )
+            elif kind == "date":
+                self._active_slot_prompt = build_date_capture_prompt(
+                    modality=modality,  # type: ignore[arg-type]
+                    extra_instructions=extra_instructions,
+                    on_enter_persona_hint=on_enter_persona_hint,
+                )
+            elif kind == "yes_no":
+                self._active_slot_prompt = build_yes_no_capture_prompt(
+                    modality=modality,  # type: ignore[arg-type]
+                    extra_instructions=extra_instructions,
+                    on_enter_persona_hint=on_enter_persona_hint,
+                )
+        except Exception as e:
+            # Prompt attachment is defensive — capture must still
+            # work if the prompt module is missing.
+            log.warning(
+                "SLOT_PROMPT_ATTACH_FAILED call=%s kind=%s: %s",
+                self.call_id, kind, e,
+            )
+            self._active_slot_prompt = None
         # Arm the stall watchdog.  It's reset on every feed() and
         # cancelled on commit/reset/exit.
         self._arm_slot_stall_watchdog()

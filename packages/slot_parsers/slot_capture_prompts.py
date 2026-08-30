@@ -220,9 +220,248 @@ def read_back_in_groups(digits: str, group_sizes: Optional[list[int]] = None) ->
     return out
 
 
+# ── email-slot prompt (task #142, 2026-08-30) ────────────────
+
+
+_EMAIL_BASE_INSTRUCTIONS = """\
+You are one narrow step in a broader conversation, responsible only for capturing an email address from the caller.
+
+{modality_specific}
+
+Rules:
+1. Call `update_email` at the FIRST hypothesis of a complete address (something with an '@' and a '.').  Update again on every correction.
+2. Never invent an address.  If you missed a word, ask them to repeat that part.
+3. If the caller says the domain sounds off (gmial, hotmial, yahooo, etc.) the tool will suggest a correction — read back the SUGGESTED version and confirm before committing.
+4. Never spell the address back as one long string.  Break it up: local part, then 'at', then domain, then 'dot', then TLD.
+5. Ignore off-topic input.  If the caller asks something unrelated, briefly acknowledge and steer back: "I'll come back to that — right now I just need your email."
+6. No markdown, no filler openings, no example emails.
+7. Always invoke the tool explicitly.  Do NOT simulate tool use.
+{extra_instructions}"""
+
+
+_EMAIL_AUDIO_MODALITY = """\
+Handle input as noisy voice transcription.  Callers say emails in many shapes:
+- "john dot smith at gmail dot com"
+- "j-o-h-n at yahoo dot com" (spellback letter by letter)
+- "my email is john underscore smith at hotmail dot com"
+
+Silently normalize:
+- "dot" or "period" → "."
+- "at" → "@"
+- "dash" or "hyphen" → "-"
+- "underscore" → "_"
+- Spelled letters (j-o-h-n) → joined ("john")
+- Strip filler words ("my email is", "the address is", "it's")
+
+Do NOT mention the normalization."""
+
+
+_EMAIL_TEXT_MODALITY = """\
+Handle input as typed text.  Strip whitespace + trailing punctuation."""
+
+
+def build_email_capture_prompt(
+    modality: Modality = "audio",
+    extra_instructions: str = "",
+    on_enter_persona_hint: str = "",
+) -> SlotCapturePrompt:
+    """Build the email-slot sub-agent prompt.  Mirrors phone prompt
+    shape.  Confirmation is IMPLICIT via read-back — no separate
+    confirm tool needed for email; the tool suggests corrections
+    for typos, and the LLM asks the caller to confirm the suggested
+    correction before committing."""
+    modality_block = (
+        _EMAIL_AUDIO_MODALITY if modality == "audio"
+        else _EMAIL_TEXT_MODALITY
+    )
+    extra = f"\n{extra_instructions.strip()}" if extra_instructions else ""
+    instructions = _EMAIL_BASE_INSTRUCTIONS.format(
+        modality_specific=modality_block,
+        extra_instructions=extra,
+    )
+    on_enter = (
+        on_enter_persona_hint.strip()
+        or "Ask the caller for the best email to send a confirmation to, briefly and warmly."
+    )
+    return SlotCapturePrompt(
+        instructions=instructions,
+        on_enter_prompt=on_enter,
+        tools_hint=(
+            "update_email", "decline_email_capture",
+        ),
+    )
+
+
+# ── name-slot prompt ─────────────────────────────────────
+
+
+_NAME_BASE_INSTRUCTIONS = """\
+You are one narrow step in a broader conversation, responsible only for capturing the caller's name.
+
+{modality_specific}
+
+Rules:
+1. Call `update_name` at the FIRST hypothesis of a name.  Update again on every correction.
+2. Never invent a name.  If STT is garbled, ask the caller to spell the last name.
+3. If you only heard a first name, ask "and last name?" — most bookings need both.
+4. Never treat 'null', 'none', 'user', 'test', 'the caller', or similar generic strings as a real name — those are LLM pollution.  Re-ask.
+5. Ignore off-topic input.  Steer back: "Got it — I'll come back to that.  What name should the booking be under?"
+6. No markdown, no filler openings.
+7. Always invoke the tool explicitly.
+{extra_instructions}"""
+
+
+_NAME_AUDIO_MODALITY = """\
+Handle input as noisy voice transcription.  Callers give names in many shapes:
+- "John Smith"
+- "my name is John Smith"
+- "This is John, John Smith"
+- "S-M-I-T-H, first name John" (spellback)
+
+Silently strip intro phrases like "my name is", "this is", "it's", "I am".
+De-hyphenate spellback ("S-M-I-T-H" → "SMITH")."""
+
+
+_NAME_TEXT_MODALITY = """\
+Handle input as typed text.  Strip whitespace + trailing punctuation."""
+
+
+def build_name_capture_prompt(
+    modality: Modality = "audio",
+    extra_instructions: str = "",
+    on_enter_persona_hint: str = "",
+) -> SlotCapturePrompt:
+    """Build the name-slot sub-agent prompt."""
+    modality_block = (
+        _NAME_AUDIO_MODALITY if modality == "audio"
+        else _NAME_TEXT_MODALITY
+    )
+    extra = f"\n{extra_instructions.strip()}" if extra_instructions else ""
+    instructions = _NAME_BASE_INSTRUCTIONS.format(
+        modality_specific=modality_block,
+        extra_instructions=extra,
+    )
+    on_enter = (
+        on_enter_persona_hint.strip()
+        or "Ask the caller what name to put the booking under, briefly and warmly."
+    )
+    return SlotCapturePrompt(
+        instructions=instructions,
+        on_enter_prompt=on_enter,
+        tools_hint=(
+            "update_name", "decline_name_capture",
+        ),
+    )
+
+
+# ── date-slot prompt ─────────────────────────────────────
+
+
+_DATE_BASE_INSTRUCTIONS = """\
+You are one narrow step in a broader conversation, responsible only for capturing a date for the booking.
+
+{modality_specific}
+
+Rules:
+1. Call `update_date` at the FIRST hypothesis of a date.  Update again on every correction.
+2. Never invent a date.  If the caller says something vague ('sometime next week'), ask them to narrow it down.
+3. If the resolver flags the date as ambiguous ('this Tuesday' — this week or next?), read the two candidates back and ask which.
+4. Never repeat the date back as raw ISO — use natural language ("Tuesday, September 2nd").
+5. Ignore off-topic input.  Steer back: "Got it — what day are you thinking?"
+6. No markdown, no filler openings.
+7. Always invoke the tool explicitly.
+{extra_instructions}"""
+
+
+_DATE_AUDIO_MODALITY = """\
+Handle input as noisy voice transcription.  Callers give dates in many shapes:
+- "January 15th"
+- "the 15th of January"
+- "tomorrow" / "next Tuesday" / "this Friday"
+- "1/15" / "January fifteenth twenty twenty six"
+
+Silently normalize:
+- Spelled ordinals ("fifteenth" → "15th")
+- Strip fillers ("on", "the", "let's say")
+- Preserve relative references ("tomorrow") — the tool resolves them."""
+
+
+_DATE_TEXT_MODALITY = """\
+Handle input as typed text.  Accept ISO (YYYY-MM-DD) or natural language."""
+
+
+def build_date_capture_prompt(
+    modality: Modality = "audio",
+    extra_instructions: str = "",
+    on_enter_persona_hint: str = "",
+) -> SlotCapturePrompt:
+    """Build the date-slot sub-agent prompt."""
+    modality_block = (
+        _DATE_AUDIO_MODALITY if modality == "audio"
+        else _DATE_TEXT_MODALITY
+    )
+    extra = f"\n{extra_instructions.strip()}" if extra_instructions else ""
+    instructions = _DATE_BASE_INSTRUCTIONS.format(
+        modality_specific=modality_block,
+        extra_instructions=extra,
+    )
+    on_enter = (
+        on_enter_persona_hint.strip()
+        or "Ask the caller what day they'd like to come in, briefly and warmly."
+    )
+    return SlotCapturePrompt(
+        instructions=instructions,
+        on_enter_prompt=on_enter,
+        tools_hint=(
+            "update_date", "decline_date_capture",
+        ),
+    )
+
+
+# ── yes/no-slot prompt ───────────────────────────────────
+
+
+_YES_NO_BASE_INSTRUCTIONS = """\
+You are one narrow step in a broader conversation, responsible only for capturing a yes-or-no confirmation from the caller.
+
+The caller has been told what they're confirming — do NOT restate the whole booking.  Just call `update_yes_no` with 'yes' or 'no' as soon as you hear their answer.
+
+Rules:
+1. Call `update_yes_no("yes")` for clear affirmatives: yes, yeah, yep, sure, absolutely, correct, that's right, sounds good, book it, do it, go ahead, please do.
+2. Call `update_yes_no("no")` for clear negatives: no, nope, nah, cancel, wrong, that's not right, don't, hold on, wait.
+3. For ambiguous answers ("maybe", "kind of", "I think so", "let me think"), do NOT call the tool — re-ask directly: "Just to confirm — yes or no?"
+4. Ignore off-topic input.  Repeat the yes-or-no question directly.
+5. No markdown, no filler.  Answer with the tool call, not with words.
+{extra_instructions}"""
+
+
+def build_yes_no_capture_prompt(
+    modality: Modality = "audio",
+    extra_instructions: str = "",
+    on_enter_persona_hint: str = "",
+) -> SlotCapturePrompt:
+    """Build the yes/no-slot sub-agent prompt.  No modality split
+    because yes/no reads identically in audio and text."""
+    del modality  # not used — same instructions either way
+    extra = f"\n{extra_instructions.strip()}" if extra_instructions else ""
+    instructions = _YES_NO_BASE_INSTRUCTIONS.format(
+        extra_instructions=extra,
+    )
+    on_enter = on_enter_persona_hint.strip() or ""
+    return SlotCapturePrompt(
+        instructions=instructions,
+        on_enter_prompt=on_enter,
+        tools_hint=("update_yes_no",),
+    )
+
+
 __all__ = [
     "Modality",
     "SlotCapturePrompt",
     "build_phone_capture_prompt",
+    "build_email_capture_prompt",
+    "build_name_capture_prompt",
+    "build_date_capture_prompt",
+    "build_yes_no_capture_prompt",
     "read_back_in_groups",
 ]
