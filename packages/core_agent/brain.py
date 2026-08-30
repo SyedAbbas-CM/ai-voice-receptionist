@@ -639,6 +639,47 @@ class ReceptionistBrain:
                     last_agent_text=_last_agent_text,
                     missing=_missing,
                 )
+                # 2026-08-30 (task #141): emit TurnSignalReducedEvent
+                # so the /trace view shows the reducer's read of the
+                # caller's utterance every turn.  Reasons list surfaces
+                # WHY each signal fired — grep for 'reasons contains
+                # hardship_kw:hurt' etc from a call log to bisect ACK
+                # failures.  Defensive: humanness events never crash
+                # the call path.
+                try:
+                    from packages.observability.humanness_events import (
+                        TurnSignalReducedEvent as _TSRE,
+                        emit_humanness_event as _emit_tsr,
+                    )
+                    _emit_tsr(_TSRE(
+                        call_id=state.session_id or "?",
+                        tenant_id=getattr(
+                            state, "tenant_id", "default",
+                        ),
+                        session_id=state.session_id or "?",
+                        last_caller_text=(user_text or "")[:400],
+                        caller_shared_hardship=bool(getattr(
+                            _decision_state,
+                            "caller_shared_hardship", False,
+                        )),
+                        caller_corrected_us=bool(getattr(
+                            _decision_state,
+                            "caller_corrected_us", False,
+                        )),
+                        caller_is_dictating=bool(getattr(
+                            _decision_state,
+                            "caller_is_dictating", False,
+                        )),
+                        caller_asked_to_wait=bool(getattr(
+                            _decision_state,
+                            "caller_asked_to_wait", False,
+                        )),
+                        reasons=list(getattr(
+                            _decision_state, "reasons", []
+                        ) or []),
+                    ))
+                except Exception:
+                    pass
                 _policy_decision = NextActionPolicy().decide(_decision_state)
                 _last_ack = getattr(state, "_last_ack", None)
                 _policy_directive = render_policy_directive(
@@ -1291,6 +1332,32 @@ class ReceptionistBrain:
                         reply_text[:200],
                         [tr.get("name") for tr in tool_results_payload],
                     )
+                    # 2026-08-30 (task #141): emit LlmClaimGuardEvent so
+                    # /trace shows every claim-guard fire.  ERROR-worthy
+                    # in the humanness timeline — every one is a real
+                    # bug the LLM would have committed to the caller.
+                    try:
+                        from packages.observability.humanness_events import (
+                            LlmClaimGuardEvent as _LCG,
+                            emit_humanness_event as _emit_lcg,
+                        )
+                        _emit_lcg(_LCG(
+                            call_id=state.session_id or "?",
+                            tenant_id=getattr(
+                                state, "tenant_id", "default",
+                            ),
+                            session_id=state.session_id or "?",
+                            guard="booking",
+                            claim_text_preview=(reply_text or "")[:200],
+                            receipt_present=any(
+                                (tr or {}).get("name") in
+                                _BOOKING_TOOLS
+                                for tr in tool_results_payload
+                            ),
+                            action_taken="rewrote",
+                        ))
+                    except Exception:
+                        pass
                     reply_text = (
                         "Hold on, I don't have everything I need yet to book that. "
                         "Can you give me your full name, a full ten-digit phone number, "
@@ -1314,6 +1381,27 @@ class ReceptionistBrain:
                         len(response.tool_calls or []),
                         len(tool_results_payload),
                     )
+                    # 2026-08-30 (task #141): emit LlmClaimGuardEvent
+                    # for the wait-promise-without-tool case.  Same
+                    # trace-visibility idea as the booking guard.
+                    try:
+                        from packages.observability.humanness_events import (
+                            LlmClaimGuardEvent as _LCG_w,
+                            emit_humanness_event as _emit_lcg_w,
+                        )
+                        _emit_lcg_w(_LCG_w(
+                            call_id=state.session_id or "?",
+                            tenant_id=getattr(
+                                state, "tenant_id", "default",
+                            ),
+                            session_id=state.session_id or "?",
+                            guard="wait_promise",
+                            claim_text_preview=(reply_text or "")[:200],
+                            receipt_present=False,
+                            action_taken="rewrote",
+                        ))
+                    except Exception:
+                        pass
                     # 2026-08-29 (BUG #147 fix): the old fallback said
                     # "Actually, let me ask you directly — what day and
                     # time are you looking for?" which sounded jarring

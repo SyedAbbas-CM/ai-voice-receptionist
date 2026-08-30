@@ -1670,7 +1670,7 @@ class TwilioActorSession:
             return
         if not text.strip() or self.actor is None:
             return
-        from packages.voice import classify_barge
+        from packages.voice import classify_barge, BargeAction
         action = classify_barge(text)
         await self.actor.emit(CallEvent.new(
             call_id=self.call_id,
@@ -1681,6 +1681,32 @@ class TwilioActorSession:
             kind="barge_candidate",
             payload={"text": text, "action": action.value},
         ))
+        # 2026-08-30 (task #141): emit typed BargeInDetectedEvent.
+        # Map BargeAction → the event's kind field.  IGNORE →
+        # 'false_positive' (empty/noise did not signal anything);
+        # CONTINUE → 'backchannel' (mhm/yeah signal); INTERRUPT →
+        # 'real'.  Word count from classify_barge's normalizer.
+        try:
+            from packages.observability.humanness_events import (
+                BargeInDetectedEvent as _BIE,
+                emit_humanness_event as _emit_bie,
+            )
+            if action == BargeAction.IGNORE:
+                _bkind = "false_positive"
+            elif action == BargeAction.CONTINUE:
+                _bkind = "backchannel"
+            else:
+                _bkind = "real"
+            _wc = len(text.split())
+            _emit_bie(_BIE(
+                call_id=self.call_id or "?",
+                tenant_id=self.tenant_id or "default",
+                session_id=self.session_id or "?",
+                kind=_bkind,
+                word_count=_wc,
+            ))
+        except Exception:
+            pass
 
     # ── actor handlers (invoked serially by the actor's run loop) ────
 
@@ -2508,6 +2534,40 @@ class TwilioActorSession:
                     self.call_id, turn_gen, len(dropped_by_gate),
                     gate.stats.as_dict(),
                 )
+                # 2026-08-30 (task #141): emit typed
+                # SpeechGateDroppedEvent per dropped sentence so
+                # /trace timeline shows exactly what was gated + why.
+                # Category tells us which safety fired (wait_promise
+                # vs action_confirmation).
+                try:
+                    from packages.observability.humanness_events import (
+                        SpeechGateDroppedEvent as _SGD,
+                        emit_humanness_event as _emit_sgd,
+                    )
+                    for _dropped in dropped_by_gate:
+                        _cat = getattr(
+                            _dropped, "kind", None,
+                        )
+                        _cat_val = (
+                            _cat.value
+                            if _cat is not None and hasattr(_cat, "value")
+                            else str(_cat or "safe")
+                        )
+                        _preview = str(
+                            getattr(_dropped, "text", "")
+                            or _dropped
+                        )[:120]
+                        _emit_sgd(_SGD(
+                            call_id=self.call_id or "?",
+                            tenant_id=getattr(
+                                self, "tenant_id", "default",
+                            ),
+                            session_id=self.session_id or "?",
+                            category=_cat_val,
+                            sentence_preview=_preview,
+                        ))
+                except Exception:
+                    pass
 
             # Signal end-of-stream to the pumper
             await queue.put(None)
