@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.db.session import init_db
-from app.routes import admin, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, sessions, signalwire, telnyx, trace, twilio, vapi, voice
+from app.routes import admin, annotate, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, sessions, signalwire, telnyx, trace, twilio, vapi, voice
 from packages.observability.structured_log import maybe_install as maybe_install_json_logs
 
 
@@ -165,6 +165,11 @@ def create_app() -> FastAPI:
     # Gated by the same ADMIN_TOKEN as admin.router. Unblocks voice-agent's
     # BUG-02 investigation without needing to grep raw log files.
     app.include_router(incident.router)
+    # 2026-08-30 task #94: /admin/annotate — human QA feedback dashboard.
+    # Per-call annotation UI (verdict + per-turn tags + notes + gold flag).
+    # Foundation for LK-judge auto-labels (task #96) + regression sweep
+    # against golden corpus (task #97).
+    app.include_router(annotate.router)
     app.include_router(dashboard.router)
     # 2026-08-29 (humanness debugging + traceability):
     # /trace/{call_id} — tenant-scoped humanness trace view.  Reads

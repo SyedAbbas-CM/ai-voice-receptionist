@@ -10,6 +10,7 @@ from .session import (
 from .models import (
     ApiKey,
     BookingRow,
+    CallAnnotation,
     IdempotencyRow,
     PhoneNumberMapping,
     SessionRow,
@@ -23,4 +24,5 @@ __all__ = [
     "Tenant", "ApiKey", "IdempotencyRow",
     "SessionRow", "TranscriptRow", "BookingRow",
     "PhoneNumberMapping",
+    "CallAnnotation",
 ]

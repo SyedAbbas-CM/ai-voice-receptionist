@@ -203,3 +203,54 @@ class PhoneNumberMapping(Base):
     # Prevents accidentally sending calls to a paused tenant.
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+# ─── Annotation Dashboard (2026-08-30, task #94) ─────────────────────────────
+#
+# Voice-agent training feedback loop. Human reviewer annotates each call
+# with pass/fail verdict + per-turn tags + free-text notes; Phase 3 (task
+# #96) will auto-populate `auto_labels` via LK judges; Phase 4 (task #97)
+# matches against `is_gold` reference corpus for regression sweep on
+# every deploy. Design notes: see alembic 20260830_0004.
+
+
+class CallAnnotation(Base):
+    """One QA annotation per call.
+
+    Unique on call_id — save-again is UPDATE, not INSERT. Route uses
+    upsert semantics so the reviewer can iterate without creating dupes.
+    """
+    __tablename__ = "call_annotations"
+    __table_args__ = (
+        UniqueConstraint("call_id", name="uq_call_annotation_call_id"),
+        Index("idx_call_annotations_tenant_updated", "tenant_id", "updated_at"),
+        Index("idx_call_annotations_gold", "is_gold"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Raw Twilio CA-SID — no `twilio_` prefix. Route strips prefix on input.
+    call_id: Mapped[str] = mapped_column(String, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # 'win' | 'fail' | 'mixed' | 'unreviewed'. No CHECK constraint so we
+    # can add labels later without a migration.
+    verdict: Mapped[str] = mapped_column(String, nullable=False, default="unreviewed")
+    # JSON list of {turn_idx, tag, comment}. Freeform now so the UI can
+    # iterate on tag vocabulary without schema churn. Example:
+    #   [{"turn_idx": 3, "tag": "wrong_service_asked",
+    #     "comment": "should have asked follow-up-of-what"}]
+    turn_tags: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # JSON dict of {judge_name: {verdict, reasoning}}. Empty until Phase
+    # 3 wires LK judges. Reviewer sees these alongside their own tags.
+    auto_labels: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Golden corpus flag (Phase 4). Reviewer marks a well-behaved call
+    # as gold; regression sweep compares future similar-shaped calls
+    # against these.
+    is_gold: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # Long-form freetext. What the reviewer wants to remember beyond
+    # structured tags.
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Who annotated — currently free-string (email, name). Later ties
+    # to a real users table.
+    reviewer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
