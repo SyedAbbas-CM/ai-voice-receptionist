@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from enum import Enum
+from typing import Optional
 
 
 class BargeAction(str, Enum):
@@ -133,10 +134,23 @@ class BargeInPolicy:
         a barge-in commits.  Same explicit-cue bypass.
       trust_explicit_cues: if False, even explicit cues respect the
         min-floor thresholds (rarely wanted; kept for A/B testing).
+      leading_backchannel_grace_ms: 2026-08-30 (T9). During the
+        first N ms of agent TTS, treat backchannel-shaped speech
+        as CONTINUE regardless of everything else. Explicit cues
+        still fire.  Prevents "agent starts speaking, caller says
+        'mm-hmm' to signal presence, agent stops mid-first-word"
+        pattern.  Default 1000ms matches LK.
+      trailing_backchannel_grace_ms: 2026-08-30 (T9). During the
+        LAST N ms of agent TTS (relative to expected end), treat
+        backchannel-shaped speech as CONTINUE.  Prevents "caller
+        starts responding as agent finishes, quick 'yeah' cuts
+        agent's last word" pattern.  Default 1000ms.
     """
     min_interruption_words: int = 2
     min_interruption_duration_ms: int = 500
     trust_explicit_cues: bool = True
+    leading_backchannel_grace_ms: int = 1000
+    trailing_backchannel_grace_ms: int = 1000
 
     def evaluate(
         self,
@@ -183,6 +197,84 @@ class BargeInPolicy:
                 f"{self.min_interruption_duration_ms}",
             )
         return BargeAction.INTERRUPT, "policy_pass"
+
+    def evaluate_with_tts_boundary(
+        self,
+        text: str,
+        duration_ms: int = 0,
+        *,
+        agent_tts_started_ms_ago: Optional[int] = None,
+        agent_tts_ends_in_ms: Optional[int] = None,
+    ) -> tuple[BargeAction, str]:
+        """T9 (2026-08-30): boundary-aware barge classification.
+
+        Extends `evaluate()` with two grace windows tied to the
+        agent's current TTS timeline:
+
+        Args:
+          text: caller utterance
+          duration_ms: STT-reported utterance duration (0 if unknown)
+          agent_tts_started_ms_ago: how long ago the agent's current
+            TTS turn started.  None if agent isn't speaking.
+          agent_tts_ends_in_ms: how many ms remain in the agent's
+            current TTS turn (from planning or from a naive audio-
+            length estimate).  None if end-time unknown.
+
+        Behavior:
+          * If a backchannel-shaped utterance ("mm-hmm", "yeah")
+            arrives within `leading_backchannel_grace_ms` of TTS
+            start → CONTINUE with reason 'leading_backchannel_grace'
+          * If a backchannel-shaped utterance arrives within
+            `trailing_backchannel_grace_ms` of TTS end →
+            CONTINUE with reason 'trailing_backchannel_grace'
+          * Explicit interrupt cues ("stop"/"wait") always bypass
+            the grace windows — same policy as everywhere else in
+            this class.
+          * Non-backchannel utterances fall through to normal
+            `evaluate()` (min_words / min_duration gates apply).
+
+        Falls back to the timing-free `evaluate()` when neither
+        agent_tts_started_ms_ago nor agent_tts_ends_in_ms is provided.
+        """
+        # Explicit-cue bypass: always fire regardless of TTS timing.
+        has_explicit = self.trust_explicit_cues and any(
+            p.search(text) for p in _INTERRUPT_PATTERNS
+        )
+        if has_explicit:
+            return BargeAction.INTERRUPT, "explicit_cue"
+        # Classify via the base — need to know if it's a backchannel.
+        base = classify_barge(text)
+        # Only apply grace windows to CONTINUE-shaped (backchannel)
+        # signals.  For explicit multi-word utterances (base=INTERRUPT)
+        # the grace windows don't change the outcome — those get
+        # the normal min-word/duration gates via evaluate().
+        if base == BargeAction.CONTINUE:
+            # Leading grace.
+            if (
+                agent_tts_started_ms_ago is not None
+                and 0 <= agent_tts_started_ms_ago
+                < self.leading_backchannel_grace_ms
+            ):
+                return (
+                    BargeAction.CONTINUE,
+                    f"leading_backchannel_grace:"
+                    f"{agent_tts_started_ms_ago}<"
+                    f"{self.leading_backchannel_grace_ms}",
+                )
+            # Trailing grace.
+            if (
+                agent_tts_ends_in_ms is not None
+                and 0 <= agent_tts_ends_in_ms
+                < self.trailing_backchannel_grace_ms
+            ):
+                return (
+                    BargeAction.CONTINUE,
+                    f"trailing_backchannel_grace:"
+                    f"{agent_tts_ends_in_ms}<"
+                    f"{self.trailing_backchannel_grace_ms}",
+                )
+        # No grace applied → normal path.
+        return self.evaluate(text, duration_ms)
 
 
 DEFAULT_BARGE_POLICY = BargeInPolicy()
