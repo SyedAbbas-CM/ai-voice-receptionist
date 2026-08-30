@@ -496,6 +496,11 @@ class ReceptionistBrain:
         # zero behavior change).
         _policy_directive: Optional[str] = None
         _policy_decision = None
+        # Task #150 (context discovery) directive — set inside the
+        # policy-enabled block below when the resolved service needs
+        # context.  Declared here so downstream injection code can
+        # reference it unconditionally.
+        _discovery_directive: Optional[str] = None
         if getattr(_brain_settings, "next_action_policy_enabled", False):
             try:
                 from .next_action_synthesizer import (
@@ -554,6 +559,63 @@ class ReceptionistBrain:
                     )
                     if _spoken_service:
                         _known_slots["service"] = _spoken_service
+                # 2026-08-30 (task #150 wire): DISCOVER_CONTEXT branch.
+                # When the resolved service needs context (e.g.
+                # 'Follow-up visit' needs original_procedure /
+                # original_provider / original_visit_date) AND we
+                # don't yet have those context slots, the discovery
+                # orchestrator takes over.  Policy is suppressed on
+                # this turn — the LLM sees ONLY the discovery
+                # directive (narrow scope, same LK sub-agent shape as
+                # slot-capture prompts) and asks the next context
+                # question.  Once all context slots are filled,
+                # orchestrator hands back and normal ASK_SLOT
+                # progresses.  See audit at
+                # docs/product/journey-audit-follow-up-clinic-2026-08-29.md
+                # for the gap this closes.
+                _discovery_directive: Optional[str] = None
+                try:
+                    from packages.dialogue.context_discovery import (
+                        ContextDiscoveryOrchestrator,
+                    )
+                    _svc = _known_slots.get("service")
+                    _existing_disc = getattr(
+                        state, "_context_discovery", None,
+                    )
+                    # Build one if service is known AND we don't
+                    # already have an orchestrator for it.
+                    if _svc and _existing_disc is None:
+                        _new_disc = (
+                            ContextDiscoveryOrchestrator.for_service(_svc)
+                        )
+                        if _new_disc is not None:
+                            state._context_discovery = _new_disc
+                            _existing_disc = _new_disc
+                    # If orchestrator exists AND is not complete,
+                    # inject its directive.
+                    if (
+                        _existing_disc is not None
+                        and not _existing_disc.is_complete()
+                    ):
+                        _discovery_directive = (
+                            _existing_disc.as_directive_note()
+                        )
+                    # If orchestrator is complete, tear down so it
+                    # doesn't re-fire on future turns.
+                    if (
+                        _existing_disc is not None
+                        and _existing_disc.is_complete()
+                    ):
+                        try:
+                            state._context_discovery = None
+                        except Exception:
+                            pass
+                except Exception as _disc_err:
+                    import logging as _disc_log
+                    _disc_log.getLogger(__name__).warning(
+                        "context_discovery wire failed (non-fatal): %s",
+                        _disc_err,
+                    )
                 _missing = compute_missing_slots(
                     known_slots=_known_slots,
                     recent_caller_texts=_recent_caller_texts,
@@ -662,11 +724,63 @@ class ReceptionistBrain:
         # The actor stashes this on state as `_slot_capture_prompt`
         # for the duration of the capture.  Cleared when the actor
         # calls exit_slot_capture.  Non-slot turns are unaffected.
+        # 2026-08-30 (Phase 2 wire, per networking's 3b99cbd):
+        # stash opening_system_prompt on first turn so session_manager
+        # can persist it to SessionRow.opening_system_prompt.  This is
+        # the WIDER prompt (what the agent looks like without any
+        # sub-agent scope).  Persist-side has upsert semantics that
+        # protect against sub-agent scope overwriting this on later
+        # persists — so it's safe to set every turn defensively.
+        try:
+            if not getattr(state, "_opening_system_prompt", None):
+                state._opening_system_prompt = self.system_prompt
+        except Exception:
+            pass
         _slot_prompt = getattr(state, "_slot_capture_prompt", None)
         _slot_prompt_active = bool(
             _slot_prompt
             and getattr(_slot_prompt, "instructions", "")
         )
+        # 2026-08-30 (Phase 2 wire, per networking's 3b99cbd): stash
+        # the instructions delta on state so session_manager can
+        # persist it on the TranscriptTurn.  Two cases: (a) slot-
+        # capture scope IS active → the narrow prompt is the delta;
+        # (b) discovery scope IS active → the discovery directive is
+        # the delta; (c) neither → NULL delta (most turns).  LK
+        # judges reconstruct effective instructions per turn by
+        # walking backward to find the most recent non-null delta,
+        # falling back to opening_system_prompt (also stashed by
+        # session_manager on first LLM prep).
+        try:
+            if _slot_prompt_active:
+                state._pending_instructions_delta = (
+                    _slot_prompt.instructions
+                )
+            elif _discovery_directive:
+                state._pending_instructions_delta = _discovery_directive
+            else:
+                # Detect exit-from-scope for the delta sentinel.  If
+                # the previous turn had a delta and this turn doesn't,
+                # write the sentinel so the judge knows scope resumed
+                # to wider.  Read-back from state is fine — this is
+                # ephemeral per-turn.
+                _prev = getattr(state, "_last_delta_kind", None)
+                if _prev in ("slot_capture", "discovery"):
+                    state._pending_instructions_delta = "exit_scope"
+                else:
+                    state._pending_instructions_delta = None
+        except Exception:
+            pass
+        # Track the delta kind so exit detection works next turn.
+        try:
+            if _slot_prompt_active:
+                state._last_delta_kind = "slot_capture"
+            elif _discovery_directive:
+                state._last_delta_kind = "discovery"
+            else:
+                state._last_delta_kind = None
+        except Exception:
+            pass
         if _slot_prompt_active:
             # Log + emit for traceability.  Every slot-capture turn shows
             # up in /trace so business owners see the narrow-scope
@@ -724,6 +838,19 @@ class ReceptionistBrain:
                 if _policy_directive:
                     messages.append({
                         "role": "system", "content": _policy_directive,
+                    })
+                # 2026-08-30 (task #150): DISCOVER_CONTEXT branch.
+                # When active, appended LAST so the LLM sees the
+                # discovery directive as most recent + most binding.
+                # This overrides normal policy asking — while
+                # context-discovery is open, LLM asks the current
+                # context question and NOTHING else.  Same shape as
+                # LK's beta/workflows/task_group.py active-task
+                # instructions.
+                if _discovery_directive:
+                    messages.append({
+                        "role": "system",
+                        "content": _discovery_directive,
                     })
             messages.extend(state.to_llm_messages())
             with tracer.span(
