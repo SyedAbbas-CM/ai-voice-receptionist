@@ -72,11 +72,19 @@ class DeepgramFluxSTT(STTProvider):
         audio_chunks: AsyncIterator[bytes],
         sample_rate: int = 16000,
         encoding: str = "linear16",
+        keyterms: Optional[list[str]] = None,
     ) -> AsyncIterator[STTEvent]:
         """Stream to Flux /v2/listen and yield STTEvents.  Native turn
         events map to eager_end_of_turn / end_of_turn / turn_resumed
         kinds — turn manager should trust these directly and skip its
-        own confirm window."""
+        own confirm window.
+
+        `keyterms` (LK-steal T3, 2026-08-30): per-connection tenant
+        keyterm boost list. When None (backwards compat), falls back to
+        the historical hardcoded _DENTAL_KEYTERMS set so the demo tenant
+        keeps working. When provided as an empty list, sends ZERO
+        keyterm params (opt-out for tests / minimal-boost tenants).
+        When provided non-empty, replaces the hardcoded set entirely."""
         if not self.api_key:
             raise RuntimeError("DEEPGRAM_API_KEY not set")
 
@@ -110,7 +118,13 @@ class DeepgramFluxSTT(STTProvider):
         # dental keyterm boost was silently never applied.
         if self.language_hint and self.model == "flux-general-multi":
             params.append(("language_hint", self.language_hint))
-        for keyterm in _DENTAL_KEYTERMS:
+        # Keyterm boost: prefer per-connection tenant list if provided,
+        # else fall back to hardcoded _DENTAL_KEYTERMS for backwards
+        # compat with pre-T3 callers. Empty list = deliberate opt-out.
+        _effective_keyterms = (
+            keyterms if keyterms is not None else list(_DENTAL_KEYTERMS)
+        )
+        for keyterm in _effective_keyterms:
             params.append(("keyterm", keyterm))
 
         url = f"{self._WS_URL}?{urlencode(params)}"

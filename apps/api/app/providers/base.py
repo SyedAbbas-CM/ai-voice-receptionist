@@ -119,13 +119,22 @@ class STTProvider(ABC):
         audio_chunks: AsyncIterator[bytes],
         sample_rate: int = 16000,
         encoding: str = "linear16",
+        keyterms: Optional[list[str]] = None,
     ) -> AsyncIterator[STTEvent]:
         """Optional streaming STT. Default raises so callers can detect lack of support.
 
         `audio_chunks` is an async iterator of raw PCM16 (or µ-law if
         encoding='mulaw') frames from the transport. Yields STTEvent
         objects. Callers should route partials to a barge-in detector
-        and finals to the brain."""
+        and finals to the brain.
+
+        `keyterms` (LK-steal T3, 2026-08-30): optional per-connection
+        boost terms — tenant name, service list, staff names, etc.
+        Providers that don't support keyterm boosting should ignore it
+        rather than error, so callers can pass it unconditionally.
+        `None` = don't send the param at all (some providers, notably
+        Deepgram Nova-3 vs Flux, differ on whether to still send the
+        provider's baseline hardcoded set as a fallback)."""
         raise NotImplementedError(f"{self.name} does not support streaming STT")
         yield  # pragma: no cover — makes this an async generator for type checkers
 

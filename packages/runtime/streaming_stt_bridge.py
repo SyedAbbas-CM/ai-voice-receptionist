@@ -450,10 +450,52 @@ class StreamingSTTBridge:
         else:
             audio_source = _audio_iter()
 
+        # T3 LK-steal (2026-08-30): resolve tenant-aware keyterms from
+        # the actor's business_profile so Deepgram boosts THIS tenant's
+        # name / service list / staff / etc. instead of the hardcoded
+        # dental fallback. Cheap (single import + one pass over
+        # services list). See packages/runtime/keyterms.py for the
+        # priority order + why this beats the hardcoded set.
+        _keyterms: Optional[list[str]] = None
+        try:
+            from packages.runtime.keyterms import compute_keyterms
+            _biz = getattr(self._actor, "business", None)
+            if _biz is not None:
+                _keyterms = compute_keyterms(_biz)
+                # Log once per connection so we can see in per-call
+                # logs which set went to Deepgram. Truncate to keep
+                # the line short (real list can be 30-60 entries).
+                _preview = ", ".join(_keyterms[:8])
+                log.info(
+                    "STT keyterms tenant=%s call=%s count=%d first=[%s...]",
+                    getattr(self._actor, "tenant_id", "?"),
+                    self._actor.call_id,
+                    len(_keyterms),
+                    _preview,
+                )
+        except Exception as e:
+            # Never let keyterm resolution crash a call. Fall back to
+            # None (provider uses its baseline hardcoded set).
+            log.warning(
+                "keyterm resolution failed call=%s err=%r — falling back to provider default",
+                self._actor.call_id, e,
+            )
+
+        # Backwards-compat: some providers/fakes don't accept the new
+        # `keyterms` kwarg yet. Introspect once so we don't crash when
+        # calling a partially-updated implementation.
+        import inspect as _inspect
+        _stt_sig = _inspect.signature(self._stt.transcribe_stream)
+        _stt_kwargs: dict = {
+            "sample_rate": sample_rate,
+            "encoding": encoding,
+        }
+        if "keyterms" in _stt_sig.parameters:
+            _stt_kwargs["keyterms"] = _keyterms
+
         async for stt_ev in self._stt.transcribe_stream(
             audio_source,
-            sample_rate=sample_rate,
-            encoding=encoding,
+            **_stt_kwargs,
         ):
             if self._stop_event.is_set():
                 return

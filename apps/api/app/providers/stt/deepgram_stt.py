@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -88,8 +88,14 @@ class DeepgramSTT(STTProvider):
         audio_chunks: AsyncIterator[bytes],
         sample_rate: int = 16000,
         encoding: str = "linear16",
+        keyterms: Optional[list[str]] = None,
     ) -> AsyncIterator[STTEvent]:
         """Stream audio to Deepgram's WebSocket and yield STTEvents.
+
+        `keyterms` (LK-steal T3, 2026-08-30): same contract as
+        deepgram_flux_stt.py — None falls back to hardcoded
+        _DENTAL_KEYTERMS for backwards compat, [] opts out, non-empty
+        replaces.
 
         Deepgram emits Results messages every ~200-300ms with is_final=False
         (interim) or is_final=True (endpointed final). We map those to
@@ -152,7 +158,13 @@ class DeepgramSTT(STTProvider):
         # Nova-3 supports repeated `keyterm` params — kills mishearings
         # like "student plans" for "tooth implants".  See
         # https://developers.deepgram.com/docs/keyterm
-        for keyterm in _DENTAL_KEYTERMS:
+        # T3 (2026-08-30): per-connection keyterms override the
+        # hardcoded set. None = backwards-compat default; [] = opt-out;
+        # non-empty = tenant list from compute_keyterms.
+        _effective_keyterms = (
+            keyterms if keyterms is not None else list(_DENTAL_KEYTERMS)
+        )
+        for keyterm in _effective_keyterms:
             params.append(("keyterm", keyterm))
         url = f"{self._WS_URL}?{urlencode(params)}"
         headers = {"Authorization": f"Token {self.api_key}"}
