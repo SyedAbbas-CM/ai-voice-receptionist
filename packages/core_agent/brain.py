@@ -1569,22 +1569,60 @@ class ReceptionistBrain:
                 # notes are preserved after the prefix.  Only fires
                 # for booking tools + only when prefix is non-empty.
                 from .classifiers.write_guard import BOOKING_TOOL_NAMES, validate_write
-                if tc.name in BOOKING_TOOL_NAMES:
+                # 2026-08-30 (Gap 5 + task #144): booking-flow
+                # continuation. Augment tool args from discovery
+                # answers.  Two independent injections:
+                #   (a) notes prefix — human-readable context for
+                #       front-desk staff (task #144).
+                #   (b) original_procedure — machine-readable slot
+                #       for _service_duration() sub-typing (Gap 5).
+                # Both fire on booking tools AND check_availability
+                # since availability search uses duration too.
+                if tc.name in BOOKING_TOOL_NAMES or tc.name == (
+                    "check_availability"
+                ):
                     try:
-                        _notes_prefix = getattr(
-                            state, "_discovery_notes_prefix", "",
+                        _args = dict(tc.arguments or {})
+                        _mutated = False
+                        # (a) notes prefix — booking tools only.
+                        if tc.name in BOOKING_TOOL_NAMES:
+                            _notes_prefix = getattr(
+                                state, "_discovery_notes_prefix", "",
+                            )
+                            if _notes_prefix:
+                                _existing_notes = str(
+                                    _args.get("notes") or ""
+                                ).strip()
+                                if _existing_notes:
+                                    _args["notes"] = (
+                                        f"{_notes_prefix}. "
+                                        f"{_existing_notes}"
+                                    )
+                                else:
+                                    _args["notes"] = _notes_prefix
+                                _mutated = True
+                                # Consume — don't re-apply on retry.
+                                try:
+                                    state._discovery_notes_prefix = ""
+                                except Exception:
+                                    pass
+                        # (b) original_procedure — booking tools OR
+                        # check_availability.  Read from discovery
+                        # answers (populated when orchestrator
+                        # completed).  Don't overwrite if LLM already
+                        # passed one.
+                        _disc_answers = getattr(
+                            state, "_discovery_answers", None,
+                        ) or {}
+                        _orig_proc = _disc_answers.get(
+                            "original_procedure",
                         )
-                        if _notes_prefix:
-                            _args = dict(tc.arguments or {})
-                            _existing_notes = str(
-                                _args.get("notes") or ""
-                            ).strip()
-                            if _existing_notes:
-                                _args["notes"] = (
-                                    f"{_notes_prefix}. {_existing_notes}"
-                                )
-                            else:
-                                _args["notes"] = _notes_prefix
+                        if _orig_proc and not _args.get(
+                            "original_procedure"
+                        ):
+                            _args["original_procedure"] = _orig_proc
+                            _mutated = True
+                        if _mutated:
                             tc = tc.__class__(
                                 id=tc.id,
                                 name=tc.name,
@@ -1592,18 +1630,12 @@ class ReceptionistBrain:
                             )
                             import logging as _bfa_log
                             _bfa_log.getLogger(__name__).info(
-                                "BOOKING_NOTES_AUGMENTED session=%s "
-                                "prefix=%r existing_len=%d",
-                                state.session_id,
-                                _notes_prefix[:80],
-                                len(_existing_notes),
+                                "BOOKING_ARGS_AUGMENTED session=%s "
+                                "tool=%s orig_proc=%r notes_len=%d",
+                                state.session_id, tc.name,
+                                (_orig_proc or "")[:40],
+                                len(str(_args.get("notes") or "")),
                             )
-                            # Consume — don't re-apply on a possible
-                            # retry within the same turn.
-                            try:
-                                state._discovery_notes_prefix = ""
-                            except Exception:
-                                pass
                     except Exception as _bfa_err:
                         import logging as _bfa_log
                         _bfa_log.getLogger(__name__).warning(

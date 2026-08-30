@@ -31,6 +31,34 @@ class ServiceOffering(BaseModel):
     duration_minutes: int = 30
     description: Optional[str] = None
     price: Optional[str] = None
+    # 2026-08-30 (audit Gap 5): container-service duration overrides.
+    # For services that are actually a category shared across multiple
+    # real bookings (Follow-up visit is the canonical example — post-
+    # implant vs post-crown vs post-antibiotic all differ in duration),
+    # this map lets a specific answer to the discovery context slot
+    # override the base duration_minutes.  Keys are lower-cased,
+    # partial-match tokens from the caller's `original_procedure`
+    # answer; values are the correct duration in minutes.
+    #
+    # Example (populated on Follow-up visit in sample-data):
+    #   duration_by_original_procedure = {
+    #       "implant":        30,   # osseointegration check
+    #       "root canal":     45,   # endo recheck / crown seat prep
+    #       "crown":          60,   # crown seat visit
+    #       "extraction":     15,   # suture removal / dry socket check
+    #       "antibiotic":     15,   # short recheck
+    #       "filling":        20,   # post-op sensitivity check
+    #   }
+    #
+    # Resolution: `_service_duration(service_name, context=None)` reads
+    # the caller's answer, lowercases it, finds the first key whose
+    # substring appears in the answer.  Falls back to duration_minutes
+    # when no key matches (unknown procedure).
+    #
+    # Empty dict = no override behavior; regular service.  Non-breaking.
+    duration_by_original_procedure: dict[str, int] = Field(
+        default_factory=dict,
+    )
 
 
 class BusinessProfile(BaseModel):

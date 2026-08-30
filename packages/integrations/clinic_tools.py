@@ -23,6 +23,19 @@ def build_clinic_tools() -> list[ToolDefinition]:
                 "properties": {
                     "service": {"type": "string", "description": "Service or appointment type"},
                     "date": {"type": "string", "description": "ISO date YYYY-MM-DD"},
+                    # 2026-08-30 (audit Gap 5): optional. For follow-up
+                    # appointments, populated by brain augmenter from
+                    # discovery answers so slot search uses the correct
+                    # duration for the specific procedure.
+                    "original_procedure": {
+                        "type": "string",
+                        "description": (
+                            "For follow-up appointments only: original "
+                            "procedure name.  Auto-populated from "
+                            "discovery context — LLM does not need to "
+                            "pass this manually."
+                        ),
+                    },
                 },
                 "required": ["service", "date"],
             },
@@ -38,6 +51,26 @@ def build_clinic_tools() -> list[ToolDefinition]:
                     "service": {"type": "string"},
                     "start_iso": {"type": "string", "description": "ISO datetime YYYY-MM-DDTHH:MM"},
                     "notes": {"type": "string"},
+                    # 2026-08-30 (audit Gap 5): optional. Only meaningful
+                    # for container services (Follow-up visit).  When
+                    # passed, the tool routes through a
+                    # `duration_by_original_procedure` map to pick a
+                    # duration matched to the specific procedure (post-
+                    # implant ≠ post-crown ≠ post-antibiotic).  Brain's
+                    # booking-notes augmenter auto-injects this from
+                    # state._discovery_answers when discovery
+                    # orchestrator collected the answer.  LLM does NOT
+                    # need to populate directly.
+                    "original_procedure": {
+                        "type": "string",
+                        "description": (
+                            "For follow-up appointments only: the "
+                            "original procedure name (e.g. 'implant', "
+                            "'root canal', 'filling'). Auto-populated "
+                            "from discovery context — LLM does not "
+                            "need to pass this manually."
+                        ),
+                    },
                 },
                 "required": ["caller_name", "phone", "service", "start_iso"],
             },
@@ -181,10 +214,42 @@ class ClinicToolHandler:
             pass
         return None
 
-    def _service_duration(self, name: str) -> int:
+    def _service_duration(
+        self, name: str, original_procedure: Optional[str] = None,
+    ) -> int:
+        """Resolve the booking duration for a service.
+
+        2026-08-30 (audit Gap 5): container services (Follow-up visit
+        is the canonical example) share a single fixture entry but
+        need different durations based on WHAT the follow-up is FOR.
+        A post-implant recheck is 30min, a post-crown seat is 60min,
+        a post-antibiotic recheck is 15min.
+
+        When `original_procedure` is provided (typically populated by
+        DISCOVER_CONTEXT orchestrator's answer_context_task tool),
+        we lower-case both the answer + each key in the service's
+        `duration_by_original_procedure` map and return the first
+        substring-match duration.  Falls back to `duration_minutes`
+        when no key matches (unknown procedure) OR when the service
+        has an empty override map (regular service).
+
+        Backward-compat: `original_procedure=None` preserves the
+        pre-Gap-5 signature exactly — all existing callers keep
+        working unchanged.
+        """
         for s in self.business.services:
-            if s.name.lower() == name.lower():
-                return s.duration_minutes
+            if s.name.lower() != name.lower():
+                continue
+            # Container-service override path.
+            overrides = getattr(
+                s, "duration_by_original_procedure", None,
+            ) or {}
+            if original_procedure and overrides:
+                ans = str(original_procedure).lower()
+                for key, minutes in overrides.items():
+                    if str(key).lower() in ans:
+                        return int(minutes)
+            return s.duration_minutes
         return 30
 
     def _resolve_service_or_error(
@@ -397,7 +462,13 @@ class ClinicToolHandler:
                             "candidates": day["candidates"],
                         },
                     )
-                duration = self._service_duration(service)
+                # Gap 5: check_availability accepts original_procedure
+                # too so slot search uses correct duration for
+                # container services.
+                _orig_proc_avail = call.arguments.get("original_procedure")
+                duration = self._service_duration(
+                    service, original_procedure=_orig_proc_avail,
+                )
                 slots = self.calendar.list_slots(day, duration)
                 return ToolResult(
                     tool_call_id=call.id,
@@ -436,7 +507,13 @@ class ClinicToolHandler:
                 if isinstance(_service_result, ToolResult):
                     return _service_result
                 service = _service_result
-                duration = self._service_duration(service)
+                # 2026-08-30 (Gap 5): pass original_procedure through
+                # to _service_duration so container services
+                # (Follow-up visit) get their sub-typed duration.
+                _orig_proc = call.arguments.get("original_procedure")
+                duration = self._service_duration(
+                    service, original_procedure=_orig_proc,
+                )
                 # R3 P4 (task #371, slim v1): PHONE PRECONDITION.
                 # Run the LLM-supplied phone through libphonenumber
                 # BEFORE hitting the calendar.  Two purposes:

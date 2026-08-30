@@ -60,7 +60,18 @@
     {
       "name": "Follow-up visit",
       "duration_minutes": 30,
-      "description": "Recheck after a procedure — implant healing check, post-antibiotic recheck, second half of a two-visit treatment. Free if within thirty days of the original visit, otherwise seventy-five dollars."
+      "description": "Recheck after a procedure — implant healing check, post-antibiotic recheck, second half of a two-visit treatment. Free if within thirty days of the original visit, otherwise seventy-five dollars.",
+      "duration_by_original_procedure": {
+        "implant":     30,
+        "root canal":  45,
+        "crown":       60,
+        "extraction":  15,
+        "antibiotic":  15,
+        "filling":     20,
+        "denture":     30,
+        "bridge":      45,
+        "veneer":      30
+      }
     },
     {
       "name": "Adult recall exam",
