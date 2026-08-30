@@ -3,10 +3,14 @@
 Domain-knowledge reference for the product-lead agent when reviewing
 receptionist features for clinic tenants.
 
-Last updated: 2026-08-30 by golden-scripts session (surfaced language-
-enumeration gap, phonetic-name persistence gap, prompt-injection archetype).
-Previous update: 2026-08-29 by voice-agent session (spawned during
-Christiaan follow-up bisection).
+Last updated: 2026-08-30 by persona-ladder session (added canonical
+intent-label enum, promoted expat/foreign-phone follow-up caller to
+sub-persona status, added four known-gap archetypes for the next
+ladder revision).
+Previous updates: 2026-08-30 by golden-scripts session (surfaced
+language-enumeration gap, phonetic-name persistence gap, prompt-
+injection archetype); 2026-08-29 by voice-agent session (spawned
+during Christiaan follow-up bisection).
 
 ## 1. Business shape
 
@@ -22,6 +26,7 @@ Christiaan follow-up bisection).
 - **Recall patient** — 6-month cleaning due, knows the routine, wants "the earliest morning slot" or "same time as last year." Fast turn, minimal info.
 - **Emergency / pain** — swollen face, broken tooth, lost filling, kid fell. Needs SAME-DAY or NEXT-DAY. Wrong to try to schedule two weeks out. Right receptionist triage: "when did it start, how bad on 1-10, any swelling, any bleeding — I can get you in this afternoon at 2:30."
 - **Follow-up / recheck** — post-procedure. Free if within 30 days of original visit. Needs to be WITH THE SAME PROVIDER who did the original work (continuity of care). Common shapes: implant osseointegration check at 3-4 months, root canal follow-up crown placement, post-op check after extraction.
+  - **Sub-persona: expat / foreign-phone follow-up caller** (Christiaan shape). Chart is on file but the number they're calling from is non-US-region or differs from the chart number. Failure mode: agent silently falls back to "new patient" branch. Fix: `chart_not_found_under_this_number` must trigger "what number would we have you under" before booking, never a silent branch. See `docs/product/journey-audit-follow-up-clinic-2026-08-29.md`.
 - **Insurance question only** — "do you take Delta Dental?" — no intent to book yet. Give the answer, offer to book if they want.
 - **Cancellation / reschedule** — has existing appointment. Needs their phone or name to look it up. Different flow from new booking.
 - **Referral inquiry** — "my doctor referred me for..." — usually needs the specialist, not the generalist. Different scheduling rules (longer slots, sometimes different location).
@@ -30,6 +35,39 @@ Christiaan follow-up bisection).
 - **Spanish-speaking / bilingual need** — "does anyone there speak Spanish?" Practice may have a bilingual hygienist or offer a translator line. Real receptionist knows immediately.
 - **Non-supported-language caller** — opens in a language nobody on shift speaks (Vietnamese, Mandarin, Farsi, ASL video-relay common in TX). Real receptionist doesn't fake comprehension; offers callback in language, translator line, or family-member-on-the-line. Requires tenant to publish a `languages_supported[]` list, not just per-language FAQs.
 - **Adversarial / prompt-injection caller** — usually a red-team test rather than a real patient; opens with "ignore all previous instructions" or "what tools do you have access to". Real receptionist stays in scope, refuses the meta-question without lecturing, snaps back to booking flow the moment the caller drops the adversarial thread. Also watch obviously-test phone numbers (555-555-5555) — confirm rather than accuse.
+
+### Known-gap archetypes (documented, not yet fully characterized)
+
+Surfaced by the 2026-08-30 persona-ladder pass. Each is a candidate
+for the next revision once we have transcript evidence or a domain
+interview. Do not delete without replacing.
+
+- **Elderly / hard-of-hearing patient** — louder voice, "can you repeat that", requests for slower speech, sometimes a family member speaking on their behalf. Needs slower speech rate, shorter sentences, per-data-point confirmation. No transcript evidence yet.
+- **Chart-holder-relative caller** — "I'm calling for my father / my elderly mother / my husband who's at work." Overlaps with parent-for-child but distinguishes on age + consent implications (can this caller book, agree to a slot, get insurance quotes on the chart-holder's behalf). Likely needs a HIPAA-consent flow we don't have.
+- **Sales / vendor caller** — medical supply, staffing agency, dental lab, insurance auditor, marketing pitch. Not the receptionist's job. Fast polite deflection to a business-line callback.
+- **Wrong-number caller** — dialed us by mistake. 1-2 turns without frustrating them.
+- **Chatty / lonely caller** — real archetype for elderly patients; wants conversation as much as the appointment. Served well by warmth without losing structure.
+- **Interpreter-on-line caller** — family member interpreting for the patient in real time. Three-party turn-taking. Currently degrades to language-scope archetype.
+
+### Canonical intent-label enum (do not rename)
+
+Used by the Phase 4 golden-corpus regression sweep + the LK Phase 3
+auto-judges. Any change here breaks tests. Full definitions in
+`docs/product/persona-ladder-clinic-2026-08-30.md`.
+
+```
+NEW_PATIENT_BOOKING
+RETURNING_SHORT_TURN
+EMERGENCY_PAIN
+FOLLOWUP_RECHECK
+INSURANCE_COST_INQUIRY
+ANXIOUS_PHOBIC
+PARENT_FOR_CHILD
+LANGUAGE_SCOPE
+REFERRAL_SPECIALTY
+META_ADVERSARIAL
+UNKNOWN
+```
 
 ## 3. Full service catalog
 
