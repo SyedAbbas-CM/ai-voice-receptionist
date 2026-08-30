@@ -526,6 +526,7 @@ class ReceptionistBrain:
                 from .missing_slots import (
                     compute_missing_slots,
                     recent_caller_texts_from_state,
+                    resolve_service_from_utterances,
                 )
                 _known_slots = _extract_known_slots(state, [])
                 _recent_caller_texts = (
@@ -536,6 +537,23 @@ class ReceptionistBrain:
                 # on where in the turn boundary we are.
                 if user_text and user_text not in _recent_caller_texts:
                     _recent_caller_texts.insert(0, user_text)
+                # 2026-08-30 (BUG #149 fix): augment known_slots with
+                # service extracted from caller utterance.
+                # _extract_known_slots reads only from booking tool
+                # receipts, so 'an exam' / 'follow-up' / 'cleaning'
+                # never landed there until book_appointment ran — and
+                # book_appointment couldn't run because service was
+                # 'missing.'  Break the deadlock: consult
+                # resolve_service on recent utterances directly.
+                if not _known_slots.get("service"):
+                    _biz = getattr(state, "business", None) or (
+                        getattr(self, "business", None)
+                    )
+                    _spoken_service = resolve_service_from_utterances(
+                        _recent_caller_texts, _biz,
+                    )
+                    if _spoken_service:
+                        _known_slots["service"] = _spoken_service
                 _missing = compute_missing_slots(
                     known_slots=_known_slots,
                     recent_caller_texts=_recent_caller_texts,

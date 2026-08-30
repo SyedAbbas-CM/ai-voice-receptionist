@@ -157,6 +157,67 @@ def compute_missing_slots(
         return []
 
 
+def resolve_service_from_utterances(
+    caller_texts: list[str],
+    business,
+) -> Optional[str]:
+    """Consult service_aliases.resolve_service on each recent caller
+    utterance; return the first canonical service name that matches.
+
+    2026-08-30 (bug #149 fix): _extract_known_slots reads only from
+    completed booking tool receipts.  Caller says 'an exam' / 'for
+    follow-up' / 'cleaning' — those never populate known_slots['service']
+    until book_appointment is called, which never happens because
+    policy is stuck asking for the service that the caller ALREADY
+    said.  This helper lets known_slots learn service from utterance
+    directly.
+
+    Returns None on:
+      * empty caller_texts
+      * business with no services
+      * no utterance matched MATCH_EXACT or MATCH_FUZZY
+      * any exception (silent — must not break brain path)
+
+    We accept MATCH_FUZZY (confidence 0.6-0.9) here — the LLM will
+    still speak the canonical name in confirmation so a wrong fuzzy
+    match gets caught by the caller before booking.  AMBIGUOUS +
+    UNKNOWN return None (correct — those SHOULD stay as missing
+    slots so the agent asks).
+    """
+    try:
+        services = getattr(business, "services", None) if business is not None else None
+        if not services:
+            return None
+        from packages.integrations.service_aliases import (
+            resolve_service, ServiceMatchKind,
+        )
+        for text in caller_texts:
+            if not isinstance(text, str) or not text.strip():
+                continue
+            # Try the whole utterance first, then short substrings.
+            candidates = [text]
+            # Also try short phrases (1-4 words) — real callers embed
+            # service names inside longer utterances ("I'd like to
+            # book an exam for tomorrow" / "I have a bad toothache").
+            # Cheap fallback for the common case.  Single words
+            # matter because many aliases ('cleaning', 'toothache',
+            # 'braces', 'filling', 'exam') are one word.
+            words = text.split()
+            for size in (1, 2, 3, 4):
+                for start in range(0, len(words) - size + 1):
+                    candidates.append(" ".join(words[start:start + size]))
+            for cand in candidates:
+                match = resolve_service(cand, services)
+                if match.kind in (
+                    ServiceMatchKind.MATCH_EXACT,
+                    ServiceMatchKind.MATCH_FUZZY,
+                ) and match.canonical_name:
+                    return match.canonical_name
+    except Exception:
+        pass
+    return None
+
+
 def recent_caller_texts_from_state(state, limit: int = 5) -> list[str]:
     """Extract the last N caller utterances from a conversation state.
 
@@ -210,4 +271,5 @@ def recent_caller_texts_from_state(state, limit: int = 5) -> list[str]:
 __all__ = [
     "compute_missing_slots",
     "recent_caller_texts_from_state",
+    "resolve_service_from_utterances",
 ]
