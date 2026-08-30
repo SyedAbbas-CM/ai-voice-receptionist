@@ -815,6 +815,36 @@ class ReceptionistBrain:
             except Exception:
                 pass
         for _ in range(self.MAX_TOOL_ITERATIONS):
+            # 2026-08-30 (task #151): compute per-iteration effective
+            # tool list.  When context discovery is active we splice
+            # in `answer_context_task` (and `regress_context_tasks`
+            # once at least one task has been visited) so the LLM has
+            # the concrete mechanism to advance the orchestrator.
+            # Regular tool set otherwise (self.tools).
+            _effective_tools = self.tools
+            try:
+                _disc_for_tools = getattr(
+                    state, "_context_discovery", None,
+                )
+                if (
+                    _disc_for_tools is not None
+                    and not _disc_for_tools.is_complete()
+                ):
+                    from packages.dialogue.context_discovery import (
+                        build_discovery_tools,
+                    )
+                    _disc_tools = build_discovery_tools(_disc_for_tools)
+                    if _disc_tools:
+                        _effective_tools = (
+                            list(self.tools) + list(_disc_tools)
+                        )
+            except Exception as _et_err:
+                import logging as _et_log
+                _et_log.getLogger(__name__).warning(
+                    "discovery tools injection failed (falling back "
+                    "to base tools): %s", _et_err,
+                )
+                _effective_tools = self.tools
             if _slot_prompt_active:
                 # Narrow sub-agent scope.  No wider system prompt, no
                 # turn intent, no policy directive.
@@ -921,7 +951,7 @@ class ReceptionistBrain:
                         _mt = token_budget_for_plan(getattr(state, "_semantic_plan", None))
                         async for _kind, _payload, _is_final in self.llm.stream_complete(
                             messages, temperature=0.3, max_tokens=_mt,
-                            tools=self.tools,
+                            tools=_effective_tools,
                         ):
                             if _first_ms is None:
                                 _first_ms = (_t.perf_counter() - _t0) * 1000
@@ -985,7 +1015,7 @@ class ReceptionistBrain:
                     _mt = token_budget_for_plan(getattr(state, "_semantic_plan", None))
                     try:
                         response = await self.llm.complete(
-                            messages, tools=self.tools,
+                            messages, tools=_effective_tools,
                             temperature=0.3, max_tokens=_mt,
                             site="brain.reply",
                         )
@@ -1112,7 +1142,7 @@ class ReceptionistBrain:
                         getattr(state, "_semantic_plan", None),
                     )
                     response = await self.llm.complete(
-                        _rescue_messages, tools=self.tools,
+                        _rescue_messages, tools=_effective_tools,
                         temperature=0.5,  # slightly warmer to unstick
                         max_tokens=_mt_rescue,
                         site="brain.rescue_empty",
@@ -1467,6 +1497,48 @@ class ReceptionistBrain:
                             escalated=escalated,
                         )
 
+                # 2026-08-30 (task #151): intercept discovery tools
+                # BEFORE they hit tool_handler.  answer_context_task
+                # and regress_context_tasks are brain-internal — they
+                # mutate the ContextDiscoveryOrchestrator on state,
+                # not the calendar / CRM.  Returns synthetic receipt.
+                _disc_intercept = None
+                try:
+                    if tc.name in (
+                        "answer_context_task",
+                        "regress_context_tasks",
+                    ):
+                        from packages.dialogue.context_discovery import (
+                            handle_discovery_tool_call,
+                        )
+                        _orch = getattr(state, "_context_discovery", None)
+                        _disc_intercept = handle_discovery_tool_call(
+                            _orch, tc.name, tc.arguments or {},
+                        )
+                except Exception as _di_err:
+                    import logging as _di_log
+                    _di_log.getLogger(__name__).warning(
+                        "discovery intercept failed (falling through): %s",
+                        _di_err,
+                    )
+                if _disc_intercept is not None:
+                    state.add_turn(TranscriptTurn(
+                        role=TurnRole.TOOL,
+                        text=str(_disc_intercept),
+                        tool_call_id=tc.id,
+                        tool_name=tc.name,
+                        tool_args=tc.arguments,
+                        tool_result={
+                            "result": _disc_intercept, "error": None,
+                        },
+                    ))
+                    tool_results_payload.append({
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                        "result": _disc_intercept,
+                        "error": None,
+                    })
+                    continue  # skip normal handler + guard
                 result = await self.tool_handler(tc)
                 state.add_turn(TranscriptTurn(
                     role=TurnRole.TOOL,

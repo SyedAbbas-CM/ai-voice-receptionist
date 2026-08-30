@@ -230,18 +230,26 @@ class ContextDiscoveryOrchestrator:
             return ""
         visited = self.visited_task_repr()
         lines = [
-            f"DISCOVERY: You are collecting context for service "
+            f"DISCOVERY MODE: You are collecting context for service "
             f"'{self.service_name}' before booking.",
             f"CURRENT TASK: {current.description}",
             f"ASK EXACTLY: '{current.ask_prompt}'",
-            "Do NOT ask other questions until this is answered.",
-            "Do NOT proceed to booking or slot-selection yet.",
+            "",
+            "MANDATORY: as soon as the caller answers, call the "
+            "`answer_context_task` tool with their answer.  Do NOT "
+            "just acknowledge and move on — the tool call is what "
+            "advances the flow.  Do NOT proceed to booking or "
+            "slot-selection until every discovery task is answered.",
+            "",
+            "Do NOT ask other questions until this one is answered.",
         ]
         if visited:
             lines.append(
-                "Regression: caller may reference already-answered "
+                "REGRESSION: caller may reference already-answered "
                 "context slots: "
                 + ", ".join(f"{k} ({v})" for k, v in visited.items())
+                + ".  If they want to change an earlier answer, call "
+                "`regress_context_tasks` with the affected task IDs."
             )
         return "\n".join(lines)
 
@@ -260,9 +268,169 @@ class ContextDiscoveryOrchestrator:
         }
 
 
+# ── LLM tool defs for the LK task-group pattern ────────────────
+
+
+# The tool schemas the brain injects when discovery is active.
+# Adapted from LK's beta/workflows/task_group.py — each active
+# AgentTask exposes tools; here we mirror that with two callable
+# names the LLM can invoke.
+#
+# `answer_context_task` — advance the current task with the answer
+#   the caller just gave.  LLM extracts the answer from the caller's
+#   utterance and passes it.  brain intercepts + calls
+#   orchestrator.complete_current(answer).  Returns success receipt.
+#
+# `regress_context_tasks` — LK out_of_scope equivalent.  Caller
+#   changed their mind about earlier answers.  LLM passes the task
+#   IDs to reopen.  brain intercepts + calls orchestrator.regress_to().
+#   Only injected when at least one task has been visited (LK parity).
+
+
+def build_discovery_tools(orchestrator: "ContextDiscoveryOrchestrator") -> list:
+    """Build the tool schemas the brain injects for the active
+    discovery turn.  Returns [] when orchestrator is complete or None.
+
+    Schemas match the ToolDefinition shape used elsewhere in this
+    codebase (see packages/schemas/tool.py) — flat dicts with
+    parameters.type=object.
+    """
+    if orchestrator is None or orchestrator.is_complete():
+        return []
+    current = orchestrator.current_task()
+    if current is None:
+        return []
+    from packages.schemas import ToolDefinition
+    tools = [
+        ToolDefinition(
+            name="answer_context_task",
+            description=(
+                f"Record the caller's answer to the CURRENT discovery "
+                f"question.  Current task_id is {current.task_id!r}: "
+                f"{current.description}.  Call this tool with the "
+                f"caller's answer VERBATIM (or lightly cleaned) as "
+                f"soon as they respond.  Do NOT proceed to booking "
+                f"or slot-selection until this call succeeds."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "description": (
+                            "The caller's answer to the current "
+                            "discovery question, verbatim or lightly "
+                            "normalized (spelled digits → digits, "
+                            "'yeah' → 'yes' where obvious, etc.)."
+                        ),
+                    },
+                },
+                "required": ["answer"],
+            },
+        ),
+    ]
+    # LK's out_of_scope tool: only inject once caller has answered
+    # at least one task.  Empty visited set = nothing to regress to.
+    visited = orchestrator.visited_task_repr()
+    if visited:
+        tools.append(ToolDefinition(
+            name="regress_context_tasks",
+            description=(
+                "Reopen already-answered discovery tasks when the "
+                "caller changes their mind about an earlier answer. "
+                "Available task IDs (with their descriptions): "
+                + ", ".join(
+                    f"{k}: {v}" for k, v in visited.items()
+                )
+                + ". Pass the IDs in the order the caller mentioned."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": list(visited.keys()),
+                        },
+                        "description": (
+                            "One or more task IDs from the visited "
+                            "set that the caller wants to change."
+                        ),
+                    },
+                },
+                "required": ["task_ids"],
+            },
+        ))
+    return tools
+
+
+def handle_discovery_tool_call(
+    orchestrator: "ContextDiscoveryOrchestrator",
+    tool_name: str,
+    arguments: dict,
+) -> Optional[dict]:
+    """Intercept a discovery tool call and advance/regress the
+    orchestrator.  Returns a synthetic tool receipt dict on match,
+    or None when the tool_name is not a discovery tool (brain then
+    falls through to normal tool_handler).
+
+    Never raises — malformed arguments → error receipt so LLM gets
+    feedback, no crash.
+    """
+    if orchestrator is None:
+        return None
+    if tool_name == "answer_context_task":
+        try:
+            answer = str(arguments.get("answer", "")).strip()
+            if not answer:
+                return {
+                    "ok": False,
+                    "error": "answer was empty; ask the caller again",
+                }
+            current = orchestrator.current_task()
+            if current is None:
+                return {
+                    "ok": True,
+                    "detail": "no active task; discovery already complete",
+                }
+            task_id = current.task_id
+            orchestrator.complete_current(answer)
+            nxt = orchestrator.current_task()
+            return {
+                "ok": True,
+                "task_id": task_id,
+                "answer": answer,
+                "next_task_id": nxt.task_id if nxt else None,
+                "discovery_complete": orchestrator.is_complete(),
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"answer_context_task: {e}"}
+    if tool_name == "regress_context_tasks":
+        try:
+            task_ids = arguments.get("task_ids") or []
+            if not isinstance(task_ids, list):
+                return {
+                    "ok": False,
+                    "error": "task_ids must be a list of strings",
+                }
+            orchestrator.regress_to([str(t) for t in task_ids])
+            nxt = orchestrator.current_task()
+            return {
+                "ok": True,
+                "regressed_task_ids": task_ids,
+                "next_task_id": nxt.task_id if nxt else None,
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"regress_context_tasks: {e}"}
+    return None  # not a discovery tool — fall through to normal handler
+
+
 __all__ = [
     "ContextTaskStatus",
     "ContextTask",
     "ContextDiscoveryOrchestrator",
     "context_tasks_for_service",
+    "build_discovery_tools",
+    "handle_discovery_tool_call",
 ]
