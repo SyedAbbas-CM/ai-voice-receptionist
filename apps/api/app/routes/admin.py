@@ -35,20 +35,54 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 def _require_admin(request: Request) -> None:
-    """Admin routes require ADMIN_TOKEN in Authorization: Bearer, distinct
-    from tenant API keys.  Fail-closed."""
+    """Admin routes accept ANY of:
+      1. Signed session cookie `voiceops_admin` (browser login flow — task #99)
+      2. Bearer token `ADMIN_TOKEN` in Authorization header (curl / CI)
+    Fail-closed with a 401 that hints at the login page if BOTH missing.
+
+    503 only when NEITHER credential type is configured — signals a
+    misconfigured box vs a legitimate 401 on a real login attempt."""
     admin_token = os.environ.get("ADMIN_TOKEN", "")
-    if not admin_token:
+    password_hash = os.environ.get("ADMIN_PASSWORD_HASH", "")
+    session_secret = os.environ.get("SESSION_COOKIE_SECRET", "")
+
+    # Both auth paths disabled → admin routes are dark.
+    if not admin_token and not (password_hash and session_secret):
         raise HTTPException(
             status_code=503,
-            detail="Admin routes are disabled (ADMIN_TOKEN not configured).",
+            detail=(
+                "Admin routes are disabled. Configure either ADMIN_TOKEN "
+                "(bearer) or ADMIN_PASSWORD_HASH + SESSION_COOKIE_SECRET "
+                "(browser login)."
+            ),
         )
-    auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="admin bearer required")
-    provided = auth.removeprefix("Bearer ").strip()
-    if not hmac.compare_digest(provided, admin_token):
-        raise HTTPException(status_code=401, detail="invalid admin token")
+
+    # Path 1: signed session cookie (browser). Only checked if configured.
+    if password_hash and session_secret:
+        try:
+            from app.routes.admin_login import verify_admin_session
+            if verify_admin_session(request) is not None:
+                return
+        except Exception:
+            # Session module errors must NOT block bearer-path fallback.
+            pass
+
+    # Path 2: bearer token (curl). Only checked if configured.
+    if admin_token:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            provided = auth.removeprefix("Bearer ").strip()
+            if hmac.compare_digest(provided, admin_token):
+                return
+
+    # Neither credential accepted. If password login IS configured, hint
+    # at the login page; otherwise keep the bearer-only message.
+    if password_hash and session_secret:
+        raise HTTPException(
+            status_code=401,
+            detail="Not signed in. Go to /admin/login",
+        )
+    raise HTTPException(status_code=401, detail="admin bearer required")
 
 
 class CreateTenantRequest(BaseModel):
