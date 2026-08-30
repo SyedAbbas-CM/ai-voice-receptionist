@@ -237,6 +237,17 @@ def _persist_session(state: CallState, flush_transcript: bool = True) -> None:
         row.ended_at = state.ended_at
         row.extracted = state.extracted.model_dump() if state.extracted else None
         row.escalation_reason = state.escalation_reason
+        # Phase 2 (2026-08-30, task #95): snapshot the wider agent
+        # persona prompt ONCE at first persist. LK judges (Phase 3) use
+        # this as fallback when no per-turn scope delta is present.
+        # Voice-agent sets `state._opening_system_prompt` in brain.py's
+        # first LLM prep. Only write if unset — sub-agent-scope prompt
+        # swaps should NOT overwrite this (they land in per-turn
+        # `agent_instructions_delta` instead).
+        if row.opening_system_prompt is None:
+            _opening = getattr(state, "_opening_system_prompt", None)
+            if _opening:
+                row.opening_system_prompt = _opening
 
         if flush_transcript:
             redactor = _get_pii_redactor()
@@ -256,6 +267,14 @@ def _persist_session(state: CallState, flush_transcript: bool = True) -> None:
                     redacted_args, _ = redactor.redact_dict(turn.tool_args)
                 if turn.tool_result:
                     redacted_result, _ = redactor.redact_dict(turn.tool_result)
+                # Phase 2 (2026-08-30, task #95): pull per-turn scope
+                # delta + tool error from Turn if present. These are
+                # optional attrs on Turn — populated by brain.py when
+                # sub-agent scope changes or a tool errors. LK judges
+                # (Phase 3) use both to grade turns under the correct
+                # effective instructions.
+                _delta = getattr(turn, "agent_instructions_delta", None)
+                _tool_err = getattr(turn, "tool_error", None)
                 db.add(TranscriptRow(
                     session_id=state.session_id,
                     tenant_id=state.tenant_id,
@@ -265,6 +284,8 @@ def _persist_session(state: CallState, flush_transcript: bool = True) -> None:
                     tool_name=turn.tool_name,
                     tool_args=redacted_args,
                     tool_result=redacted_result,
+                    agent_instructions_delta=_delta,
+                    tool_error=_tool_err,
                 ))
         db.commit()
     finally:

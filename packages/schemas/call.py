@@ -79,6 +79,14 @@ class TranscriptTurn(BaseModel):
     tool_name: Optional[str] = None
     tool_args: Optional[dict] = None
     tool_result: Optional[dict] = None
+    # Phase 2 (2026-08-30, task #95): scope-change instructions + tool
+    # error. LK judges use `agent_instructions_delta` to grade turns
+    # under the effective instructions at that moment (sub-agent scope
+    # enter/exit populates this). `tool_error` disambiguates a genuine
+    # null result from a tool that raised. Both nullable; session
+    # persist reads via getattr so pre-existing Turn objects still work.
+    agent_instructions_delta: Optional[str] = None
+    tool_error: Optional[str] = None
 
 
 class ExtractedFields(BaseModel):

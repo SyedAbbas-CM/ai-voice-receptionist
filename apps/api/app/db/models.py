@@ -118,6 +118,12 @@ class SessionRow(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     extracted: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     escalation_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Phase 2 (2026-08-30, task #95): snapshot of the WIDER agent persona
+    # prompt at call start. LK judges (Phase 3) walk backward from any
+    # turn to find the effective instructions; if no per-turn delta is
+    # present, they fall back to this. Voice-agent writes it once when
+    # the session's first LLM call is prepared.
+    opening_system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     transcript: Mapped[list["TranscriptRow"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
@@ -137,6 +143,15 @@ class TranscriptRow(Base):
     tool_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     tool_args: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     tool_result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Phase 2 (2026-08-30, task #95): populated ONLY on scope changes.
+    # Sub-agent enter → narrow prompt text lands here. Sub-agent exit →
+    # sentinel 'exit_slot_capture'. LK judges walk backward from any
+    # turn to find the effective instructions at that moment. Null on
+    # most turns; storage cost is ~500B/call average.
+    agent_instructions_delta: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Phase 2: distinct from tool_result=null (which is ambiguous).
+    # Populated when a tool call raised; null on success.
+    tool_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     session: Mapped[SessionRow] = relationship(back_populates="transcript")
 
