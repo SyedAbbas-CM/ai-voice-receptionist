@@ -601,11 +601,24 @@ class ReceptionistBrain:
                             _existing_disc.as_directive_note()
                         )
                     # If orchestrator is complete, tear down so it
-                    # doesn't re-fire on future turns.
+                    # doesn't re-fire on future turns.  BEFORE
+                    # teardown, stash the collected answers +
+                    # notes-prefix on state so the booking-tool
+                    # augmenter (task #144) can put them in
+                    # book_appointment(notes=) for the front-desk.
                     if (
                         _existing_disc is not None
                         and _existing_disc.is_complete()
                     ):
+                        try:
+                            state._discovery_answers = (
+                                _existing_disc.collected_answers()
+                            )
+                            state._discovery_notes_prefix = (
+                                _existing_disc.as_notes_prefix()
+                            )
+                        except Exception:
+                            pass
                         try:
                             state._context_discovery = None
                         except Exception:
@@ -1458,10 +1471,58 @@ class ReceptionistBrain:
                         _l.getLogger(__name__).warning(
                             "on_tool_call(%s) raised: %s", tc.name, _cbe,
                         )
-                # Write-guard: validate booking tool calls against the transcript
-                # before firing. Prevents the LLM from hallucinating names/phones/times
-                # into the DB. Fails open on any guard error.
+                # 2026-08-30 (task #144): booking-flow continuation.
+                # If discovery answers were collected earlier this
+                # call (state._discovery_notes_prefix populated by
+                # brain when the orchestrator completed), prepend
+                # them to book_appointment(notes=) so front-desk
+                # staff see procedure/provider/date context on
+                # follow-up bookings.  Non-destructive: existing
+                # notes are preserved after the prefix.  Only fires
+                # for booking tools + only when prefix is non-empty.
                 from .classifiers.write_guard import BOOKING_TOOL_NAMES, validate_write
+                if tc.name in BOOKING_TOOL_NAMES:
+                    try:
+                        _notes_prefix = getattr(
+                            state, "_discovery_notes_prefix", "",
+                        )
+                        if _notes_prefix:
+                            _args = dict(tc.arguments or {})
+                            _existing_notes = str(
+                                _args.get("notes") or ""
+                            ).strip()
+                            if _existing_notes:
+                                _args["notes"] = (
+                                    f"{_notes_prefix}. {_existing_notes}"
+                                )
+                            else:
+                                _args["notes"] = _notes_prefix
+                            tc = tc.__class__(
+                                id=tc.id,
+                                name=tc.name,
+                                arguments=_args,
+                            )
+                            import logging as _bfa_log
+                            _bfa_log.getLogger(__name__).info(
+                                "BOOKING_NOTES_AUGMENTED session=%s "
+                                "prefix=%r existing_len=%d",
+                                state.session_id,
+                                _notes_prefix[:80],
+                                len(_existing_notes),
+                            )
+                            # Consume — don't re-apply on a possible
+                            # retry within the same turn.
+                            try:
+                                state._discovery_notes_prefix = ""
+                            except Exception:
+                                pass
+                    except Exception as _bfa_err:
+                        import logging as _bfa_log
+                        _bfa_log.getLogger(__name__).warning(
+                            "booking-notes augmenter failed "
+                            "(falling through with original args): %s",
+                            _bfa_err,
+                        )
                 if tc.name in BOOKING_TOOL_NAMES:
                     transcript_lines = [
                         f"{t.role.value.upper()}: {t.text}"

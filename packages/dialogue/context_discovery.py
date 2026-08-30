@@ -253,6 +253,45 @@ class ContextDiscoveryOrchestrator:
             )
         return "\n".join(lines)
 
+    def collected_answers(self) -> dict[str, str]:
+        """Return {task_id: answer} for every completed task.
+        Empty dict if nothing collected yet.
+
+        Used by brain's booking-tool arg augmenter (task #144) to
+        populate notes= on book_appointment with the discovery
+        context so front-desk staff see procedure/provider/date on
+        follow-up bookings.
+        """
+        return {
+            tid: task.result
+            for tid, task in self.tasks.items()
+            if task.is_complete and task.result
+        }
+
+    def as_notes_prefix(self) -> str:
+        """Render collected answers as a compact string suitable for
+        prepending to book_appointment(notes=).
+
+        Format matches what a real receptionist would type in the
+        notes field: 'Follow-up to filling by Dr. Chen on August 15th.'
+
+        Returns empty string if no answers collected.
+        """
+        answers = self.collected_answers()
+        if not answers:
+            return ""
+        parts = []
+        procedure = answers.get("original_procedure")
+        provider = answers.get("original_provider")
+        date = answers.get("original_visit_date")
+        if procedure:
+            parts.append(f"Follow-up to {procedure}")
+        if provider:
+            parts.append(f"with {provider}")
+        if date:
+            parts.append(f"on {date}")
+        return " ".join(parts).strip()
+
     def to_summary(self) -> dict:
         """Compact snapshot for humanness event emission."""
         return {
