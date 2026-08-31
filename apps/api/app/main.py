@@ -257,7 +257,13 @@ def create_app() -> FastAPI:
                 # (see brain.py greet() — keep IN SYNC with that string).
                 include_disclosure = getattr(business, "ai_disclosure_enabled", False)
                 include_recording = getattr(business, "recording_notice_enabled", False)
-                parts = [f"Thanks for calling {business.name}, how can I help?"]
+                # 2026-08-31 CALL-BUG-08: include agent name in greeting
+                # (keep IN SYNC with brain.py greet()).
+                _agent_name = getattr(business, "agent_name", None) or "Ava"
+                parts = [
+                    f"Thanks for calling {business.name}, "
+                    f"this is {_agent_name} — how can I help?"
+                ]
                 if include_disclosure:
                     parts.append("You're speaking with our automated receptionist.")
                 if include_recording:

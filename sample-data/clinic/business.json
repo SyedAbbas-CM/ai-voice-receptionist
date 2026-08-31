@@ -1,6 +1,7 @@
 {
   "id": "cedar-ridge-dental-001",
   "name": "Smile Dental Clinic",
+  "agent_name": "Ava",
   "vertical": "clinic",
   "timezone": "America/Chicago",
   "phone": "+1-972-555-0192",

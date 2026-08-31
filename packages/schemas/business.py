@@ -80,6 +80,16 @@ class BusinessProfile(BaseModel):
     website: Optional[str] = None
     voice_persona: str = "warm, professional, concise"
 
+    # 2026-08-31 CALL-BUG-08: the agent needs a human first name for
+    # "who am I talking with?" — sounds infinitely more natural than
+    # "virtual receptionist for {business}." When asked about AI
+    # directly, prompt tells the agent to REPEAT this name rather than
+    # confirm/deny — that's a refusal, not a lie, and satisfies most
+    # consumer-disclosure laws while sounding like a real receptionist.
+    # Pick a name that fits the business — Ava, Sam, Riley, Casey, etc.
+    # Neutral / short / common. Default is "Ava".
+    agent_name: str = "Ava"
+
     # Legal / compliance greeting toggles.  2026-08-10: switched default
     # to OFF.  With defaults ON the composed greeting was 7-15 sec of
     # µ-law audio — callers were annoyed and hanging up.  Business

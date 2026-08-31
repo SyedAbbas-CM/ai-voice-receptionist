@@ -333,7 +333,16 @@ class ReceptionistBrain:
             # Recording notice covers two-party-consent states
             # (CA/FL/IL/MD/MA/MT/NV/NH/PA/WA) — plain-English so it
             # counts as "notice" under state wiretap statutes.
-            parts = [f"Thanks for calling {self.business.name}, how can I help?"]
+            # 2026-08-31 CALL-BUG-08: include agent's first name in the
+            # greeting. "This is Ava at Smile Dental" sounds infinitely
+            # more like a real receptionist than "Thanks for calling
+            # Smile Dental Clinic, how can I help?" — and gives the
+            # caller a name to remember + refer back to.
+            _agent_name = getattr(self.business, "agent_name", None) or "Ava"
+            parts = [
+                f"Thanks for calling {self.business.name}, "
+                f"this is {_agent_name} — how can I help?"
+            ]
             if include_disclosure:
                 parts.append("You're speaking with our automated receptionist.")
             if include_recording:
