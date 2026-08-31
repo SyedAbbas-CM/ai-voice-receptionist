@@ -90,6 +90,17 @@ class BusinessProfile(BaseModel):
     # Neutral / short / common. Default is "Ava".
     agent_name: str = "Ava"
 
+    # 2026-08-31 GHL-SMS wave 1: post-booking SMS confirmation.
+    # When True AND the GHL sink is active, the agent fires a
+    # confirmation SMS to the caller within seconds of the booking.
+    # Off by default — tenant explicitly opts in per business.json
+    # or via the GHL_SMS_ON_BOOKING env var (global fallback).
+    send_sms_on_booking: bool = False
+    # Custom template — supports {first_name}, {business_name},
+    # {service}, {when}. If unset, a default template is used.
+    # Cap 320 chars (2 SMS segments) enforced at send time.
+    sms_confirmation_template: Optional[str] = None
+
     # Legal / compliance greeting toggles.  2026-08-10: switched default
     # to OFF.  With defaults ON the composed greeting was 7-15 sec of
     # µ-law audio — callers were annoyed and hanging up.  Business

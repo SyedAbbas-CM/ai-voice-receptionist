@@ -50,7 +50,12 @@ def get_calendar():
 def get_sink():
     global _sink_cache
     if _sink_cache is None:
-        _sink_cache = build_sink_from_env(settings.crm_sink, settings)
+        # 2026-08-31 GHL-SMS wave 1: pass business so per-tenant SMS
+        # flags (send_sms_on_booking, sms_confirmation_template) are
+        # honored.
+        _sink_cache = build_sink_from_env(
+            settings.crm_sink, settings, business=load_business(),
+        )
     return _sink_cache
 
 

@@ -127,6 +127,34 @@ class GoHighLevelClient:
                 slots.append(s)
         return slots
 
+    async def send_sms(
+        self,
+        contact_id: str,
+        body: str,
+    ) -> dict:
+        """Send an SMS to a contact via GHL Conversations.
+
+        2026-08-31 (GHL-SMS wave 1): the "wow" moment on demos —
+        caller hangs up, phone buzzes 3 seconds later with the
+        confirmation text. Requires the Private Integration token
+        to have `conversations/message.write` scope.
+
+        Body should be under 160 chars to avoid multi-part SMS
+        billing. GHL will route via whichever phone number is
+        configured as the Location's outbound SMS number.
+
+        Fails loudly (raises GHLError) on non-2xx so the sink can
+        log + swallow — never blocks booking flow.
+        """
+        payload = {
+            "type": "SMS",
+            "contactId": contact_id,
+            "message": body,
+        }
+        return await self._request(
+            "POST", "/conversations/messages", json=payload,
+        )
+
     async def book_appointment(
         self,
         contact_id: str,

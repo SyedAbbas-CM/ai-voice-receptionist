@@ -108,8 +108,14 @@ class GHLSink(CRMSink):
 
     name = "ghl"
 
-    def __init__(self, client) -> None:
+    def __init__(self, client, business=None) -> None:
         self.client = client  # GoHighLevelClient
+        # 2026-08-31 GHL-SMS wave 1: business profile is needed for
+        # send_sms_on_booking + sms_confirmation_template. Optional
+        # (backwards compatible — SMS is off unless business is
+        # provided AND biz.send_sms_on_booking=True OR the env fallback
+        # GHL_SMS_ON_BOOKING=true is set).
+        self.business = business
 
     def _split_name(self, full: Optional[str]) -> tuple[Optional[str], Optional[str]]:
         if not full:
@@ -151,6 +157,53 @@ class GHLSink(CRMSink):
                 )
             except Exception as e:
                 log.warning("ghl book_appointment failed: %s", e)
+
+        # 2026-08-31 GHL-SMS wave 1: fire confirmation SMS to the caller.
+        # Feature-flagged so nobody accidentally texts callers before
+        # setup. Business config exposes:
+        #   send_sms_on_booking: bool = True to enable
+        #   sms_confirmation_template: str = custom template
+        # Falls back to a sensible default template. Never raises —
+        # a failed SMS must not tank the booking flow.
+        try:
+            import os as _os
+            send_sms = _os.environ.get("GHL_SMS_ON_BOOKING", "false").lower() in ("1", "true", "yes")
+            biz = self.business or getattr(state, "business", None)
+            if biz is not None:
+                send_sms = getattr(biz, "send_sms_on_booking", send_sms)
+            if send_sms and phone:
+                # Format the SMS body — kept under 160 chars for single-part SMS
+                biz_name = getattr(biz, "name", "our clinic") if biz else "our clinic"
+                svc = args.get("service", "your appointment")
+                # Parse the start time into a readable "Tuesday at 2 PM"
+                sms_when = start
+                if start:
+                    try:
+                        _dt = datetime.fromisoformat(start)
+                        sms_when = _dt.strftime("%A at %-I:%M %p")
+                    except Exception:
+                        sms_when = start
+                template = None
+                if biz is not None:
+                    template = getattr(biz, "sms_confirmation_template", None)
+                if not template:
+                    template = (
+                        "Hi {first_name}, this is {business_name} confirming "
+                        "your {service} on {when}. See you then!"
+                    )
+                sms_body = template.format(
+                    first_name=first or "there",
+                    business_name=biz_name,
+                    service=svc,
+                    when=sms_when,
+                )[:320]  # cap at 2 SMS segments
+                await self.client.send_sms(contact_id, sms_body)
+                log.info(
+                    "GHL_SMS_SENT contact=%s phone=%s body=%r",
+                    contact_id, phone, sms_body[:80],
+                )
+        except Exception as e:
+            log.warning("ghl send_sms on_booking failed: %s", e)
 
     async def on_call_end(self, state: CallState) -> None:
         if not state.extracted or not state.extracted.phone:
@@ -782,7 +835,7 @@ class FollowupSink(CRMSink):
         return None
 
 
-def build_sink_from_env(mode: str, settings) -> CRMSink:
+def build_sink_from_env(mode: str, settings, business=None) -> CRMSink:
     """Factory: 'none' | 'ghl' | 'sheets' | 'hubspot' | combos with '+'.
 
     Examples:
@@ -790,6 +843,9 @@ def build_sink_from_env(mode: str, settings) -> CRMSink:
       'ghl+sheets'       → GHL primary + Sheets audit log
       'hubspot+sheets'   → HubSpot primary + Sheets audit log
       'none' (default)   → NoopSink; nothing writes anywhere
+
+    `business` — optional BusinessProfile so per-tenant sink features
+    (SMS confirmation template, etc.) can read from the profile.
     """
     mode = (mode or "none").lower().strip()
     if mode == "none":
@@ -806,7 +862,7 @@ def build_sink_from_env(mode: str, settings) -> CRMSink:
             api_version=settings.ghl_api_version,
             default_calendar_id=settings.ghl_calendar_id,
         )
-        sinks.append(GHLSink(client))
+        sinks.append(GHLSink(client, business=business))
 
     if "hubspot" in parts:
         from .hubspot_client import HubSpotClient
