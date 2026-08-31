@@ -404,15 +404,89 @@ def build_discovery_tools(orchestrator: "ContextDiscoveryOrchestrator") -> list:
     return tools
 
 
+# ── grounding guard (BUG #157 fix, from CAc66749) ──────────────
+
+# Common English stopwords ignored during grounding check.  Answers
+# like 'the crown' should ground on 'crown' alone, not require 'the'
+# to also appear in the caller utterance.
+_GROUNDING_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "on", "in", "at", "to", "for", "with",
+    "by", "and", "or", "it", "was", "were", "is", "are", "be", "been",
+    "my", "your", "his", "her", "our", "their", "some", "any", "that",
+    "this", "these", "those", "there", "then", "so", "just", "also",
+    "as", "if", "not", "no", "yes", "one", "two", "actually",
+    "kind", "sort", "type", "thing", "stuff", "you", "know",
+})
+
+
+def _grounding_tokens(text: str) -> set[str]:
+    """Lowercased word tokens minus stopwords.  Words are stripped of
+    non-alphanumeric trailing chars and stemmed loosely (trailing 's'
+    dropped) so 'crown' / 'Crown' / 'crowns' all match."""
+    if not text:
+        return set()
+    import re as _re
+    words = _re.findall(r"[A-Za-z][A-Za-z0-9]*", text.lower())
+    out: set[str] = set()
+    for w in words:
+        if w in _GROUNDING_STOPWORDS:
+            continue
+        # Loose stem: drop trailing s so plurals collapse.  Keep
+        # 2-letter minimum so we don't match single chars.
+        if len(w) >= 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        if len(w) >= 2:
+            out.add(w)
+    return out
+
+
+def _answer_is_grounded(
+    answer: str, recent_caller_texts: Optional[list[str]],
+) -> bool:
+    """True when every substantive word in `answer` also appears in
+    the caller's recent utterances.
+
+    2026-08-31 (BUG #157 fix from CAc66749): LLM under time pressure
+    hallucinated 'Chen' when caller said only 'It was doctor.'  The
+    tool receipt then advanced the discovery orchestrator with a
+    made-up provider name.  This guard rejects answers whose content
+    words aren't in the caller's transcript.
+
+    Falls back to permissive (True) when recent_caller_texts is None
+    or empty — never let the guard break brain on missing context.
+    A very short answer with only stopwords is treated as grounded
+    (edge case: single-word stopword answers won't happen in practice
+    but no reason to reject).
+    """
+    if not recent_caller_texts:
+        return True  # permissive fallback
+    answer_tokens = _grounding_tokens(answer)
+    if not answer_tokens:
+        return True  # all stopwords / empty after tokenization
+    haystack: set[str] = set()
+    for t in recent_caller_texts:
+        haystack.update(_grounding_tokens(t))
+    # Every substantive word in the answer must be in the caller's
+    # utterances.  Partial grounding fails — 'root canal' when caller
+    # only said 'canal' is a hallucinated 'root'.
+    return answer_tokens.issubset(haystack)
+
+
 def handle_discovery_tool_call(
     orchestrator: "ContextDiscoveryOrchestrator",
     tool_name: str,
     arguments: dict,
+    recent_caller_texts: Optional[list[str]] = None,
 ) -> Optional[dict]:
     """Intercept a discovery tool call and advance/regress the
     orchestrator.  Returns a synthetic tool receipt dict on match,
     or None when the tool_name is not a discovery tool (brain then
     falls through to normal tool_handler).
+
+    `recent_caller_texts` (BUG #157): when provided, the answer must
+    be grounded in the caller's actual utterance to be accepted.
+    Rejects LLM hallucinations like 'Chen' when caller only said
+    'It was doctor.'  Missing → permissive fallback for backcompat.
 
     Never raises — malformed arguments → error receipt so LLM gets
     feedback, no crash.
@@ -426,6 +500,16 @@ def handle_discovery_tool_call(
                 return {
                     "ok": False,
                     "error": "answer was empty; ask the caller again",
+                }
+            # BUG #157 grounding guard.
+            if not _answer_is_grounded(answer, recent_caller_texts):
+                return {
+                    "ok": False,
+                    "error": (
+                        "answer is not grounded in the caller's "
+                        "utterance; do not invent details — ask the "
+                        "caller to clarify"
+                    ),
                 }
             current = orchestrator.current_task()
             if current is None:

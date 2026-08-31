@@ -1740,8 +1740,22 @@ class ReceptionistBrain:
                             handle_discovery_tool_call,
                         )
                         _orch = getattr(state, "_context_discovery", None)
+                        # BUG #157 (Chen hallucination guard, 2026-08-31):
+                        # pass recent caller utterances so the discovery
+                        # handler can verify the LLM's answer_context_task
+                        # arg is grounded in what the caller actually said.
+                        try:
+                            from .missing_slots import (
+                                recent_caller_texts_from_state as _rct,
+                            )
+                            _disc_texts = _rct(state)
+                            if user_text and user_text not in _disc_texts:
+                                _disc_texts.insert(0, user_text)
+                        except Exception:
+                            _disc_texts = None
                         _disc_intercept = handle_discovery_tool_call(
                             _orch, tc.name, tc.arguments or {},
+                            recent_caller_texts=_disc_texts,
                         )
                 except Exception as _di_err:
                     import logging as _di_log
