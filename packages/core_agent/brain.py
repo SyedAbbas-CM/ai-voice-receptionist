@@ -533,7 +533,24 @@ class ReceptionistBrain:
                     recent_caller_texts_from_state,
                     resolve_service_from_utterances,
                 )
+                # 2026-08-31 (BUG #158 fix): state._collected_slots is
+                # the persistent cross-turn slot dict.  Live diagnosis
+                # from CAc66749590f6e53986eec4210e49bb425 showed known={}
+                # and missing=[] on ALL 13 policy_decision events —
+                # extractor ran per-turn but its output was thrown away
+                # at function scope.  This dict outlives the function
+                # call: seeded from state on entry, updated by all three
+                # write sites (utterance resolver, discovery completion,
+                # booking tool receipts), read back by _extract_known_slots.
+                _persisted = dict(
+                    getattr(state, "_collected_slots", None) or {}
+                )
                 _known_slots = _extract_known_slots(state, [])
+                # Persisted values are the FLOOR — tool receipts may
+                # overwrite (they're canonical), but per-turn recompute
+                # never wipes prior turns' knowledge.
+                for _k, _v in _persisted.items():
+                    _known_slots.setdefault(_k, _v)
                 _recent_caller_texts = (
                     recent_caller_texts_from_state(state)
                 )
@@ -559,6 +576,36 @@ class ReceptionistBrain:
                     )
                     if _spoken_service:
                         _known_slots["service"] = _spoken_service
+                        # BUG #158 fix write site 1: persist for later turns.
+                        try:
+                            if not hasattr(state, "_collected_slots"):
+                                state._collected_slots = {}
+                            state._collected_slots["service"] = (
+                                _spoken_service
+                            )
+                        except Exception:
+                            pass
+                        # Also emit ServiceResolutionEvent so /trace shows
+                        # WHICH utterance mapped to WHICH canonical name
+                        # (previously silent — networking couldn't bisect
+                        # whether the extractor ran on the Christiaan call).
+                        try:
+                            from packages.observability.humanness_events import (
+                                ServiceResolutionEvent as _SRE,
+                                emit_humanness_event as _emit_sre,
+                            )
+                            _emit_sre(_SRE(
+                                call_id=state.session_id or "?",
+                                tenant_id=getattr(
+                                    state, "tenant_id", "default",
+                                ),
+                                session_id=state.session_id or "?",
+                                spoken=(user_text or "")[:200],
+                                kind="match_from_utterance",
+                                canonical_name=_spoken_service,
+                            ))
+                        except Exception:
+                            pass
                 # 2026-08-30 (task #150 wire): DISCOVER_CONTEXT branch.
                 # When the resolved service needs context (e.g.
                 # 'Follow-up visit' needs original_procedure /
@@ -1810,6 +1857,52 @@ class ReceptionistBrain:
                     #      Deterministic render is the only guarantee we
                     #      speak only times the calendar actually returned.
                     known_slots = _extract_known_slots(state, tool_results_payload)
+                    # BUG #158 fix write site 3: persist any tool-receipt
+                    # slot values across turns.  book_appointment /
+                    # book_reservation / book_viewing / check_availability
+                    # all carry canonical slot args (service, date, time,
+                    # phone).  Merge them into state._collected_slots so
+                    # the next turn's `_persisted` seed already has them.
+                    try:
+                        if not hasattr(state, "_collected_slots"):
+                            state._collected_slots = {}
+                        # From _extract_known_slots (booking receipts only).
+                        for _tk, _tv in (known_slots or {}).items():
+                            if _tv:
+                                state._collected_slots[_tk] = str(_tv)
+                        # Also from check_availability + other slot-bearing
+                        # tools — same arg schema, same canonical values.
+                        for _tr in tool_results_payload or []:
+                            if _tr.get("error") is not None:
+                                continue
+                            _args = _tr.get("arguments") or {}
+                            if not isinstance(_args, dict):
+                                continue
+                            for _an, _av in _args.items():
+                                _sk = _BOOKING_ARG_TO_SLOT.get(_an)
+                                if not _sk or not _av:
+                                    continue
+                                if _sk == "start_iso":
+                                    _iso = str(_av)
+                                    if "T" in _iso:
+                                        _d, _, _t = _iso.partition("T")
+                                        state._collected_slots.setdefault(
+                                            "date", _d.strip(),
+                                        )
+                                        _t2 = _t.split("+")[0].split("-")[0].split("Z")[0]
+                                        state._collected_slots.setdefault(
+                                            "time", _t2.strip()[:5],
+                                        )
+                                    else:
+                                        state._collected_slots.setdefault(
+                                            "date", _iso.strip(),
+                                        )
+                                else:
+                                    state._collected_slots.setdefault(
+                                        _sk, str(_av),
+                                    )
+                    except Exception:
+                        pass
                     synth_reply, synth_skip = maybe_synthesize(
                         tool_results_payload, known_slots,
                     )
