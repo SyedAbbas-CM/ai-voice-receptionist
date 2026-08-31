@@ -4748,9 +4748,25 @@ class TwilioActorSession:
             self._last_committed_transcript = ""
             prev_transcript = ""
 
+        # 2026-08-31 CALL-BUG-12: only continuation-merge when the
+        # PREVIOUS transcript hasn't been fully replied to. Once agent
+        # has spoken a reply and is in LISTENING, a fresh utterance is
+        # a NEW turn, not a continuation. Real trace CAee03239: caller
+        # said "it was a cleaning" (turn 1) → agent replied → 5.9s
+        # later caller said "next available slot" → merge fired,
+        # concatenated the two into "cleaning. next available slot",
+        # LLM asked wrong follow-up question. Fix: gate on
+        # `_inflight_has_spoken == True + state LISTENING` to signal
+        # "the agent has already replied to prev — this is a new turn".
+        already_replied_to_prev = (
+            self._inflight_has_spoken
+            and actor is not None
+            and actor.state.name == "LISTENING"
+        )
         if (
             prev_transcript
             and gap <= self._CONTINUATION_MERGE_MAX_S
+            and not already_replied_to_prev
         ):
             merged = f"{prev_transcript.rstrip()} {addition}"
             log.info(
