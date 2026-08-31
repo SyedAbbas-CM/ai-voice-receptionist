@@ -46,62 +46,74 @@ TAG_VOCAB = [
 # escaping of literal braces.
 
 _CSS = r"""
+/* Color system: "audit console" — neutral warm-paper ground with a
+ * deep vermilion accent. WhatsApp layout, NOT WhatsApp colors.
+ * User pushback (2026-08-31): "i said the FORMAT of whatsapp not
+ * literally whatsapp colors." */
 :root {
-  --ink: #0b141a;
-  --ink-2: #3b4a54;
-  --ink-3: #667781;
-  --paper: #efeae2;
+  --ink: #1a1a17;
+  --ink-2: #4a4a44;
+  --ink-3: #8a8a80;
+  --paper: #f6f4ee;
   --panel: #ffffff;
-  --rule: #d1d7db;
+  --rule: #e6e3dc;
   --caller-bubble: #ffffff;
-  --caller-shadow: 0 1px 0.5px rgba(11,20,26,0.13);
-  --agent-bubble: #d9fdd3;
-  --agent-shadow: 0 1px 0.5px rgba(11,20,26,0.13);
-  --agent-bubble-focused: #a8e6a4;
-  --tool-band: rgba(11,20,26,0.05);
-  --tool-ink: #667781;
-  --accent: #008069;
-  --accent-hover: #006b57;
-  --good: #008069;
+  --caller-ink: #1a1a17;
+  --caller-shadow: 0 1px 2px rgba(26,26,23,0.06);
+  --agent-bubble: #eef1f7;
+  --agent-ink: #1a1a17;
+  --agent-shadow: 0 1px 2px rgba(26,26,23,0.06);
+  --agent-bubble-focused: #f2ddd4;
+  --tool-band: rgba(26,26,23,0.05);
+  --tool-ink: #6a6a60;
+  --accent: #b8360f;
+  --accent-hover: #a02e0d;
+  --good: #2d6a4f;
   --warn: #b45309;
-  --danger: #d94f4f;
-  --gold: #f5a623;
+  --danger: #b8360f;
+  --gold: #d4a017;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --ink: #e9edef;
-    --ink-2: #aebac1;
-    --ink-3: #8696a0;
-    --paper: #0b141a;
-    --panel: #111b21;
-    --rule: #2a3942;
-    --caller-bubble: #202c33;
-    --caller-shadow: 0 1px 0.5px rgba(0,0,0,0.4);
-    --agent-bubble: #005c4b;
-    --agent-shadow: 0 1px 0.5px rgba(0,0,0,0.4);
-    --agent-bubble-focused: #00806b;
-    --tool-band: rgba(255,255,255,0.03);
-    --tool-ink: #8696a0;
-    --accent: #00a884;
-    --accent-hover: #06cf9c;
+    --ink: #eaeae4;
+    --ink-2: #b0b0a8;
+    --ink-3: #808078;
+    --paper: #1a1a17;
+    --panel: #22221e;
+    --rule: #33332e;
+    --caller-bubble: #2a2a26;
+    --caller-ink: #eaeae4;
+    --caller-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    --agent-bubble: #2b3140;
+    --agent-ink: #eaeae4;
+    --agent-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    --agent-bubble-focused: #4a2418;
+    --tool-band: rgba(255,255,255,0.04);
+    --tool-ink: #a09e94;
+    --accent: #e46744;
+    --accent-hover: #f07e5c;
+    --gold: #d4a017;
   }
 }
 :root[data-theme="dark"] {
-  --ink: #e9edef;
-  --ink-2: #aebac1;
-  --ink-3: #8696a0;
-  --paper: #0b141a;
-  --panel: #111b21;
-  --rule: #2a3942;
-  --caller-bubble: #202c33;
-  --caller-shadow: 0 1px 0.5px rgba(0,0,0,0.4);
-  --agent-bubble: #005c4b;
-  --agent-shadow: 0 1px 0.5px rgba(0,0,0,0.4);
-  --agent-bubble-focused: #00806b;
-  --tool-band: rgba(255,255,255,0.03);
-  --tool-ink: #8696a0;
-  --accent: #00a884;
-  --accent-hover: #06cf9c;
+  --ink: #eaeae4;
+  --ink-2: #b0b0a8;
+  --ink-3: #808078;
+  --paper: #1a1a17;
+  --panel: #22221e;
+  --rule: #33332e;
+  --caller-bubble: #2a2a26;
+  --caller-ink: #eaeae4;
+  --caller-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  --agent-bubble: #2b3140;
+  --agent-ink: #eaeae4;
+  --agent-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  --agent-bubble-focused: #4a2418;
+  --tool-band: rgba(255,255,255,0.04);
+  --tool-ink: #a09e94;
+  --accent: #e46744;
+  --accent-hover: #f07e5c;
+  --gold: #d4a017;
 }
 
 * { box-sizing: border-box; }
@@ -164,9 +176,6 @@ body {
 .chat {
   grid-area: chat;
   background: var(--paper);
-  background-image:
-    radial-gradient(circle at 20% 30%, rgba(139,168,140,0.05) 0, transparent 40%),
-    radial-gradient(circle at 80% 70%, rgba(139,168,140,0.05) 0, transparent 40%);
   overflow-y: auto;
   padding: 20px 16px 8px;
 }
@@ -185,9 +194,14 @@ body {
   box-shadow: var(--caller-shadow);
   word-wrap: break-word;
 }
-.bubble.caller { background: var(--caller-bubble); border-top-left-radius: 0; }
+.bubble.caller {
+  background: var(--caller-bubble);
+  color: var(--caller-ink);
+  border-top-left-radius: 0;
+}
 .bubble.agent  {
   background: var(--agent-bubble);
+  color: var(--agent-ink);
   border-top-right-radius: 0;
   cursor: pointer;
   transition: box-shadow 0.1s, background 0.15s;
