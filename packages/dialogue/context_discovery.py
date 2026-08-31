@@ -233,15 +233,30 @@ class ContextDiscoveryOrchestrator:
             f"DISCOVERY MODE: You are collecting context for service "
             f"'{self.service_name}' before booking.",
             f"CURRENT TASK: {current.description}",
-            f"ASK EXACTLY: '{current.ask_prompt}'",
             "",
-            "MANDATORY: as soon as the caller answers, call the "
-            "`answer_context_task` tool with their answer.  Do NOT "
-            "just acknowledge and move on — the tool call is what "
-            "advances the flow.  Do NOT proceed to booking or "
-            "slot-selection until every discovery task is answered.",
+            "TURN LOGIC — READ CAREFULLY:",
+            f"  * If the caller has NOT YET answered this task in this "
+            f"turn: ASK: '{current.ask_prompt}' AND WAIT for them to "
+            f"respond. Do NOT call any tool this turn.",
+            f"  * If the caller JUST answered this task in this turn "
+            f"(their utterance contains the answer): call "
+            f"`answer_context_task(answer=<their answer>)` and then "
+            f"either move on to the NEXT discovery question the tool "
+            f"receipt tells you (via `next_task_id`) OR — if the tool "
+            f"receipt says `discovery_complete: true` — proceed to "
+            f"booking.",
             "",
-            "Do NOT ask other questions until this one is answered.",
+            "CRITICAL — never do BOTH in the same turn:",
+            f"  BAD:  say '{current.ask_prompt}' AND call "
+            f"answer_context_task in the same turn — the caller hears "
+            f"the question RE-ASKED even though you just recorded "
+            f"their answer.",
+            f"  GOOD: EITHER ask (waiting) OR record+advance (moving "
+            f"on). One or the other, never both.",
+            "",
+            "Do NOT ask other questions until this one is answered. "
+            "Do NOT proceed to booking or slot-selection until every "
+            "discovery task is answered.",
         ]
         if visited:
             lines.append(
