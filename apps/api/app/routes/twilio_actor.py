@@ -473,6 +473,27 @@ class TwilioActorSession:
         self.dialed_number: str = (dialed_number or "").strip()
         self.caller_name: str = (caller_name or "").strip()
 
+        # 2026-08-31 task #104-followup: in-app audio recorder. Tees
+        # µ-law both directions into a per-side buffer, flushes to a
+        # stereo MP3 in stop(). Disabled when settings.call_recording_enabled
+        # is false (default false — set to true on prod). Wrapped in a
+        # try to keep the call alive if the recording package can't load.
+        self.recorder = None
+        try:
+            if getattr(settings, "call_recording_enabled", False):
+                from packages.recording import AudioRecorder
+                from pathlib import Path as _Path
+                self.recorder = AudioRecorder(
+                    call_id=self.call_id,
+                    tenant_id=self.tenant_id,
+                    root_dir=_Path(
+                        getattr(settings, "call_recording_dir", "data/recordings")
+                    ),
+                )
+        except Exception as _e:
+            log.warning("recorder init failed for %s: %s", self.call_id, _e)
+            self.recorder = None
+
         # VAD-based utterance framing (unchanged from legacy path)
         self._buffer = bytearray()
         self._last_voiced_ms: Optional[float] = None
@@ -1148,6 +1169,54 @@ class TwilioActorSession:
             )
         except Exception:
             pass
+
+        # 2026-08-31 task #104-followup: finalize the audio recording,
+        # persist path/duration/size to sessions row. Never blocks
+        # shutdown — swallow errors, we already logged inside finalize.
+        if self.recorder is not None:
+            try:
+                out_path, dur_ms = await self.recorder.finalize()
+                if out_path is not None:
+                    # Store as path RELATIVE to root_dir, not absolute —
+                    # so a config change (dir move) doesn't invalidate
+                    # existing DB rows.
+                    from pathlib import Path as _Path
+                    root = _Path(
+                        getattr(settings, "call_recording_dir", "data/recordings")
+                    ).resolve()
+                    try:
+                        rel = out_path.resolve().relative_to(root)
+                        rel_str = str(rel)
+                    except ValueError:
+                        # Not under root_dir — store as-is (shouldn't
+                        # happen but survive it).
+                        rel_str = str(out_path)
+                    size = out_path.stat().st_size if out_path.exists() else None
+                    # Persist. sync SQLite writes on the event loop are
+                    # tolerable here (call is already ending; NET path
+                    # is drained). Run in try — DB errors must not tank
+                    # the stop() path.
+                    try:
+                        from app.db import SessionRow
+                        from app.db.session import SessionLocal
+                        with SessionLocal() as db:
+                            row = db.query(SessionRow).filter(
+                                SessionRow.id == self.session_id,
+                            ).one_or_none()
+                            if row is not None:
+                                row.recording_path = rel_str
+                                row.recording_duration_ms = dur_ms
+                                if size is not None:
+                                    row.recording_size_bytes = size
+                                db.commit()
+                    except Exception:
+                        log.warning(
+                            "recording metadata persist failed for %s",
+                            self.call_id, exc_info=True,
+                        )
+            except Exception:
+                log.warning("recorder finalize errored for %s", self.call_id, exc_info=True)
+
         await get_registry().stop(self.call_id, self.tenant_id, reason=reason)
 
         # 2026-08-25: proactively tell Twilio to end the call.
@@ -1475,6 +1544,12 @@ class TwilioActorSession:
         if self._silence_pump_task is not None and not self._silence_pump_task.done():
             self._silence_pump_task.cancel()
             self._silence_pump_task = None
+
+        # 2026-08-31 task #104-followup: tee inbound frame into the
+        # recorder before we do anything else with it. sync + fast (< 1µs
+        # bytearray extend); never raises (recorder swallows internally).
+        if self.recorder is not None:
+            self.recorder.append_caller(mulaw_frame)
 
         # Feed bridge on every inbound frame (idempotent, no-op if disabled)
         if self._stt_bridge is not None:
@@ -6032,6 +6107,13 @@ class TwilioActorSession:
         # ----- Twilio path: encode PCM → µ-law 8kHz at the wire -----
         from app.routes.twilio import _tts_bytes_to_mulaw
         mulaw = _tts_bytes_to_mulaw(audio_bytes, mime)
+
+        # 2026-08-31 task #104-followup: tee outbound agent audio into
+        # the recorder BEFORE the gain-adjust so listeners hear roughly
+        # what the caller hears. Gain is a wire-tuning knob per install
+        # and it's fine if the recording is un-gained.
+        if self.recorder is not None:
+            self.recorder.append_agent(mulaw)
 
         # Pre-apply gain to the whole buffer once (cheaper than per-frame).
         gain_db = settings.telephony_output_gain_db

@@ -406,6 +406,14 @@ class Settings(BaseSettings):
     # is likely on peaks.  Applied per-frame in _send_mulaw_frames.
     telephony_output_gain_db: float = 0.0
 
+    # 2026-08-31 task #104-followup: in-app stereo call recording.
+    # When True, twilio_actor tees both audio directions into
+    # AudioRecorder and writes an MP3 to `call_recording_dir` on stop.
+    # Requires ffmpeg on the box. Default False so a broken migration
+    # or missing ffmpeg can't wedge calls; flip to True per-env.
+    call_recording_enabled: bool = False
+    call_recording_dir: str = "data/recordings"
+
     # Sprint 10 WIRING (2026-08-04): enable the intelligence kernel
     # on the live call path.  When True:
     #   * ReceptionistBrain emits StatePatches into CallState.dialogue

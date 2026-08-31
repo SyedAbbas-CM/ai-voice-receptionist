@@ -203,10 +203,17 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
         started_date = started[:10] if started else ""
         started_time = started[11:19] if started else ""
         caller_name = _caller_name_for(s)
+        # ♫ marker means "audio recording available" — reviewer can play
+        # it in the annotator. Silent when no MP3 was written.
+        rec_marker = (
+            f' <span class="rec-marker" title="Audio recording available">♫</span>'
+            if s.recording_path
+            else ''
+        )
         caller_cell = (
-            f'<span class="caller-name">{html.escape(caller_name)}</span>'
+            f'<span class="caller-name">{html.escape(caller_name)}</span>{rec_marker}'
             if caller_name
-            else '<span class="caller-missing">—</span>'
+            else f'<span class="caller-missing">—</span>{rec_marker}'
         )
         rows_html.append(
             f'<tr onclick="location.href=\'/admin/annotate/{html.escape(cid)}\'" style="cursor:pointer">'
@@ -411,6 +418,12 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
     font-family: "SF Mono", monospace;
     font-weight: 400;
     font-size: 13px;
+  }}
+  .rec-marker {{
+    color: var(--accent);
+    font-size: 13px;
+    margin-left: 6px;
+    font-weight: 400;
   }}
 
   td.cid code {{
@@ -730,6 +743,8 @@ def get_annotation_form(
         notes_val=notes_val,
         reviewer_val=reviewer_val,
         caller_name=caller_name,
+        recording_path=(sess.recording_path if sess else "") or "",
+        recording_duration_ms=(sess.recording_duration_ms if sess else 0) or 0,
     )
     return HTMLResponse(body)
 

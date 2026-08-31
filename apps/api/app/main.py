@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.db.session import init_db
-from app.routes import admin, admin_login, annotate, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, sessions, signalwire, telnyx, trace, twilio, vapi, voice
+from app.routes import admin, admin_login, annotate, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, recordings, sessions, signalwire, telnyx, trace, twilio, vapi, voice
 from packages.observability.structured_log import maybe_install as maybe_install_json_logs
 
 
@@ -175,6 +175,9 @@ def create_app() -> FastAPI:
     # Foundation for LK-judge auto-labels (task #96) + regression sweep
     # against golden corpus (task #97).
     app.include_router(annotate.router)
+    # 2026-08-31 task #104-followup: /admin/recordings/{call_id}.mp3
+    # serves the stereo MP3 written by AudioRecorder. Admin-gated.
+    app.include_router(recordings.router)
     app.include_router(dashboard.router)
     # 2026-08-29 (humanness debugging + traceability):
     # /trace/{call_id} — tenant-scoped humanness trace view.  Reads

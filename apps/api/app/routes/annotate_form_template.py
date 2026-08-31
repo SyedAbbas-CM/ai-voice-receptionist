@@ -172,6 +172,47 @@ body {
 }
 .hdr a:hover { background: var(--tool-band); color: var(--accent); }
 
+/* ─── Audio player (under header, sits above chat) ─── */
+.player {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+}
+.player-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  min-width: 72px;
+}
+.player audio {
+  flex: 1;
+  height: 32px;
+  max-width: 720px;
+}
+.player-dur {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: right;
+}
+.player-dl {
+  color: var(--ink-3);
+  text-decoration: none;
+  font-size: 16px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+.player-dl:hover { background: var(--tool-band); color: var(--accent); }
+
 /* ─── Chat pane ─── */
 .chat {
   grid-area: chat;
@@ -495,6 +536,8 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <a href="#" onclick="document.cookie='voiceops_admin=; Max-Age=0; path=/'; location='/admin/login'; return false;">sign out</a>
   </header>
 
+  $recording_html
+
   <!-- Chat pane -->
   <main class="chat" id="chat"></main>
 
@@ -766,6 +809,8 @@ def render_form_html(
     notes_val: str,
     reviewer_val: str,
     caller_name: str = "",
+    recording_path: str = "",
+    recording_duration_ms: int = 0,
 ) -> str:
     """Interpolate the template with escaped values. All string values
     should already be html-escaped by the caller when needed; JSON
@@ -782,6 +827,25 @@ def render_form_html(
         if caller_name and caller_name.strip()
         else "Call review"
     )
+
+    # Audio player: rendered only when a recording exists on disk.
+    # Duration shown as m:ss for scan-at-a-glance. Muted plays inline
+    # so a reviewer can scrub through the call without downloading.
+    if recording_path:
+        secs = max(0, int(recording_duration_ms) // 1000)
+        dur_label = f"{secs // 60}:{secs % 60:02d}"
+        recording_html = (
+            '<section class="player">'
+            '<span class="player-label">Recording</span>'
+            f'<audio controls preload="metadata" '
+            f'src="/admin/recordings/{html.escape(call_id_raw)}.mp3"></audio>'
+            f'<span class="player-dur">{dur_label}</span>'
+            f'<a class="player-dl" href="/admin/recordings/{html.escape(call_id_raw)}.mp3" '
+            'download title="Download MP3">↓</a>'
+            '</section>'
+        )
+    else:
+        recording_html = ""
     return Template(_HTML_TEMPLATE).safe_substitute(
         css=_CSS,
         call_id_short=html.escape(call_id_raw[:16]),
@@ -797,4 +861,5 @@ def render_form_html(
         notes_val=notes_val,       # caller already html.escape'd
         reviewer_val=reviewer_val, # caller already html.escape'd
         caller_label=caller_label,
+        recording_html=recording_html,
     )

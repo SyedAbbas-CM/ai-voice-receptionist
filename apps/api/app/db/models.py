@@ -125,6 +125,15 @@ class SessionRow(Base):
     # the session's first LLM call is prepared.
     opening_system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # 2026-08-31 task #104-followup: in-app stereo MP3 recording.
+    # Written by twilio_actor.stop() → AudioRecorder.finalize().
+    # `recording_path` is relative under data/recordings/ (e.g.
+    # "clinic/CA1234.mp3"). NULL when recording was disabled, failed,
+    # or the call had no audio.
+    recording_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    recording_duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    recording_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     transcript: Mapped[list["TranscriptRow"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 
