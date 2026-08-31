@@ -160,11 +160,12 @@ def test_form_renders_with_turns():
     # Turn count exposed via the JS TURNS array — 6 objects
     # (loose match: each turn has "idx":N as a substring)
     assert r.text.count('"idx":') == 6
-    # Redesigned UI markers
+    # Redesigned UI markers (v2 — WhatsApp-style, task #104)
     assert "Call review" in r.text
-    assert "audit-desk" in r.text  # from the CSS comment
-    assert 'id="rail-turns"' in r.text  # left rail present
-    assert 'id="tags"' in r.text  # right panel present
+    assert 'id="chat"' in r.text  # chat pane present
+    assert 'id="panel"' in r.text  # right tag panel present
+    assert 'id="tags"' in r.text  # tag list present
+    assert 'name="notes"' in r.text  # plain-text notes bar
 
 
 # ─── 5. POST save creates new ───────────────────────────────────────────────
