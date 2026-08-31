@@ -4715,15 +4715,38 @@ class TwilioActorSession:
         # new text.  If the addition contains the previous transcript
         # or the previous transcript is a prefix of the addition,
         # strip the overlap.
+        #
+        # 2026-08-31 CALL-BUG-11: honest re-ask detection. Real trace
+        # CAe854acb1: caller said "next available slot" → bad cache
+        # gave nonsense reply → caller said "next available slot"
+        # AGAIN → dedupe stripped it to '' → dead air. The signal
+        # that distinguishes redelivery from re-ask is: has the agent
+        # ALREADY SPOKEN a reply to the previous transcript? If yes,
+        # the caller has heard the reply and is intentionally
+        # repeating themselves — do NOT drop.
         norm_prev = prev_transcript.strip().lower()
         norm_add = addition.lower()
-        if norm_prev and norm_prev in norm_add:
+        already_replied = (
+            self._inflight_has_spoken
+            and actor is not None
+            and actor.state.name == "LISTENING"
+        )
+        if norm_prev and norm_prev in norm_add and not already_replied:
             addition = addition[norm_add.index(norm_prev) + len(norm_prev):].lstrip(" ,.-")
             log.info("stripped duplicated prefix call=%s: keeping %r",
                      self.call_id, addition)
             if not addition:
                 # Entire "new" final was just the old transcript replayed.
                 return True
+        elif norm_prev and norm_prev in norm_add and already_replied:
+            # Caller re-asked. Keep the transcript intact, clear the
+            # "last committed" so we treat this as fresh (not a merge).
+            log.info(
+                "re-ask detected call=%s: prev=%r add=%r — replying fresh",
+                self.call_id, prev_transcript, addition,
+            )
+            self._last_committed_transcript = ""
+            prev_transcript = ""
 
         if (
             prev_transcript
