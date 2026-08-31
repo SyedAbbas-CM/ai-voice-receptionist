@@ -486,7 +486,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
   <!-- Header -->
   <header class="hdr">
-    <span class="title">Call review</span>
+    <span class="title">$caller_label</span>
     <span class="cid">$call_id_short…</span>
     <span class="meta"><b>$tenant_label</b> · $call_started_short · $turn_count turns</span>
     <span class="spacer"></span>
@@ -765,6 +765,7 @@ def render_form_html(
     existing_is_gold: bool,
     notes_val: str,
     reviewer_val: str,
+    caller_name: str = "",
 ) -> str:
     """Interpolate the template with escaped values. All string values
     should already be html-escaped by the caller when needed; JSON
@@ -774,6 +775,13 @@ def render_form_html(
     # (full of literal `{` `}`) doesn't have to be brace-escaped. Only
     # `$name` markers substitute; a bare `$` in the source (rare — we
     # audited) would need `$$` — but none exist in the template.
+    # Header title shows the caller's name when we know it, else falls back
+    # to a generic label. Keeps the h1 informative when scanning many calls.
+    caller_label = (
+        html.escape(caller_name.strip())
+        if caller_name and caller_name.strip()
+        else "Call review"
+    )
     return Template(_HTML_TEMPLATE).safe_substitute(
         css=_CSS,
         call_id_short=html.escape(call_id_raw[:16]),
@@ -788,4 +796,5 @@ def render_form_html(
         is_gold_bool="true" if existing_is_gold else "false",
         notes_val=notes_val,       # caller already html.escape'd
         reviewer_val=reviewer_val, # caller already html.escape'd
+        caller_label=caller_label,
     )

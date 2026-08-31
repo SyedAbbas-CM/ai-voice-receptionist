@@ -129,6 +129,38 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
         .all()
     }
 
+    # Batch-load caller names from any booking that call produced. A single
+    # call can produce multiple bookings; take the first one's name.
+    # 2026-08-31 task #104-followup: show the caller's name on the index so
+    # reviewers can scan calls by who they were with, not just by CallSid.
+    session_ids = [s.id for s in sessions]
+    bookings_by_session: dict[str, BookingRow] = {}
+    for b in (
+        db.query(BookingRow)
+        .execution_options(allow_cross_tenant=True)
+        .filter(BookingRow.session_id.in_(session_ids))
+        .all()
+    ):
+        # First booking per session wins (call could produce 2+; annotator
+        # sees the name they collected first, which is usually the caller).
+        bookings_by_session.setdefault(b.session_id, b)
+
+    def _caller_name_for(sess: SessionRow) -> str:
+        """Resolve a display name for the caller. Priority: booking →
+        extracted JSON slot → empty. Fall back to '—' at render time."""
+        booking = bookings_by_session.get(sess.id)
+        if booking and booking.caller_name and booking.caller_name.strip():
+            return booking.caller_name.strip()
+        # Fall back to slots captured on the session even if no booking
+        # was made (FAQ-only calls, dropped calls with name known).
+        ext = sess.extracted or {}
+        if isinstance(ext, dict):
+            for k in ("caller_name", "name", "customer_name", "contact_name"):
+                v = ext.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return ""
+
     # ─── Redesigned index (task #104-followup, 2026-08-31) ────────────
     # Editorial layout matching the annotator's vermilion/warm-paper
     # palette. Stats strip up top (total / reviewed / gold / unreviewed),
@@ -170,8 +202,15 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
         # show tenant + started date/time only.
         started_date = started[:10] if started else ""
         started_time = started[11:19] if started else ""
+        caller_name = _caller_name_for(s)
+        caller_cell = (
+            f'<span class="caller-name">{html.escape(caller_name)}</span>'
+            if caller_name
+            else '<span class="caller-missing">—</span>'
+        )
         rows_html.append(
             f'<tr onclick="location.href=\'/admin/annotate/{html.escape(cid)}\'" style="cursor:pointer">'
+            f'<td class="caller">{caller_cell}</td>'
             f'<td class="cid" title="{html.escape(cid)}"><code>{html.escape(short_cid)}</code></td>'
             f'<td class="tenant">{html.escape(s.tenant_id or "?")}</td>'
             f'<td class="ts"><span class="date">{html.escape(started_date)}</span> '
@@ -356,6 +395,24 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
   tbody tr:hover {{ background: var(--hover); }}
   tbody tr:hover .actions a:first-child {{ color: var(--accent); text-decoration: underline; }}
 
+  td.caller {{
+    font-family: "Charter", "Iowan Old Style", "Georgia", serif;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink);
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }}
+  .caller-name {{ color: var(--ink); }}
+  .caller-missing {{
+    color: var(--ink-3);
+    font-family: "SF Mono", monospace;
+    font-weight: 400;
+    font-size: 13px;
+  }}
+
   td.cid code {{
     font-family: "SF Mono", "IBM Plex Mono", monospace;
     font-size: 12px;
@@ -487,6 +544,7 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
 <table>
 <thead>
 <tr>
+  <th>Caller</th>
   <th>CallSid</th>
   <th>Tenant</th>
   <th>Started (UTC)</th>
@@ -495,7 +553,7 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
 </tr>
 </thead>
 <tbody>
-{"".join(rows_html) if rows_html else '<tr><td colspan="5" class="empty">No calls yet. Place a test call and it will appear here.</td></tr>'}
+{"".join(rows_html) if rows_html else '<tr><td colspan="6" class="empty">No calls yet. Place a test call and it will appear here.</td></tr>'}
 </tbody>
 </table>
 
@@ -634,6 +692,27 @@ def get_annotation_form(
     reviewer_val = html.escape((ann.reviewer_id if ann else "") or "")
     notes_val = html.escape(existing_notes or "")
 
+    # Resolve caller name from any booking on this session, or from
+    # extracted slots (FAQ-only calls, dropped calls, etc.). Empty is OK
+    # — the template falls back to "Call review".
+    caller_name = ""
+    if sess is not None:
+        booking = (
+            db.query(BookingRow)
+            .execution_options(allow_cross_tenant=True)
+            .filter(BookingRow.session_id == sess.id)
+            .order_by(BookingRow.created_at.asc())
+            .first()
+        )
+        if booking and booking.caller_name and booking.caller_name.strip():
+            caller_name = booking.caller_name.strip()
+        elif isinstance(sess.extracted, dict):
+            for k in ("caller_name", "name", "customer_name", "contact_name"):
+                v = sess.extracted.get(k)
+                if isinstance(v, str) and v.strip():
+                    caller_name = v.strip()
+                    break
+
     # v2 UI (task #104 iteration, 2026-08-31): WhatsApp-style chat
     # bubbles + agent-only annotation + persistent plain-text notes bar.
     # Full template lives in annotate_form_template.py for testability.
@@ -650,6 +729,7 @@ def get_annotation_form(
         existing_is_gold=existing_is_gold,
         notes_val=notes_val,
         reviewer_val=reviewer_val,
+        caller_name=caller_name,
     )
     return HTMLResponse(body)
 
