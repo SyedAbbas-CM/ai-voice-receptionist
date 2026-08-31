@@ -43,20 +43,50 @@ class PIIRedactor(ABC):
     name: str = "base"
 
     @abstractmethod
-    def redact_text(self, text: str) -> RedactionResult:
-        ...
+    def redact_text(self, text: str, skip_dob: bool = False) -> RedactionResult:
+        """Redact PII in text. `skip_dob` (added task #103) tells the
+        DOB pattern to no-op for this call — used when the caller is
+        redacting a field known to hold an appointment date, not a
+        birthday. Other PII kinds (PHONE/CARD/SSN/EMAIL) still redact."""
+
+    # Field-name allowlist: keys where DOB-shaped date regexes must NOT
+    # fire, because the value is intentionally an appointment date /
+    # start time / scheduled_for datetime — not a birthday. Task #103
+    # regression: on CAc66749590f6e53986eec4210e49bb425 every
+    # check_availability got `date='[DOB]'` because the DOB regex
+    # matches any ISO YYYY-MM-DD. Then the LLM read the redacted string
+    # back from persisted transcript history and passed literal '[DOB]'
+    # into the NEXT tool call → all availability lookups broken.
+    #
+    # Keys are matched case-insensitively. Other PII kinds (PHONE, CARD,
+    # SSN, EMAIL) still redact in these fields — only DOB is skipped.
+    _DATE_FIELD_ALLOWLIST: frozenset[str] = frozenset({
+        "date",
+        "start", "start_iso", "start_time",
+        "end", "end_iso", "end_time",
+        "scheduled_for", "scheduled_at",
+        "original_visit_date",
+        "created_at", "updated_at",
+        "timestamp", "ts",
+        "day", "weekday",
+    })
 
     def redact_dict(self, data: dict, fields: Optional[list[str]] = None) -> tuple[dict, dict[str, int]]:
         """Recursively redact string values in a dict. If `fields` is given,
-        only touch those keys; otherwise touch every string."""
+        only touch those keys; otherwise touch every string.
+
+        Task #103: date-shaped fields (see _DATE_FIELD_ALLOWLIST) skip
+        DOB matching. Everything else still redacts."""
         counts: dict[str, int] = {}
         out = {}
         for k, v in (data or {}).items():
             if fields is not None and k not in fields:
                 out[k] = v
                 continue
+            key_lc = str(k).lower()
+            skip_dob = key_lc in self._DATE_FIELD_ALLOWLIST
             if isinstance(v, str):
-                r = self.redact_text(v)
+                r = self.redact_text(v, skip_dob=skip_dob)
                 out[k] = r.text
                 for kind, n in r.counts.items():
                     counts[kind] = counts.get(kind, 0) + n
@@ -74,7 +104,7 @@ class NoopPIIRedactor(PIIRedactor):
     """PII redaction OFF. Use only in dev / testing."""
     name = "noop"
 
-    def redact_text(self, text: str) -> RedactionResult:
+    def redact_text(self, text: str, skip_dob: bool = False) -> RedactionResult:
         return RedactionResult(text=text or "", counts={})
 
 
@@ -102,12 +132,18 @@ class RegexPIIRedactor(PIIRedactor):
         ("DOB", re.compile(r"\b(?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])[-/](?:19|20)\d{2}\b")),
     ]
 
-    def redact_text(self, text: str) -> RedactionResult:
+    def redact_text(self, text: str, skip_dob: bool = False) -> RedactionResult:
         if not text:
             return RedactionResult(text="", counts={})
         counts: dict[str, int] = {}
         out = text
         for label, pattern in self._PATTERNS:
+            # Task #103: skip DOB patterns for known-safe date fields.
+            # Prevents "date=2026-09-07" → "date=[DOB]" corruption on
+            # tool args + transcripts (LLM was reading '[DOB]' back
+            # from history + passing literal string into next call).
+            if skip_dob and label == "DOB":
+                continue
             def _sub(m):
                 counts[label] = counts.get(label, 0) + 1
                 return f"[{label}]"
@@ -142,11 +178,17 @@ class PresidioPIIRedactor(PIIRedactor):
         self._analyzer = AnalyzerEngine()
         self._anonymizer = AnonymizerEngine()
 
-    def redact_text(self, text: str) -> RedactionResult:
+    def redact_text(self, text: str, skip_dob: bool = False) -> RedactionResult:
         if not text:
             return RedactionResult(text="", counts={})
         self._load()
-        results = self._analyzer.analyze(text=text, entities=self.entities, language="en")
+        # Task #103: if skip_dob, filter DATE_TIME out of the entities
+        # we ask Presidio about. Presidio has no per-call "skip this
+        # type" hook so we control the entity list.
+        entities = self.entities
+        if skip_dob and entities:
+            entities = [e for e in entities if e not in ("DATE_TIME", "DOB")]
+        results = self._analyzer.analyze(text=text, entities=entities, language="en")
         counts: dict[str, int] = {}
         for r in results:
             counts[r.entity_type] = counts.get(r.entity_type, 0) + 1
