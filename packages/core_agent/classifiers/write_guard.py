@@ -85,18 +85,47 @@ async def validate_write(
         return GuardVerdict(approved=True, reason="not_write_tool")
 
     # Pre-check: reject obvious hallucinations without hitting the LLM.
-    # If caller_name looks like a common placeholder, reject.
+    # 2026-08-31 CALL-BUG-07 fix: ORDER MATTERS. When the LLM invents
+    # `caller_name="Caller" phone="Phone"` (placeholder strings for
+    # slots it never captured), the phone check used to fire first and
+    # emit "I didn't catch a valid phone number" — accusing the caller
+    # of a phone we never asked for. Real trace: CA70fb9550221f5cdaf60cfca911aee26a
+    # turn 20. Now placeholder check runs FIRST, and the detail strings
+    # are natural asks ("Before I book — could I get X?") not
+    # accusations ("I didn't catch your X").
     name = str(tool_arguments.get("caller_name") or "").strip()
     phone = str(tool_arguments.get("phone") or "").strip()
-    if not name:
-        return GuardVerdict(approved=False, reason="no_name", detail="I didn't catch your name — could you say it again?")
-    if not phone or len(phone.replace("-", "").replace(" ", "").replace("+", "").replace("(", "").replace(")", "")) < 7:
-        return GuardVerdict(approved=False, reason="no_phone", detail="I didn't catch a valid phone number — could you say it again?")
 
+    # Placeholder detection FIRST (name AND phone)
     lowered_name = name.lower()
-    placeholder_names = {"john doe", "jane doe", "test user", "example", "n/a", "unknown", "customer", "caller"}
-    if lowered_name in placeholder_names:
-        return GuardVerdict(approved=False, reason="placeholder_name", detail="I didn't catch your real name — could you say it again?")
+    lowered_phone = phone.lower()
+    placeholder_names = {
+        "john doe", "jane doe", "test user", "example", "n/a", "unknown",
+        "customer", "caller", "user", "guest", "anonymous", "the caller",
+        "phone", "name",  # LLM literally passes these words as values
+    }
+    placeholder_phones = {
+        "phone", "number", "unknown", "n/a", "none", "the number",
+        "phone number", "call back", "callback",
+    }
+    if lowered_name in placeholder_names or not name:
+        return GuardVerdict(
+            approved=False,
+            reason="placeholder_name" if lowered_name in placeholder_names else "no_name",
+            detail="Before I book — could I get your name?",
+        )
+    if lowered_phone in placeholder_phones:
+        return GuardVerdict(
+            approved=False,
+            reason="placeholder_phone",
+            detail="Before I book — what's the best number to reach you at?",
+        )
+    if not phone or len(phone.replace("-", "").replace(" ", "").replace("+", "").replace("(", "").replace(")", "")) < 7:
+        return GuardVerdict(
+            approved=False,
+            reason="no_phone",
+            detail="Before I book — what's the best number to reach you at?",
+        )
 
     # Owner-mode / fake-booking fast-path: caller declared this is a test call
     # OR asked us to book something they explicitly said shouldn't be real.
