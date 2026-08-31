@@ -18,7 +18,7 @@ from packages.schemas import (
 
 from .extractor import extract_fields
 from .prompt import build_system_prompt
-from .speech_sanitizer import sanitize_for_speech
+from .speech_sanitizer import sanitize_for_speech, enforce_agent_name
 
 # 2026-08-24 (A1 wiring): hoisted to module scope per networking review.
 # The intercept below reads `settings.next_action_policy_enabled` once
@@ -1450,6 +1450,11 @@ class ReceptionistBrain:
                 # tool-name leakage, and expand common abbreviations. Belt-and-
                 # suspenders for prompt rules the LLM sometimes ignores.
                 reply_text = sanitize_for_speech(raw_text)
+                # 2026-08-31 CALL-BUG-08 followup: LLM sometimes drifts the
+                # agent's name mid-call ('Ava' → 'Alex'). Pin the configured
+                # name post-hoc regardless of what the LLM output.
+                _agent_name = getattr(self.business, "agent_name", None) or "Ava"
+                reply_text = enforce_agent_name(reply_text, _agent_name)
 
                 # 2026-08-11 (task #310): post-reply sanity check for fake
                 # booking confirmations.  Hassan trace CA156d550a showed

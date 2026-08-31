@@ -2373,10 +2373,30 @@ class TwilioActorSession:
                 # Arm the idle-followup ladder so a silent caller gets
                 # nudged/hung-up eventually.  Idempotent — cancels any
                 # prior task.
-                self._arm_idle_followup()
+                # 2026-08-31 CALL-BUG-10: check farewell BEFORE arming
+                # idle-followup. If the reply contains a farewell
+                # pattern, do NOT arm idle — user reported "anything
+                # else" firing 10s AFTER a booking confirmation on
+                # CA087a09 because the streaming path armed idle first,
+                # and even though _maybe_hangup_after_farewell ran, its
+                # 2.5s hangup timer collided with the 10s idle prompt
+                # and something (TTS truncation) suppressed the hangup.
+                # Order matters: farewell check → arm idle only if not
+                # a farewell.
+                _full_reply = " ".join(_pump_spoken_text) if _pump_spoken_text else ""
+                _is_farewell = False
+                if _full_reply:
+                    import re as _re_fw
+                    _low = _full_reply.lower()
+                    for _fw_pat in self._FAREWELL_PATTERNS:
+                        if _re_fw.search(rf"\b{_fw_pat}\b", _low):
+                            _is_farewell = True
+                            break
+                if not _is_farewell:
+                    self._arm_idle_followup()
                 log.info(
-                    "PUMP_SPEECH_COMPLETED call=%s gen=%d — SPEAKING→LISTENING",
-                    self.call_id, gen,
+                    "PUMP_SPEECH_COMPLETED call=%s gen=%d farewell=%s — SPEAKING→LISTENING",
+                    self.call_id, gen, _is_farewell,
                 )
                 # 2026-08-21: mirror _speak()'s farewell hook. Feed the
                 # full accumulated reply so `_maybe_hangup_after_farewell`
@@ -2385,7 +2405,6 @@ class TwilioActorSession:
                 # the LLM's "See you then!" never scheduled the hangup
                 # (verified on CA5a1ce466).
                 if _pump_spoken_text:
-                    _full_reply = " ".join(_pump_spoken_text)
                     # Mirror _speak()'s rolling utterance buffer so echo
                     # suppression + structured-data-ask widening see
                     # streaming replies too (both check
@@ -3847,7 +3866,20 @@ class TwilioActorSession:
             # "Anything else?"; another 15s of silence → say goodbye
             # and hang up.  Cancelled the moment END_OF_TURN fires
             # (i.e. the caller says something).
-            self._arm_idle_followup()
+            # 2026-08-31 CALL-BUG-10: skip idle arm when the text we
+            # just spoke IS a farewell — otherwise "anything else?"
+            # fires 10s after the goodbye. See streaming pump for the
+            # sibling check.
+            _speak_is_farewell = False
+            if text:
+                import re as _re_fw2
+                _low_speak = text.lower()
+                for _fw_pat in self._FAREWELL_PATTERNS:
+                    if _re_fw2.search(rf"\b{_fw_pat}\b", _low_speak):
+                        _speak_is_farewell = True
+                        break
+            if not _speak_is_farewell:
+                self._arm_idle_followup()
 
     async def _stream_tts(self, text: str, gen: int) -> None:
         """Do the actual synth + send.  Broken out so it's a

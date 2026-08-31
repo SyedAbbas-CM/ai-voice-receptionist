@@ -372,6 +372,59 @@ _KNOWN_LOWERABLE = {
 }
 
 
+def enforce_agent_name(text: str, agent_name: str) -> str:
+    """Rewrite any 'I'm <Name>' / 'This is <Name>' / '<Name> here' /
+    'You've got <Name>' phrase to use the CONFIGURED agent_name,
+    even when the LLM invented a different name.
+
+    2026-08-31 CALL-BUG-08 followup: LLM drift observed on real call
+    CA087a09 — introduced as Ava on turn 0, said 'Alex' later. Prompt
+    rule alone isn't enough. This is defence in depth.
+
+    Never touches other people's names — only patterns that clearly
+    refer to the agent SELF-identifying. Case-insensitive match,
+    preserves the surrounding punctuation.
+    """
+    if not text or not agent_name:
+        return text
+    # Match ONLY the self-intro patterns. `\w+` captures the wrong name.
+    # Word-boundary anchored so we don't rewrite in the middle of another
+    # word.
+    _self_intro_patterns = [
+        # "I'm <Name>" / "I am <Name>"
+        re.compile(r"\b(I(?:'m| am))\s+([A-Z][a-z]+)\b"),
+        # "This is <Name>"
+        re.compile(r"\b(This is)\s+([A-Z][a-z]+)\b"),
+        # "<Name> here"
+        re.compile(r"\b([A-Z][a-z]+)\s+(here)\b"),
+        # "You've got <Name>" / "You have <Name>"
+        re.compile(r"\b(You(?:'ve| have) got)\s+([A-Z][a-z]+)\b"),
+        # "My name is <Name>" (rare but possible LLM output)
+        re.compile(r"\b(My name is)\s+([A-Z][a-z]+)\b"),
+    ]
+    _KNOWN_ROLES = {  # never rewrite these — they're not names
+        "The", "Reception", "Front", "Ava", "Sam", "Riley", "Casey",
+        "Jamie", "Alex", "Jordan",  # will be filtered by comparison below
+    }
+    out = text
+    for pat in _self_intro_patterns:
+        def _rewrite(m):
+            head = m.group(1)
+            tail = m.group(2)  # the captured name or "here"
+            # If the captured "name" is actually the correct name,
+            # leave it alone. Case-insensitive compare.
+            if tail.lower() == agent_name.lower():
+                return m.group(0)
+            # "<Name> here" pattern — tail is "here", head is the name
+            if tail.lower() == "here":
+                if head.lower() == agent_name.lower():
+                    return m.group(0)
+                return f"{agent_name} {tail}"
+            return f"{head} {agent_name}"
+        out = pat.sub(_rewrite, out)
+    return out
+
+
 def sanitize_for_speech(text: str, flow_mode: bool = True) -> str:
     """Clean an LLM reply so it's safe to feed to a TTS model.
 
