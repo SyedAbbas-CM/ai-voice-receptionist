@@ -120,11 +120,18 @@ def test_json_404_on_no_annotation():
 
 
 def test_index_renders_html():
+    """Task #104-followup: index page is the reviewer console — editorial
+    layout with mast + stats strip + table. Check for v2 markers."""
     with _client() as c:
         r = c.get("/admin/annotate", headers=_hdr())
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
-    assert "Call annotations" in r.text
+    # v2 markers — masthead title + stats strip + section title
+    assert "Call review" in r.text  # <title> + <h1>
+    assert 'class="stats"' in r.text  # stats strip present
+    assert "Total calls" in r.text  # stats labels
+    assert "Reviewed" in r.text
+    assert "Gold refs" in r.text  # gold reference stat
 
 
 def test_index_lists_recent_call():

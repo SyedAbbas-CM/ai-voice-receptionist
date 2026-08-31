@@ -129,56 +129,383 @@ def get_index(request: Request, db: Session = Depends(get_session)) -> HTMLRespo
         .all()
     }
 
-    # Build the HTML. Keep it small + inline CSS so no external deps.
+    # ─── Redesigned index (task #104-followup, 2026-08-31) ────────────
+    # Editorial layout matching the annotator's vermilion/warm-paper
+    # palette. Stats strip up top (total / reviewed / gold / unreviewed),
+    # then a proper table with row hover + verdict pills. Theme-aware.
+
+    # Compute stats for the top strip.
+    total = len(sessions)
+    reviewed = sum(1 for s in sessions if annotations.get(_raw_call_id(s.id)))
+    gold_count = sum(
+        1 for s in sessions
+        if (a := annotations.get(_raw_call_id(s.id))) and a.is_gold
+    )
+    unreviewed = total - reviewed
+    win_count = sum(
+        1 for s in sessions
+        if (a := annotations.get(_raw_call_id(s.id))) and a.verdict == "win"
+    )
+    fail_count = sum(
+        1 for s in sessions
+        if (a := annotations.get(_raw_call_id(s.id))) and a.verdict == "fail"
+    )
+
     rows_html = []
     for s in sessions:
         cid = _raw_call_id(s.id)
         ann = annotations.get(cid)
         verdict = ann.verdict if ann else "unreviewed"
-        gold = "⭐" if (ann and ann.is_gold) else ""
+        gold = '<span class="gold" title="Gold reference">★</span>' if (ann and ann.is_gold) else ""
         verdict_class = {
-            "win": "verdict-win",
-            "fail": "verdict-fail",
-            "mixed": "verdict-mixed",
-            "unreviewed": "verdict-none",
-        }.get(verdict, "verdict-none")
+            "win": "pill pill-win",
+            "fail": "pill pill-fail",
+            "mixed": "pill pill-mixed",
+            "unreviewed": "pill pill-none",
+        }.get(verdict, "pill pill-none")
         started = _to_iso(s.started_at) or ""
+        # Short CallSid for readability — full one in title tooltip.
+        short_cid = cid[:12] + "…" if len(cid) > 12 else cid
+        # Approximate call length from tenant_id column not available here;
+        # show tenant + started date/time only.
+        started_date = started[:10] if started else ""
+        started_time = started[11:19] if started else ""
         rows_html.append(
-            f'<tr>'
-            f'<td><code>{html.escape(cid)}</code></td>'
-            f'<td>{html.escape(s.tenant_id or "?")}</td>'
-            f'<td>{html.escape(started[:19])}</td>'
-            f'<td><span class="{verdict_class}">{html.escape(verdict)}</span> {gold}</td>'
-            f'<td>'
-            f'<a href="/admin/annotate/{html.escape(cid)}">annotate</a>'
-            f' &middot; '
-            f'<a href="/trace/{html.escape(cid)}" target="_blank" '
-            f'title="Humanness event timeline">trace ↗</a>'
+            f'<tr onclick="location.href=\'/admin/annotate/{html.escape(cid)}\'" style="cursor:pointer">'
+            f'<td class="cid" title="{html.escape(cid)}"><code>{html.escape(short_cid)}</code></td>'
+            f'<td class="tenant">{html.escape(s.tenant_id or "?")}</td>'
+            f'<td class="ts"><span class="date">{html.escape(started_date)}</span> '
+            f'<span class="time">{html.escape(started_time)}</span></td>'
+            f'<td class="verdict"><span class="{verdict_class}">{html.escape(verdict)}</span>{gold}</td>'
+            f'<td class="actions">'
+            f'<a href="/admin/annotate/{html.escape(cid)}" onclick="event.stopPropagation()">review →</a>'
+            f' <a class="secondary" href="/trace/{html.escape(cid)}" target="_blank" '
+            f'onclick="event.stopPropagation()" title="Humanness event timeline">trace ↗</a>'
             f'</td>'
             f'</tr>'
         )
 
     body = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Call annotations</title>
+<html><head><meta charset="utf-8"><title>Call review</title>
 <style>
-  body {{ font-family: -apple-system, sans-serif; margin: 2em; max-width: 1000px; }}
-  h1 {{ font-size: 1.4em; }}
-  table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ text-align: left; padding: 0.4em 0.6em; border-bottom: 1px solid #eee; font-size: 0.9em; }}
-  th {{ background: #fafafa; }}
-  code {{ font-size: 0.85em; }}
-  .verdict-win {{ color: #0a7c3a; font-weight: 600; }}
-  .verdict-fail {{ color: #c22; font-weight: 600; }}
-  .verdict-mixed {{ color: #d47800; font-weight: 600; }}
-  .verdict-none {{ color: #888; }}
-  .hint {{ color: #666; font-size: 0.85em; margin-bottom: 1em; }}
+  :root {{
+    --paper: #f7f5ef;
+    --ink: #1a1a1a;
+    --ink-2: #4a4a4a;
+    --ink-3: #7a7a7a;
+    --rule: #d9d3c4;
+    --card: #ffffff;
+    --card-2: #fbf9f2;
+    --accent: #b8360f;
+    --accent-soft: #f2ddd4;
+    --good: #2f6b2a;
+    --warn: #a67300;
+    --bad: #a11b1b;
+    --hover: #f2ecd9;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root:not([data-theme="light"]) {{
+      --paper: #14140f;
+      --ink: #f0ece0;
+      --ink-2: #b8b3a3;
+      --ink-3: #7a7568;
+      --rule: #2f2c22;
+      --card: #1c1a15;
+      --card-2: #17150f;
+      --accent: #e46540;
+      --accent-soft: #3a1f14;
+      --good: #6ec665;
+      --warn: #d9a63a;
+      --bad: #e26a6a;
+      --hover: #22201a;
+    }}
+  }}
+  html {{ color-scheme: light dark; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Charter", "Iowan Old Style", "Georgia", "Cambria", serif;
+    font-size: 15px;
+    line-height: 1.5;
+    margin: 0;
+    padding: 40px 32px;
+    -webkit-font-smoothing: antialiased;
+  }}
+  .wrap {{ max-width: 1080px; margin: 0 auto; }}
+
+  header.mast {{
+    border-bottom: 3px double var(--ink);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }}
+  header.mast h1 {{
+    font-family: "Playfair Display", "Didot", "Bodoni 72", serif;
+    font-size: 34px;
+    font-weight: 900;
+    letter-spacing: -0.01em;
+    margin: 0;
+    line-height: 1;
+  }}
+  header.mast .kicker {{
+    font-family: "SF Mono", "IBM Plex Mono", "Menlo", monospace;
+    font-size: 10px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    display: block;
+    margin-bottom: 6px;
+  }}
+  header.mast .meta {{
+    font-family: "SF Mono", "IBM Plex Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+    text-align: right;
+    line-height: 1.7;
+  }}
+  header.mast .meta strong {{ color: var(--accent); }}
+
+  /* Stats strip */
+  .stats {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0;
+    border: 1px solid var(--rule);
+    background: var(--card);
+    margin-bottom: 28px;
+    border-radius: 2px;
+    overflow: hidden;
+  }}
+  .stat {{
+    padding: 16px 20px;
+    border-right: 1px solid var(--rule);
+  }}
+  .stat:last-child {{ border-right: none; }}
+  .stat .n {{
+    font-family: "Playfair Display", "Didot", serif;
+    font-size: 28px;
+    font-weight: 900;
+    line-height: 1;
+    display: block;
+    color: var(--ink);
+  }}
+  .stat.accent .n {{ color: var(--accent); }}
+  .stat.win .n {{ color: var(--good); }}
+  .stat.fail .n {{ color: var(--bad); }}
+  .stat .label {{
+    font-family: "SF Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-top: 6px;
+    display: block;
+  }}
+
+  /* Section title */
+  .section-title {{
+    font-family: "SF Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--rule);
+  }}
+  .section-title .count {{
+    color: var(--accent);
+    font-weight: 700;
+    margin-left: 8px;
+  }}
+
+  /* Table */
+  table {{
+    border-collapse: collapse;
+    width: 100%;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    overflow: hidden;
+  }}
+  thead th {{
+    text-align: left;
+    padding: 12px 16px;
+    background: var(--card-2);
+    border-bottom: 1px solid var(--rule);
+    font-family: "SF Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 600;
+  }}
+  tbody td {{
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--rule);
+    font-size: 14px;
+  }}
+  tbody tr:last-child td {{ border-bottom: none; }}
+  tbody tr:hover {{ background: var(--hover); }}
+  tbody tr:hover .actions a:first-child {{ color: var(--accent); text-decoration: underline; }}
+
+  td.cid code {{
+    font-family: "SF Mono", "IBM Plex Mono", monospace;
+    font-size: 12px;
+    color: var(--ink-2);
+  }}
+  td.tenant {{
+    font-family: "SF Mono", monospace;
+    font-size: 12px;
+    color: var(--ink-2);
+    letter-spacing: 0.05em;
+  }}
+  td.ts .date {{
+    font-family: "SF Mono", monospace;
+    font-size: 12px;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }}
+  td.ts .time {{
+    font-family: "SF Mono", monospace;
+    font-size: 11px;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+    margin-left: 4px;
+  }}
+
+  /* Verdict pills */
+  .pill {{
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-family: "SF Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 700;
+  }}
+  .pill-win {{ background: rgba(47, 107, 42, 0.12); color: var(--good); }}
+  .pill-fail {{ background: rgba(161, 27, 27, 0.12); color: var(--bad); }}
+  .pill-mixed {{ background: rgba(166, 115, 0, 0.12); color: var(--warn); }}
+  .pill-none {{
+    background: transparent;
+    color: var(--ink-3);
+    border: 1px dashed var(--rule);
+    font-weight: 500;
+  }}
+  .gold {{
+    color: var(--accent);
+    font-size: 14px;
+    margin-left: 6px;
+    vertical-align: -1px;
+  }}
+
+  /* Actions */
+  td.actions {{ text-align: right; white-space: nowrap; }}
+  td.actions a {{
+    color: var(--ink);
+    text-decoration: none;
+    font-family: "SF Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }}
+  td.actions a:hover {{ color: var(--accent); }}
+  td.actions a.secondary {{
+    color: var(--ink-3);
+    font-weight: 500;
+    margin-left: 12px;
+  }}
+
+  /* Empty state */
+  .empty {{
+    padding: 60px 20px;
+    text-align: center;
+    color: var(--ink-3);
+    font-style: italic;
+  }}
+
+  /* Colophon */
+  .colophon {{
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 3px double var(--ink);
+    font-family: "SF Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }}
+  .colophon strong {{ color: var(--accent); }}
+
+  @media (max-width: 640px) {{
+    body {{ padding: 24px 16px; }}
+    header.mast {{ flex-direction: column; align-items: flex-start; }}
+    header.mast .meta {{ text-align: left; }}
+    header.mast h1 {{ font-size: 26px; }}
+    td.cid {{ max-width: 100px; overflow: hidden; text-overflow: ellipsis; }}
+    td.actions a.secondary {{ display: none; }}
+  }}
 </style></head><body>
-<h1>Call annotations</h1>
-<p class="hint">Last {len(sessions)} calls across all tenants. Click any CallSid to annotate.</p>
+<div class="wrap">
+
+<header class="mast">
+  <div>
+    <span class="kicker">Reviewer console · Aug 2026</span>
+    <h1>Call review</h1>
+  </div>
+  <div class="meta">
+    <strong>agent.eternalconquests.com</strong><br>
+    Multi-tenant · Cross-tenant read
+  </div>
+</header>
+
+<section class="stats">
+  <div class="stat"><span class="n">{total}</span><span class="label">Total calls</span></div>
+  <div class="stat accent"><span class="n">{reviewed}</span><span class="label">Reviewed</span></div>
+  <div class="stat"><span class="n">{unreviewed}</span><span class="label">Unreviewed</span></div>
+  <div class="stat win"><span class="n">{win_count}</span><span class="label">Wins</span></div>
+  <div class="stat fail"><span class="n">{fail_count}</span><span class="label">Fails</span></div>
+  <div class="stat accent"><span class="n">{gold_count}</span><span class="label">★ Gold refs</span></div>
+</section>
+
+<p class="section-title">Recent calls <span class="count">{total}</span> · click any row to review</p>
+
 <table>
-<thead><tr><th>CallSid</th><th>Tenant</th><th>Started (UTC)</th><th>Verdict</th><th></th></tr></thead>
-<tbody>{"".join(rows_html)}</tbody>
+<thead>
+<tr>
+  <th>CallSid</th>
+  <th>Tenant</th>
+  <th>Started (UTC)</th>
+  <th>Verdict</th>
+  <th></th>
+</tr>
+</thead>
+<tbody>
+{"".join(rows_html) if rows_html else '<tr><td colspan="5" class="empty">No calls yet. Place a test call and it will appear here.</td></tr>'}
+</tbody>
 </table>
+
+<div class="colophon">
+  <span>VoiceOps · <strong>reviewer</strong></span>
+  <span>Every call becomes training data.</span>
+  <span>Set in Playfair Display &amp; SF Mono.</span>
+</div>
+
+</div>
 </body></html>"""
     return HTMLResponse(body)
 
