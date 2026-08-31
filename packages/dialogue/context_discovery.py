@@ -416,6 +416,12 @@ _GROUNDING_STOPWORDS = frozenset({
     "this", "these", "those", "there", "then", "so", "just", "also",
     "as", "if", "not", "no", "yes", "one", "two", "actually",
     "kind", "sort", "type", "thing", "stuff", "you", "know",
+    # 2026-08-31 CALL-BUG-13: honorific / title words are never
+    # grounding signals — caller may say "it was doctor whitfield"
+    # or just "whitfield". Requiring "doctor" to appear in the
+    # utterance is a false-negative source.
+    "doctor", "dr", "mr", "mrs", "ms", "miss", "dentist", "hygienist",
+    "provider", "person",
 })
 
 
@@ -444,7 +450,7 @@ def _answer_is_grounded(
     answer: str, recent_caller_texts: Optional[list[str]],
 ) -> bool:
     """True when every substantive word in `answer` also appears in
-    the caller's recent utterances.
+    the caller's recent utterances (exact OR phonetically similar).
 
     2026-08-31 (BUG #157 fix from CAc66749): LLM under time pressure
     hallucinated 'Chen' when caller said only 'It was doctor.'  The
@@ -452,11 +458,18 @@ def _answer_is_grounded(
     made-up provider name.  This guard rejects answers whose content
     words aren't in the caller's transcript.
 
+    2026-08-31 (CALL-BUG-13 from CA255fe8c231): strict subset was
+    too tight for proper nouns. Real trace: caller said "the upgrade
+    field" (STT mishear of "Doctor Whitfield"), LLM correctly
+    normalized to "Whitfield" from context, guard refused because
+    'whitfield' not in {'upgrade', 'field'}. Now: fall back to
+    metaphone-equivalence or Jaro-Winkler >= 0.85 for the last word
+    of the answer — that word is usually the surname and the phonetic
+    match against the STT-garbled version proves the LLM isn't
+    hallucinating from thin air.
+
     Falls back to permissive (True) when recent_caller_texts is None
     or empty — never let the guard break brain on missing context.
-    A very short answer with only stopwords is treated as grounded
-    (edge case: single-word stopword answers won't happen in practice
-    but no reason to reject).
     """
     if not recent_caller_texts:
         return True  # permissive fallback
@@ -466,10 +479,43 @@ def _answer_is_grounded(
     haystack: set[str] = set()
     for t in recent_caller_texts:
         haystack.update(_grounding_tokens(t))
-    # Every substantive word in the answer must be in the caller's
-    # utterances.  Partial grounding fails — 'root canal' when caller
-    # only said 'canal' is a hallucinated 'root'.
-    return answer_tokens.issubset(haystack)
+    # Fast path: exact-word subset.
+    if answer_tokens.issubset(haystack):
+        return True
+    # Phonetic fallback: for each answer token missing from haystack,
+    # accept if any utterance token is phonetically similar. Guards
+    # against STT-mangled proper nouns (Whitfield → "upgrade field",
+    # Ravi → "raw view", Syed → "seth").
+    try:
+        import jellyfish as _jf
+        missing = answer_tokens - haystack
+        for miss in missing:
+            miss_meta = _jf.metaphone(miss)
+            miss_lower = miss.lower()
+            phonetic_hit = False
+            for tok in haystack:
+                # Metaphone equivalence (e.g. "whitfield"/"WTFLT"
+                # matches "field"/"FLT" as a suffix)
+                tok_meta = _jf.metaphone(tok)
+                if miss_meta and tok_meta and (
+                    miss_meta == tok_meta
+                    or miss_meta.endswith(tok_meta)
+                    or tok_meta.endswith(miss_meta)
+                ):
+                    phonetic_hit = True
+                    break
+                # Jaro-Winkler at 0.85+ catches "chen"/"gwen",
+                # "whitfield"/"wittfield" style near-matches
+                if _jf.jaro_winkler_similarity(miss_lower, tok.lower()) >= 0.85:
+                    phonetic_hit = True
+                    break
+            if not phonetic_hit:
+                return False
+        return True
+    except Exception:
+        # Jellyfish missing or errored — fall back to strict subset
+        # (already computed above as False).
+        return False
 
 
 def handle_discovery_tool_call(

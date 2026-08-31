@@ -68,6 +68,11 @@ _VERTICAL_KEYTERMS: dict[str, tuple[str, ...]] = {
         # misheard as "greeting" on Flux. Boost the exact word + a
         # phrase variant so Deepgram biases toward the dental sense.
         "cleaning", "a cleaning", "dental cleaning", "teeth cleaning",
+        # 2026-08-31 CALL-BUG-13: staff surnames from the sample clinic
+        # fixture (Whitfield → misheard as "upgrade field"; Chen ok).
+        # In production this list should be per-tenant from the business
+        # profile's staff.  For now, boost the fixture names.
+        "Whitfield", "Doctor Whitfield", "Chen", "Doctor Chen",
         "prophy", "prophylaxis",
         "crown", "crowns", "bridge", "veneer", "veneers",
         "root canal", "endodontic", "endo",
