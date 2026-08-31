@@ -66,6 +66,12 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/vapi/",              # Vapi path validates its own bearer separately
     "/channels/",          # WhatsApp/Telegram signature-verify separately
     "/admin/",             # Admin routes have their own ADMIN_TOKEN guard
+    # 2026-08-31 task #104: /trace/{call_id} has its own resolver that
+    # accepts EITHER admin session cookie OR tenant Bearer OR
+    # ?token=. Middleware here would 401 on the cookie path before
+    # the route handler runs.  Route body still enforces authz —
+    # _resolve_trace_tenant + _load_session_and_verify.
+    "/trace/",
     "/call/",              # customer-facing widget static assets
     "/call-stream/",       # Sprint 10 streaming-parity dev widget (also unauth'd)
     "/simulator/",         # dev-only widget static assets
