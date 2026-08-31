@@ -2158,22 +2158,17 @@ class TwilioActorSession:
         # hear me?" to hit OpenAI at 1.8s instead of ~50ms disk cache.
         # ChatGPT audit called this out.
         #
-        # 2026-08-23 (user requested): while raw-LLM speed testing is
-        # active (response_cache_bypass=true), ALSO skip conv-control
-        # so caller experiences the true LLM latency floor. This keeps
-        # measurement honest — if the fastpath fires on "hear me", we
-        # can't see how slow the underlying LLM path is on similar
-        # inputs. When speed testing ends and response_cache_bypass
-        # goes back to false, the conv-control fastpath re-activates.
-        # For production (bypass=false), conv-control still fires —
-        # it's a real win, not a measurement artifact.
-        if settings.response_cache_bypass:
-            log.info(
-                "CACHE_BYPASS_ACTIVE call=%s conv_control_fastpath skipped "
-                "(raw-LLM measurement mode)",
-                self.call_id,
-            )
-            return False
+        # 2026-08-31 CALL-BUG-15 (was 2026-08-23 measurement-mode):
+        # DECOUPLED from response_cache_bypass. Turning off the DB
+        # response cache to avoid stale bad entries should NOT also
+        # kill the deterministic conv-control fastpath — that made
+        # "hello can you hear me" take 8 SECONDS on 2026-08-31
+        # (CA07c133 real trace: LLM_FIRST_TEXT ms=6987 + empty
+        # completion + rescue retry). The conv-control matcher is a
+        # tiny hardcoded intent→canned-reply dict — no learning, no
+        # poisoning risk. Always fire it. Measurement-mode users
+        # who genuinely want raw-LLM latency should set a separate
+        # `conv_control_bypass` flag if we ever need it.
         try:
             from packages.voice import match_conversation_control_intent
             reply = match_conversation_control_intent(transcript)
