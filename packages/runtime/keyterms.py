@@ -64,7 +64,11 @@ _VERTICAL_KEYTERMS: dict[str, tuple[str, ...]] = {
     "clinic": (
         # Dental / medical services
         "implant", "implants", "tooth implant", "dental implant",
-        "cleaning", "prophy", "prophylaxis",
+        # 2026-08-31 CALL-BUG-06 followup: user reported "cleaning"
+        # misheard as "greeting" on Flux. Boost the exact word + a
+        # phrase variant so Deepgram biases toward the dental sense.
+        "cleaning", "a cleaning", "dental cleaning", "teeth cleaning",
+        "prophy", "prophylaxis",
         "crown", "crowns", "bridge", "veneer", "veneers",
         "root canal", "endodontic", "endo",
         "extraction", "wisdom tooth", "wisdom teeth",

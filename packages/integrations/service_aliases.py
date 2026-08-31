@@ -30,6 +30,27 @@ from enum import Enum
 from typing import Optional
 
 
+# 2026-08-31 (CALL-BUG-06): tokens that appear inside common service
+# names ("New patient exam WITH X-rays", "Cleaning AND recall exam")
+# but carry zero service-intent signal. Never award the fuzzy
+# token-overlap bonus for these. Real trace: caller said "Hello. am
+# I talking with" (hearing check) → "with" matched "with" in service
+# name → confidence 0.60 → wrong service persisted for entire call.
+_TOKEN_STOPWORDS: frozenset[str] = frozenset({
+    # Prepositions / conjunctions / pronouns
+    "with", "without", "and", "or", "for", "the", "your", "our",
+    "have", "want", "would", "could", "like", "need", "book",
+    "make", "get", "put", "set", "call", "back",
+    # Utterance fillers
+    "hello", "hey", "yeah", "okay", "sure", "please", "thanks",
+    "just", "well", "know", "sorry",
+    # STT-noise / hearing-check patterns
+    "talking", "hear", "there", "listen", "listening",
+    # Overly-generic connectives that appear in service names
+    "visit", "appointment", "session", "consultation",
+})
+
+
 class ServiceMatchKind(str, Enum):
     """Outcome of an alias lookup."""
     MATCH_EXACT = "match_exact"    # confident: use verbatim
@@ -247,8 +268,17 @@ def resolve_service(
             )
             # Bonus if any token of the spoken phrase appears in the
             # service name.
+            # 2026-08-31 (CALL-BUG-06 fix): stopword-guarded. Real trace
+            # from CAbd671430f1297c1bbe0640a977060f1f: caller said
+            # "Hello. am I talking with" (a hearing check) — token
+            # "with" (4 chars) appeared in "New patient exam with
+            # X-rays" → fuzzy conf=0.60 → MATCH_FUZZY → wrong service
+            # got persisted in _collected_slots, agent asked wrong
+            # questions for 8 subsequent turns. Filler / stopword
+            # tokens must never trigger a service match on their own.
             for tok in norm_spoken.split():
-                if len(tok) >= 4 and tok in name.lower():
+                if len(tok) >= 4 and tok not in _TOKEN_STOPWORDS \
+                        and tok in name.lower():
                     sim = max(sim, 0.6)
             ranked.append((name, sim))
         ranked.sort(key=lambda x: x[1], reverse=True)

@@ -567,6 +567,16 @@ class ReceptionistBrain:
                 # book_appointment couldn't run because service was
                 # 'missing.'  Break the deadlock: consult
                 # resolve_service on recent utterances directly.
+                # 2026-08-31 (CALL-BUG-06 fix B): also try to re-resolve
+                # when the FRESH caller utterance (this turn only) yields
+                # a stronger match than what's persisted. Guards against
+                # a bad turn-1 fuzzy match sticking forever — real trace
+                # CAbd671430f1297c1bbe0640a977060f1f had "with" fuzzy-
+                # matching "New patient exam with X-rays" (0.60) on
+                # turn 03, and every subsequent explicit "follow-up" was
+                # ignored because service was already set. We only
+                # overwrite if THIS turn's utterance gets an EXACT match.
+                _fresh_utt = user_text if user_text else ""
                 if not _known_slots.get("service"):
                     _biz = getattr(state, "business", None) or (
                         getattr(self, "business", None)
@@ -606,6 +616,74 @@ class ReceptionistBrain:
                             ))
                         except Exception:
                             pass
+                elif _fresh_utt.strip():
+                    # Service already set — but if THIS turn's fresh
+                    # utterance produces an EXACT (not fuzzy) match to
+                    # a DIFFERENT service, the prior value was probably
+                    # a bad fuzzy stick (CALL-BUG-06). Overwrite. Never
+                    # downgrade to fuzzy — only exact wins.
+                    _biz = getattr(state, "business", None) or (
+                        getattr(self, "business", None)
+                    )
+                    try:
+                        from packages.integrations.service_aliases import (
+                            resolve_service as _rs,
+                            ServiceMatchKind as _SMK,
+                        )
+                        _svcs = getattr(_biz, "services", None) if _biz else None
+                        if _svcs:
+                            _fresh_match = _rs(_fresh_utt, _svcs)
+                            if (
+                                _fresh_match.kind == _SMK.MATCH_EXACT
+                                and _fresh_match.canonical_name
+                                and _fresh_match.canonical_name
+                                    != _known_slots.get("service")
+                            ):
+                                _prior = _known_slots.get("service")
+                                _known_slots["service"] = (
+                                    _fresh_match.canonical_name
+                                )
+                                try:
+                                    if not hasattr(
+                                        state, "_collected_slots"
+                                    ):
+                                        state._collected_slots = {}
+                                    state._collected_slots["service"] = (
+                                        _fresh_match.canonical_name
+                                    )
+                                    # If the prior value seeded a
+                                    # discovery orchestrator for a
+                                    # different service, tear it down —
+                                    # a new orchestrator (if any) will
+                                    # open on the correct service below.
+                                    if getattr(
+                                        state, "_context_discovery", None,
+                                    ) is not None:
+                                        state._context_discovery = None
+                                except Exception:
+                                    pass
+                                # Trace event: which utterance corrected
+                                # which prior wrong service.
+                                try:
+                                    from packages.observability.humanness_events import (
+                                        ServiceResolutionEvent as _SRE2,
+                                        emit_humanness_event as _em2,
+                                    )
+                                    _em2(_SRE2(
+                                        call_id=state.session_id or "?",
+                                        tenant_id=getattr(
+                                            state, "tenant_id", "default",
+                                        ),
+                                        session_id=state.session_id or "?",
+                                        spoken=(_fresh_utt or "")[:200],
+                                        kind="corrected_from_utterance",
+                                        canonical_name=_fresh_match.canonical_name,
+                                        reason=f"overwrote prior {_prior!r}",
+                                    ))
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
                 # 2026-08-30 (task #150 wire): DISCOVER_CONTEXT branch.
                 # When the resolved service needs context (e.g.
                 # 'Follow-up visit' needs original_procedure /
