@@ -55,20 +55,35 @@ router = APIRouter(prefix="/trace", tags=["trace"])
 def _resolve_trace_tenant(request: Request) -> str:
     """Resolve the tenant for a /trace request.
 
-    Prefers the tenant already set by the auth middleware
-    (request.state.tenant_id) — that's how the rest of the app works
-    when API_AUTH_ENFORCE=true.  Falls back to the dashboard resolver
-    (Bearer / ?token= handling) so an explicit token still works from
-    tests or a widget context that talks straight to /trace.
+    Precedence:
+      1. Middleware-set request.state.tenant_id (normal tenant flow).
+      2. Signed admin session cookie (browser login flow — task #104).
+         When an admin session cookie is valid, the trace view is
+         treated as cross-tenant: returns the pseudo-tenant "admin".
+         The route body already uses skip_tenant_filter=True for its
+         reads, so this is safe — it just means the admin can view
+         any call, not just their own tenant's.
+      3. Dashboard resolver (Bearer / ?token= handling) for tests +
+         widget contexts.
     """
-    # Middleware-set tenant wins.
+    # 1. Middleware-set tenant wins.
     middleware_tenant = getattr(
         request.state, "tenant_id", None,
     )
     if middleware_tenant and middleware_tenant != "dev":
         return middleware_tenant
-    # Enforce is off (dev) OR middleware skipped this path — read the
-    # Bearer explicitly so tenant scoping is still meaningful.
+
+    # 2. Admin session cookie — unlocks cross-tenant view for the
+    # dashboard. Falls through cleanly if module import fails or
+    # no cookie is present.
+    try:
+        from app.routes.admin_login import verify_admin_session
+        if verify_admin_session(request) is not None:
+            return "admin"
+    except Exception:
+        pass
+
+    # 3. Fall back to the dashboard resolver.
     from app.routes.dashboard import _resolve_dashboard_tenant
     return _resolve_dashboard_tenant(request)
 
@@ -322,6 +337,11 @@ def _load_session_and_verify(
     )
     if sess is None:
         return None
+    # Task #104: admin session cookie unlocks cross-tenant view.
+    # `tenant_id == "admin"` is set by _resolve_trace_tenant when a
+    # valid admin cookie is present — bypass ownership check.
+    if tenant_id == "admin":
+        return sess
     if sess.tenant_id != tenant_id:
         # Ownership violation.  Return the same 404 shape as
         # session-not-found to avoid leaking existence.
