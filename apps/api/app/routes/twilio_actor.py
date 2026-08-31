@@ -638,6 +638,19 @@ class TwilioActorSession:
         # begin consuming inbound caller media immediately.  Tracked so
         # stop() can cancel on hangup.
         self._greeting_task: Optional[asyncio.Task] = None
+        # 2026-08-31 CALL-BUG-09: greeting was playing BEFORE Twilio's
+        # audio pipe to the caller was fully up. User reported "it also
+        # plays the greeting early before i can start hearing." Twilio
+        # documents that the WSS `start` event fires when the media
+        # stream is established SERVER-SIDE, but the carrier's audio
+        # path to the caller may take another 100-500ms to bring up.
+        # Cleanest signal: the first inbound `media` frame — that
+        # PROVES the caller is on the line and the bidirectional pipe
+        # is live. This Event fires from on_media() when the first real
+        # µ-law frame arrives; the greeting task awaits it (with a
+        # timeout fallback so a totally-silent caller still gets a
+        # greeting).
+        self._caller_media_arrived: asyncio.Event = asyncio.Event()
         # 2026-08-13 (P0-startup fix): rate-limit counter for Twilio
         # media-event debug logs — the first N frames per call get their
         # media.timestamp + wall-clock delta printed so we can prove the
@@ -1093,8 +1106,33 @@ class TwilioActorSession:
         # By spawning as a task we return immediately; on_media() sees
         # real frames continuously from t=0 and feeds DG in real time.
         # _greeting_task is tracked so stop() can cancel on hangup.
+        # 2026-08-31 CALL-BUG-09: wait for first inbound frame (proves
+        # bidirectional audio pipe is live) BEFORE speaking the
+        # greeting. 1.5s timeout fallback so a completely silent caller
+        # still hears the greeting instead of dead-air-forever.
+        async def _greet_when_pipe_ready():
+            try:
+                await asyncio.wait_for(
+                    self._caller_media_arrived.wait(),
+                    timeout=1.5,
+                )
+                log.info(
+                    "GREETING_PIPE_READY call=%s — first inbound frame received, speaking greeting now",
+                    self.call_id,
+                )
+            except asyncio.TimeoutError:
+                log.warning(
+                    "GREETING_PIPE_TIMEOUT call=%s — no inbound frame in 1.5s, greeting anyway (caller may hear truncated hello)",
+                    self.call_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.debug("greeting-gate errored", exc_info=True)
+            await self._speak(greeting)
+
         self._greeting_task = asyncio.create_task(
-            self._speak(greeting),
+            _greet_when_pipe_ready(),
             name=f"greeting-{self.call_id}",
         )
 
@@ -1544,6 +1582,12 @@ class TwilioActorSession:
         if self._silence_pump_task is not None and not self._silence_pump_task.done():
             self._silence_pump_task.cancel()
             self._silence_pump_task = None
+
+        # 2026-08-31 CALL-BUG-09: signal the greeting task that the
+        # audio pipe is up so it can start speaking. Idempotent — Event
+        # stays set for the rest of the call.
+        if not self._caller_media_arrived.is_set():
+            self._caller_media_arrived.set()
 
         # 2026-08-31 task #104-followup: tee inbound frame into the
         # recorder before we do anything else with it. sync + fast (< 1µs
