@@ -73,6 +73,13 @@ _VERTICAL_KEYTERMS: dict[str, tuple[str, ...]] = {
         # In production this list should be per-tenant from the business
         # profile's staff.  For now, boost the fixture names.
         "Whitfield", "Doctor Whitfield", "Chen", "Doctor Chen",
+        # 2026-08-31 CALL-BUG-17: common caller names our test caller
+        # (South Asian / Muslim) uses that Flux keeps mangling
+        # ("Abbas" → "a boss", "Syed" → "Seth", "Mohammad" → "mom on
+        # the bus"). Same per-tenant caller-name-hints future work,
+        # but boost the operator's own name here so demo calls work.
+        "Abbas", "Syed", "Mohammad", "Muhammad", "Ahmed", "Ali",
+        "my name is Abbas", "my name is Syed",
         "prophy", "prophylaxis",
         "crown", "crowns", "bridge", "veneer", "veneers",
         "root canal", "endodontic", "endo",
