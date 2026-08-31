@@ -1106,10 +1106,17 @@ class TwilioActorSession:
         # By spawning as a task we return immediately; on_media() sees
         # real frames continuously from t=0 and feeds DG in real time.
         # _greeting_task is tracked so stop() can cancel on hangup.
-        # 2026-08-31 CALL-BUG-09: wait for first inbound frame (proves
-        # bidirectional audio pipe is live) BEFORE speaking the
-        # greeting. 1.5s timeout fallback so a completely silent caller
-        # still hears the greeting instead of dead-air-forever.
+        # 2026-08-31 CALL-BUG-09 (v2): the greeting is TTS-cache-warmed
+        # at boot so _speak() returns cached µ-law bytes almost instantly.
+        # v1 fix (wait for first-inbound-frame) helped but wasn't enough
+        # — even after first frame, the CARRIER's PSTN audio path to the
+        # caller's ear takes another ~200-400ms to fully stabilize. User
+        # reported still only hearing "how can I help" — the first
+        # ~2 seconds got eaten. Real fix: gate on first frame AND then
+        # sleep a fixed lead-in so the caller's ear is definitely ready.
+        # Total: first frame + 600ms padding. Empirically this is where
+        # the carrier reliably has audio flowing back to the caller.
+        _GREETING_LEAD_IN_MS = 600
         async def _greet_when_pipe_ready():
             try:
                 await asyncio.wait_for(
@@ -1117,8 +1124,8 @@ class TwilioActorSession:
                     timeout=1.5,
                 )
                 log.info(
-                    "GREETING_PIPE_READY call=%s — first inbound frame received, speaking greeting now",
-                    self.call_id,
+                    "GREETING_PIPE_READY call=%s — first frame arrived, padding %dms before speak",
+                    self.call_id, _GREETING_LEAD_IN_MS,
                 )
             except asyncio.TimeoutError:
                 log.warning(
@@ -1129,6 +1136,13 @@ class TwilioActorSession:
                 raise
             except Exception:
                 log.debug("greeting-gate errored", exc_info=True)
+            # Post-first-frame padding so the carrier's PSTN audio to
+            # the caller's ear is definitely ready to receive our
+            # cached greeting bytes.
+            try:
+                await asyncio.sleep(_GREETING_LEAD_IN_MS / 1000.0)
+            except asyncio.CancelledError:
+                raise
             await self._speak(greeting)
 
         self._greeting_task = asyncio.create_task(
