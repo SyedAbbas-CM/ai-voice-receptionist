@@ -971,3 +971,109 @@ def build_sink_from_env(mode: str, settings, business=None) -> CRMSink:
     if len(sinks) == 1:
         return sinks[0]
     return CompositeSink(sinks)
+
+
+def build_sink_from_business(business) -> CRMSink:
+    """Construct a CRMSink from the tenant's business.integrations.
+
+    2026-09-01 GHL-wave-2: per-tenant sink construction. Reads
+    business.integrations.crm_sinks (a list like ['ghl', 'sheets'])
+    and the corresponding token fields. Every backend is independent —
+    unused ones' fields can be blank.
+
+    Empty crm_sinks list → NoopSink (nothing writes anywhere). This
+    is the correct default for a tenant that hasn't onboarded any
+    CRM yet.
+
+    Returns:
+      - NoopSink if crm_sinks is empty
+      - The single sink if only one is configured
+      - CompositeSink if multiple
+
+    Raises RuntimeError with a specific per-sink message if the sink
+    is listed but its required creds are missing (e.g. 'ghl' in list
+    but ghl_api_token is None).
+    """
+    integ = getattr(business, "integrations", None)
+    if integ is None or not getattr(integ, "crm_sinks", None):
+        return NoopSink()
+
+    sinks: list[CRMSink] = []
+    kinds = list(integ.crm_sinks)
+
+    if "ghl" in kinds:
+        if not integ.ghl_api_token:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: 'ghl' in "
+                f"crm_sinks but ghl_api_token is not set"
+            )
+        if not integ.ghl_location_id:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: 'ghl' in "
+                f"crm_sinks but ghl_location_id is not set"
+            )
+        from .ghl_client import GoHighLevelClient
+        client = GoHighLevelClient(
+            api_token=integ.ghl_api_token,
+            location_id=integ.ghl_location_id,
+            api_version=integ.ghl_api_version,
+            default_calendar_id=integ.ghl_calendar_id,
+        )
+        sinks.append(GHLSink(client, business=business))
+
+    if "hubspot" in kinds:
+        if not integ.hubspot_access_token:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: 'hubspot' "
+                f"in crm_sinks but hubspot_access_token is not set"
+            )
+        from .hubspot_client import HubSpotClient
+        client = HubSpotClient(
+            access_token=integ.hubspot_access_token,
+            portal_id=integ.hubspot_portal_id,
+            default_pipeline_id=integ.hubspot_pipeline_id,
+            default_stage_id=integ.hubspot_stage_id,
+            create_deals=integ.hubspot_create_deals,
+        )
+        sinks.append(HubSpotSink(client))
+
+    if "webhook" in kinds:
+        if not integ.webhook_url:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: 'webhook' "
+                f"in crm_sinks but webhook_url is not set"
+            )
+        if not integ.webhook_hmac_secret:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: 'webhook' "
+                f"in crm_sinks but webhook_hmac_secret is not set"
+            )
+        from .webhook_client import WebhookClient
+        client = WebhookClient(
+            url=integ.webhook_url,
+            secret=integ.webhook_hmac_secret,
+            source="voiceops-ai-agent",
+        )
+        sinks.append(WebhookSink(client))
+
+    if "sheets" in kinds:
+        if not integ.google_service_account_json:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: 'sheets' "
+                f"in crm_sinks but google_service_account_json is "
+                f"not set on tenant integrations"
+            )
+        # sheets needs a sheet id — not in Integrations yet. Fall back
+        # to global settings if the field is added later. For now,
+        # raise clearly so the operator adds the missing field.
+        raise NotImplementedError(
+            "sheets sink from business.integrations not yet wired — "
+            "add integrations.google_sheet_id to Integrations schema "
+            "when a tenant asks for it"
+        )
+
+    if not sinks:
+        return NoopSink()
+    if len(sinks) == 1:
+        return sinks[0]
+    return CompositeSink(sinks)

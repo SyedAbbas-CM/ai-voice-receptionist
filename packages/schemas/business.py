@@ -1,8 +1,51 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+class Integrations(BaseModel):
+    """Per-tenant integration configuration.
+
+    2026-09-01: added so onboarding a new client is 'pick backends +
+    paste tokens' rather than 'edit global env + restart.' Every
+    field is optional; unset backends fall through to safe defaults
+    (fake calendar, no sink). Removing a backend = clear the field.
+
+    Selection rules:
+      * calendar_backend picks ONE calendar (fake | google | ghl).
+      * crm_sinks is a LIST — combine multiple sinks: e.g. ['ghl',
+        'sheets'] fires both on every booking. Empty list = no sink.
+    """
+    # ─── Calendar backend ────────────────────────────────────────────
+    calendar_backend: Literal["fake", "google", "ghl"] = "fake"
+
+    # ─── CRM sinks (composite) ──────────────────────────────────────
+    crm_sinks: list[Literal["ghl", "hubspot", "sheets", "webhook"]] = Field(
+        default_factory=list
+    )
+
+    # ─── GHL creds (used by ghl calendar + ghl sink) ────────────────
+    ghl_api_token: Optional[str] = None
+    ghl_location_id: Optional[str] = None
+    ghl_calendar_id: Optional[str] = None
+    ghl_api_version: str = "2021-07-28"
+
+    # ─── HubSpot creds ─────────────────────────────────────────────
+    hubspot_access_token: Optional[str] = None
+    hubspot_portal_id: Optional[str] = None
+    hubspot_pipeline_id: Optional[str] = None
+    hubspot_stage_id: Optional[str] = None
+    hubspot_create_deals: bool = False
+
+    # ─── Google Calendar creds ─────────────────────────────────────
+    google_service_account_json: Optional[str] = None
+    google_calendar_id: Optional[str] = None
+
+    # ─── Generic outbound webhook (n8n / Make / Zapier target) ─────
+    webhook_url: Optional[str] = None
+    webhook_hmac_secret: Optional[str] = None
 
 
 class BusinessHours(BaseModel):
@@ -100,6 +143,12 @@ class BusinessProfile(BaseModel):
     # {service}, {when}. If unset, a default template is used.
     # Cap 320 chars (2 SMS segments) enforced at send time.
     sms_confirmation_template: Optional[str] = None
+
+    # 2026-09-01 GHL-wave-2: per-tenant integration config.
+    # Everything in `integrations` is optional — unset falls through
+    # to global env defaults (backward compatible). New clients
+    # onboarded via the admin UI populate this instead of env.
+    integrations: Integrations = Field(default_factory=Integrations)
 
     # Legal / compliance greeting toggles.  2026-08-10: switched default
     # to OFF.  With defaults ON the composed greeting was 7-15 sec of

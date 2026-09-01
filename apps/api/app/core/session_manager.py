@@ -50,12 +50,22 @@ def get_calendar():
 def get_sink():
     global _sink_cache
     if _sink_cache is None:
-        # 2026-08-31 GHL-SMS wave 1: pass business so per-tenant SMS
-        # flags (send_sms_on_booking, sms_confirmation_template) are
-        # honored.
-        _sink_cache = build_sink_from_env(
-            settings.crm_sink, settings, business=load_business(),
-        )
+        # 2026-09-01 GHL-wave-2 per-tenant integration config.
+        # Precedence: business.integrations.crm_sinks wins if set;
+        # falls back to global env `CRM_SINK` for backwards compat.
+        business = load_business()
+        integ = getattr(business, "integrations", None)
+        has_biz_sinks = bool(integ and getattr(integ, "crm_sinks", None))
+        if has_biz_sinks:
+            from packages.integrations.sinks import build_sink_from_business
+            _sink_cache = build_sink_from_business(business)
+        else:
+            # 2026-08-31 GHL-SMS wave 1: pass business so per-tenant SMS
+            # flags (send_sms_on_booking, sms_confirmation_template)
+            # are honored on the env path too.
+            _sink_cache = build_sink_from_env(
+                settings.crm_sink, settings, business=business,
+            )
     return _sink_cache
 
 
