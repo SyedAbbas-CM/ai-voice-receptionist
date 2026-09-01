@@ -33,9 +33,11 @@ import asyncio
 import html
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -107,6 +109,60 @@ def _redact_secret(value: Optional[str], kind: str = "generic") -> str:
     if kind == "ghl_token" and value.startswith("pit-"):
         return "pit-…set"
     return "…set"
+
+
+def _require_same_origin(request: Request) -> None:
+    """2026-09-01 security-review fix: defence-in-depth CSRF guard.
+
+    Admin session cookie is SameSite=Lax which alone blocks the
+    common cross-site POST exploit vectors. This adds Origin/Referer
+    validation as a second layer: reject any POST whose Origin
+    (or Referer if Origin missing) doesn't match the request's own
+    host. Blocks the residual attack surface (subdomain takeovers,
+    malicious pages hosted on same eTLD+1 where SameSite=Lax
+    doesn't strictly apply, HTTP/2 push shenanigans).
+
+    Cheaper than a token flow AND catches the class the auditor
+    flagged.
+    """
+    origin = request.headers.get("origin") or ""
+    referer = request.headers.get("referer") or ""
+    # Reconstruct our own scheme://host from the incoming request
+    # (respect X-Forwarded-Proto since we're behind nginx on Lightsail).
+    fwd_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    fwd_host = request.headers.get("host") or request.url.hostname or ""
+    our_origin = f"{fwd_proto}://{fwd_host}"
+
+    check_source = origin if origin else referer
+    if not check_source:
+        # No Origin AND no Referer — some ancient clients don't send
+        # either, but modern browsers always do. Refuse for admin
+        # POSTs; safer than allowing an unmarked request.
+        raise HTTPException(
+            403,
+            "CSRF check failed: request has neither Origin nor Referer header",
+        )
+
+    try:
+        parsed = urlparse(check_source)
+        source_origin = f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        raise HTTPException(403, "CSRF check failed: unparseable Origin/Referer")
+
+    if source_origin != our_origin:
+        # Common case: request came from the app itself (e.g. redirect
+        # after login). Log at INFO not warn — real attacks are rare
+        # and the log helps diagnose legitimate cross-origin (dev
+        # tunneling, etc.) as much as attacks.
+        log.info(
+            "CSRF_REJECT admin-tenants source_origin=%r our_origin=%r path=%s",
+            source_origin, our_origin, request.url.path,
+        )
+        raise HTTPException(
+            403,
+            f"CSRF check failed: request origin {source_origin!r} does "
+            f"not match server origin {our_origin!r}",
+        )
 
 
 def _invalidate_caches() -> None:
@@ -332,6 +388,7 @@ document.querySelectorAll('.test-btn').forEach(btn => {{
 @router.post("/{slug}/integrations")
 async def save_integrations(slug: str, request: Request):
     _require_admin(request)
+    _require_same_origin(request)
     biz, raw, path = _load_tenant(slug)
     form = await request.form()
 
@@ -382,10 +439,39 @@ async def save_integrations(slug: str, request: Request):
     except Exception as e:
         raise HTTPException(400, f"validation failed: {e}")
 
-    # Atomic write — write to temp then rename
+    # 2026-09-01 security-review fix: business.json contains secrets
+    # (GHL PIT, HubSpot PAT, Google SA JSON path, webhook HMAC).
+    # Write with owner-only permissions (0o600) and lock the parent
+    # dir to 0o700 so other users on the box can't read the file
+    # even between the temp-write and the atomic rename.
     tmp_path = path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(new_biz_dict, indent=2))
+    payload = json.dumps(new_biz_dict, indent=2)
+    # Create with restrictive mode from the start — never write with
+    # umask-default mode and chmod after.
+    fd = os.open(
+        str(tmp_path),
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+    except Exception:
+        # If we opened but write failed, best-effort remove the
+        # partial temp so a rerun doesn't hit a truncated file
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+        raise
     tmp_path.replace(path)
+    # Explicitly re-apply after rename (replace() preserves mode on
+    # POSIX but be paranoid on non-POSIX filesystems).
+    try:
+        os.chmod(path, 0o600)
+        os.chmod(path.parent, 0o700)
+    except Exception:
+        log.warning("chmod tighten failed for %s (may be non-POSIX FS)", path)
 
     _invalidate_caches()
 
@@ -403,6 +489,7 @@ async def test_backend(
     slug: str, backend: str, request: Request,
 ) -> JSONResponse:
     _require_admin(request)
+    _require_same_origin(request)
     biz, _raw, _path = _load_tenant(slug)
     form = await request.form()
 
