@@ -479,20 +479,36 @@ class TwilioActorSession:
         # is false (default false — set to true on prod). Wrapped in a
         # try to keep the call alive if the recording package can't load.
         self.recorder = None
-        try:
-            if getattr(settings, "call_recording_enabled", False):
+        # 2026-09-01 CALL-BUG-20: dashboard 404s on every /admin/recordings/*.mp3
+        # suggest the recorder is silently disabled. Log INIT explicitly
+        # so we can see enabled/disabled/error on every call.
+        _rec_enabled = getattr(settings, "call_recording_enabled", False)
+        _rec_dir = getattr(settings, "call_recording_dir", "data/recordings")
+        if not _rec_enabled:
+            log.info(
+                "RECORDER_INIT_SKIP call=%s reason=call_recording_enabled=False",
+                self.call_id,
+            )
+        else:
+            try:
                 from packages.recording import AudioRecorder
                 from pathlib import Path as _Path
+                _root = _Path(_rec_dir).resolve()
                 self.recorder = AudioRecorder(
                     call_id=self.call_id,
                     tenant_id=self.tenant_id,
-                    root_dir=_Path(
-                        getattr(settings, "call_recording_dir", "data/recordings")
-                    ),
+                    root_dir=_root,
                 )
-        except Exception as _e:
-            log.warning("recorder init failed for %s: %s", self.call_id, _e)
-            self.recorder = None
+                log.info(
+                    "RECORDER_INIT_OK call=%s tenant=%s root=%s",
+                    self.call_id, self.tenant_id, _root,
+                )
+            except Exception as _e:
+                log.warning(
+                    "RECORDER_INIT_FAILED call=%s error=%r",
+                    self.call_id, _e, exc_info=True,
+                )
+                self.recorder = None
 
         # VAD-based utterance framing (unchanged from legacy path)
         self._buffer = bytearray()
