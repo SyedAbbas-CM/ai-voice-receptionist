@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.db.session import init_db
-from app.routes import admin, admin_login, annotate, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, recordings, sessions, signalwire, telnyx, trace, twilio, vapi, voice
+from app.routes import admin, admin_login, admin_tenants, annotate, channels, chat, dashboard, debug, elevenlabs_compat, incident, outbound, plivo, recordings, sessions, signalwire, telnyx, trace, twilio, vapi, voice
 from packages.observability.structured_log import maybe_install as maybe_install_json_logs
 
 
@@ -178,6 +178,11 @@ def create_app() -> FastAPI:
     # 2026-08-31 task #104-followup: /admin/recordings/{call_id}.mp3
     # serves the stereo MP3 written by AudioRecorder. Admin-gated.
     app.include_router(recordings.router)
+    # 2026-09-01 GHL-wave-2 (part D): /admin/tenants — per-tenant
+    # integration config UI. Lists every sample-data/*/business.json,
+    # edit form for BusinessProfile.integrations, live-test buttons
+    # for each backend's creds. Admin-gated.
+    app.include_router(admin_tenants.router)
     app.include_router(dashboard.router)
     # 2026-08-29 (humanness debugging + traceability):
     # /trace/{call_id} — tenant-scoped humanness trace view.  Reads
