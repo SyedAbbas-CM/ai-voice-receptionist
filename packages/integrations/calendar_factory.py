@@ -61,9 +61,26 @@ def build_calendar(backend: str, settings, business=None):
             calendar_id=settings.google_calendar_id,
         )
     elif backend == "ghl":
-        raise NotImplementedError(
-            "GHL calendar as primary booking backend not yet wired — "
-            "use ghl sink for logging and fake/google for slot selection"
+        # 2026-09-01 GHL-wave-2 (part C): activated. Reads free-slots
+        # + writes bookings directly to GHL calendar. No outbox
+        # needed — GHL is the source of truth in this mode.
+        if not settings.ghl_api_token or not settings.ghl_location_id:
+            raise RuntimeError(
+                "ghl calendar backend needs GHL_API_TOKEN and "
+                "GHL_LOCATION_ID (env) or business.integrations.ghl_* "
+                "fields set"
+            )
+        from .ghl_client import GoHighLevelClient
+        from .ghl_calendar import GHLCalendar
+        client = GoHighLevelClient(
+            api_token=settings.ghl_api_token,
+            location_id=settings.ghl_location_id,
+            api_version=settings.ghl_api_version,
+            default_calendar_id=settings.ghl_calendar_id,
+        )
+        return GHLCalendar(
+            client=client,
+            calendar_id=settings.ghl_calendar_id,
         )
     else:
         raise ValueError(f"unknown calendar backend: {backend}")
@@ -87,4 +104,86 @@ def build_calendar(backend: str, settings, business=None):
         local=local,
         outbox_path=outbox_path,
         remote_factory=make_google_remote_factory(settings),
+    )
+
+
+def build_calendar_from_business(business, settings=None):
+    """Construct a calendar from `business.integrations`.
+
+    2026-09-01 GHL-wave-2 (part C): mirrors build_sink_from_business.
+    Reads business.integrations.calendar_backend and the corresponding
+    creds. Fallback: if the field is unset, defer to `build_calendar`
+    with the global env settings so nothing changes for tenants that
+    haven't opted into per-tenant config.
+
+    Backends supported:
+      * 'fake' — local JSON, honours business.hours
+      * 'google' — uses integrations.google_service_account_json +
+                   integrations.google_calendar_id
+      * 'ghl'    — uses integrations.ghl_api_token +
+                   integrations.ghl_location_id +
+                   integrations.ghl_calendar_id (required for GHL cal)
+    """
+    integ = getattr(business, "integrations", None)
+    backend = (
+        getattr(integ, "calendar_backend", None) if integ else None
+    ) or "fake"
+    backend = backend.lower().strip()
+
+    if backend == "fake":
+        from .fake_calendar import FakeCalendar
+        hours = getattr(business, "hours", None)
+        # Path — reuse settings.calendar_path (per-tenant path is
+        # future work; for MVP one calendar file per prod install)
+        cal_path = (
+            getattr(settings, "calendar_path", None) if settings
+            else None
+        ) or "data/calendar.json"
+        return FakeCalendar(cal_path, hours=hours)
+
+    if backend == "google":
+        if not integ or not integ.google_service_account_json or not integ.google_calendar_id:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: "
+                f"calendar_backend='google' but "
+                f"integrations.google_service_account_json or "
+                f"integrations.google_calendar_id is not set"
+            )
+        from .google_calendar import GoogleCalendar
+        return GoogleCalendar(
+            service_account_json_path=integ.google_service_account_json,
+            calendar_id=integ.google_calendar_id,
+        )
+
+    if backend == "ghl":
+        if not integ or not integ.ghl_api_token or not integ.ghl_location_id:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: "
+                f"calendar_backend='ghl' but "
+                f"integrations.ghl_api_token or "
+                f"integrations.ghl_location_id is not set"
+            )
+        if not integ.ghl_calendar_id:
+            raise RuntimeError(
+                f"business {getattr(business, 'id', '?')}: "
+                f"calendar_backend='ghl' also needs "
+                f"integrations.ghl_calendar_id (find in GHL: Settings "
+                f"→ Calendars → click your calendar → copy from URL)"
+            )
+        from .ghl_client import GoHighLevelClient
+        from .ghl_calendar import GHLCalendar
+        client = GoHighLevelClient(
+            api_token=integ.ghl_api_token,
+            location_id=integ.ghl_location_id,
+            api_version=integ.ghl_api_version,
+            default_calendar_id=integ.ghl_calendar_id,
+        )
+        return GHLCalendar(
+            client=client,
+            calendar_id=integ.ghl_calendar_id,
+        )
+
+    raise ValueError(
+        f"business {getattr(business, 'id', '?')}: unknown "
+        f"calendar_backend={backend!r}"
     )

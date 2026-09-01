@@ -39,11 +39,28 @@ def load_business() -> BusinessProfile:
 def get_calendar():
     global _calendar_cache
     if _calendar_cache is None:
-        # Audit-3 fix: pass the business so FakeCalendar honours
-        # BusinessProfile.hours instead of hardcoded 9-5.
-        _calendar_cache = build_calendar(
-            settings.calendar_backend, settings, business=load_business(),
-        )
+        # 2026-09-01 GHL-wave-2: prefer per-tenant integrations
+        # config over global env when the business has explicitly
+        # set integrations.calendar_backend to something other than
+        # the default 'fake'. Falls back to env for legacy tenants.
+        business = load_business()
+        integ = getattr(business, "integrations", None)
+        # 'fake' is the default so a tenant that never set it should
+        # still go through the env path (which honours the outbox +
+        # global calendar_path). Only non-'fake' explicit choices
+        # take the per-tenant route.
+        biz_backend = getattr(integ, "calendar_backend", "fake") if integ else "fake"
+        if biz_backend and biz_backend != "fake":
+            from packages.integrations.calendar_factory import (
+                build_calendar_from_business,
+            )
+            _calendar_cache = build_calendar_from_business(business, settings)
+        else:
+            # Audit-3 fix: pass the business so FakeCalendar honours
+            # BusinessProfile.hours instead of hardcoded 9-5.
+            _calendar_cache = build_calendar(
+                settings.calendar_backend, settings, business=business,
+            )
     return _calendar_cache
 
 
